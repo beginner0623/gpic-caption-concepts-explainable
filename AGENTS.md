@@ -126,6 +126,74 @@ Use this description:
 
 > an explainable caption-to-concept baseline with documented limitations
 
+## Karpathy Guidelines
+
+These behavioral guidelines reduce common LLM coding mistakes. They bias toward
+caution over speed; for trivial tasks, use judgment.
+
+### 1. Think Before Coding
+
+Do not assume. Do not hide confusion. Surface tradeoffs.
+
+Before implementing:
+
+- state assumptions explicitly
+- if uncertain, ask
+- if multiple interpretations exist, present them rather than picking silently
+- if a simpler approach exists, say so
+- push back when warranted
+- if something is unclear, stop, name what is confusing, and ask
+
+### 2. Simplicity First
+
+Write the minimum code that solves the problem. Do nothing speculative.
+
+- no features beyond what was asked
+- no abstractions for single-use code
+- no flexibility or configurability that was not requested
+- no error handling for impossible scenarios
+- if 200 lines could be 50, rewrite it
+- ask whether a senior engineer would call the solution overcomplicated; if yes,
+  simplify it
+
+### 3. Surgical Changes
+
+Touch only what is necessary. Clean up only the mess created by the current
+change.
+
+When editing existing code:
+
+- do not improve adjacent code, comments, or formatting
+- do not refactor things that are not broken
+- match existing style, even if a different style would be preferable
+- if unrelated dead code is noticed, mention it rather than deleting it
+
+When the current change creates orphans:
+
+- remove imports, variables, or functions made unused by the current change
+- do not remove pre-existing dead code unless asked
+
+Every changed line must trace directly to the user's request.
+
+### 4. Goal-Driven Execution
+
+Define success criteria and loop until verified.
+
+Transform tasks into verifiable goals:
+
+- "Add validation" means write tests for invalid inputs, then make them pass.
+- "Fix the bug" means write a test that reproduces it, then make it pass.
+- "Refactor X" means ensure tests pass before and after.
+
+For multi-step tasks, state a brief plan:
+
+1. Step -> verify: check.
+2. Step -> verify: check.
+3. Step -> verify: check.
+
+Strong success criteria allow independent progress. Weak criteria, such as
+"make it work", require clarification.
+
 ## Evidence-Gated Answer Protocol
 
 Follow `docs/answer_protocol.md` for any non-trivial explanation, especially
