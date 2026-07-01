@@ -4,8 +4,16 @@ import unittest
 
 from gpic_concepts_v1.io_jsonl import iter_jsonl, write_jsonl
 from gpic_concepts_v1.stage4_extract_raw import (
+    extract_raw_concepts_from_doc,
     extract_raw_concepts_from_stage3_record,
     run_stage4_extract_raw,
+)
+from gpic_concepts_v1.stage3_annotate import (
+    DEFAULT_STAGE3_MODEL,
+    iter_annotated_docs_from_rows,
+    iter_stage3_records_from_rows,
+    make_stage3_nlp,
+    spacy,
 )
 
 
@@ -195,6 +203,59 @@ class Stage4ExtractRawTest(unittest.TestCase):
             self.assertEqual(len(list(iter_jsonl(raw_mentions_path))), 2)
             self.assertEqual(len(list(iter_jsonl(raw_edges_path))), 1)
             self.assertEqual(list(iter_jsonl(summary_path))[0]["raw_mention_total"], 2)
+
+
+def can_load_trf_model() -> bool:
+    if spacy is None:
+        return False
+    try:
+        spacy.load(DEFAULT_STAGE3_MODEL, disable=["ner"])
+    except OSError:
+        return False
+    return True
+
+
+@unittest.skipUnless(can_load_trf_model(), "en_core_web_trf is not installed")
+class Stage4DocDirectExtractionTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.nlp = make_stage3_nlp()
+
+    def test_doc_direct_path_matches_stage3_record_path(self) -> None:
+        rows = [
+            {
+                "key": "k-doc-direct",
+                "caption": "A brown dog sits on a wooden bench.",
+                "caption_type": "short",
+            }
+        ]
+
+        stage3_record = next(
+            iter_stage3_records_from_rows(
+                rows,
+                nlp=self.nlp,
+                batch_size=1,
+            )
+        )
+        annotated = next(
+            iter_annotated_docs_from_rows(
+                rows,
+                nlp=self.nlp,
+                batch_size=1,
+            )
+        )
+
+        record_result = extract_raw_concepts_from_stage3_record(stage3_record.to_dict())
+        doc_result = extract_raw_concepts_from_doc(annotated.caption_id, annotated.doc)
+
+        self.assertEqual(
+            [mention.to_dict() for mention in doc_result.raw_mentions],
+            [mention.to_dict() for mention in record_result.raw_mentions],
+        )
+        self.assertEqual(
+            [edge.to_dict() for edge in doc_result.raw_edges],
+            [edge.to_dict() for edge in record_result.raw_edges],
+        )
 
 
 def _edge_sig(edges: list[dict[str, object]]) -> set[tuple[object, object, object]]:

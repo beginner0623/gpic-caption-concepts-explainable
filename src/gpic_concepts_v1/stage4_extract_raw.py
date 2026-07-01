@@ -15,6 +15,12 @@ from typing import Any
 from gpic_concepts_v1.io_jsonl import iter_jsonl, write_jsonl
 from gpic_concepts_v1.schema import JsonObject, RawEdge, RawMention, make_local_id
 
+try:  # pragma: no cover - exercised when spaCy is installed.
+    from spacy.tokens import Doc, Token
+except ModuleNotFoundError:  # pragma: no cover - keeps non-spaCy tests importable.
+    Doc = Any  # type: ignore[misc,assignment]
+    Token = Any  # type: ignore[misc,assignment]
+
 
 OBJECT_RULE_ID = "R12"
 ATTRIBUTE_RULE_ID = "R13"
@@ -137,6 +143,30 @@ def extract_raw_concepts_from_stage3_record(
     )
 
 
+def extract_raw_concepts_from_doc(caption_id: str, doc: Doc) -> RawExtractionResult:
+    """Extract raw mentions and edges directly from an annotated spaCy Doc."""
+    builder = _RawBuilder(caption_id)
+    children_by_head = _build_doc_children_by_head(doc)
+
+    _extract_doc_objects_and_chunk_modifiers(builder, doc=doc)
+    _extract_doc_actions(builder, doc=doc)
+    _extract_doc_event_roles(
+        builder,
+        doc=doc,
+        children_by_head=children_by_head,
+    )
+    _extract_doc_relations(
+        builder,
+        doc=doc,
+        children_by_head=children_by_head,
+    )
+
+    return RawExtractionResult(
+        raw_mentions=builder.raw_mentions,
+        raw_edges=builder.raw_edges,
+    )
+
+
 def run_stage4_extract_raw(
     input_path: str | Path,
     *,
@@ -176,6 +206,174 @@ def run_stage4_extract_raw(
     if summary_path is not None:
         write_jsonl(summary_path, [summary])
     return summary
+
+
+def _extract_doc_objects_and_chunk_modifiers(
+    builder: _RawBuilder,
+    *,
+    doc: Doc,
+) -> None:
+    for chunk in doc.noun_chunks:
+        root = chunk.root
+        root_i = root.i
+        if root_i in builder.object_by_token:
+            continue
+
+        object_id = builder.add_mention(
+            mention_type="object",
+            text=root.text,
+            lemma=_doc_token_lemma(root),
+            rule_id=OBJECT_RULE_ID,
+            char_start=root.idx,
+            char_end=root.idx + len(root.text),
+            token_start=root_i,
+            token_end=root_i + 1,
+            source_text=chunk.text,
+            source_detail=_doc_chunk_root_detail(chunk),
+        )
+        builder.object_by_token[root_i] = object_id
+
+        for token in chunk:
+            token_i = token.i
+            if token_i == root_i:
+                continue
+            if _is_doc_quantity_modifier(token):
+                quantity_id = builder.add_mention(
+                    mention_type="quantity",
+                    text=token.text,
+                    lemma=_doc_token_lemma(token),
+                    rule_id=QUANTITY_RULE_ID,
+                    char_start=token.idx,
+                    char_end=token.idx + len(token.text),
+                    token_start=token_i,
+                    token_end=token_i + 1,
+                    source_text=chunk.text,
+                    source_detail=_doc_modifier_detail(token, root_i),
+                )
+                builder.add_edge(
+                    edge_type="has_quantity",
+                    source_mention_id=object_id,
+                    target_mention_id=quantity_id,
+                    label="has_quantity",
+                    rule_id=QUANTITY_RULE_ID,
+                    evidence_text=chunk.text,
+                    source_detail={"root_i": root_i, "modifier_i": token_i},
+                )
+            elif _is_doc_attribute_modifier(token):
+                attribute_id = builder.add_mention(
+                    mention_type="attribute",
+                    text=token.text,
+                    lemma=_doc_token_lemma(token),
+                    rule_id=ATTRIBUTE_RULE_ID,
+                    char_start=token.idx,
+                    char_end=token.idx + len(token.text),
+                    token_start=token_i,
+                    token_end=token_i + 1,
+                    source_text=chunk.text,
+                    source_detail=_doc_modifier_detail(token, root_i),
+                )
+                builder.add_edge(
+                    edge_type="has_attribute",
+                    source_mention_id=object_id,
+                    target_mention_id=attribute_id,
+                    label="has_attribute",
+                    rule_id=ATTRIBUTE_RULE_ID,
+                    evidence_text=chunk.text,
+                    source_detail={"root_i": root_i, "modifier_i": token_i},
+                )
+
+
+def _extract_doc_actions(
+    builder: _RawBuilder,
+    *,
+    doc: Doc,
+) -> None:
+    for token in doc:
+        if token.pos_ != "VERB":
+            continue
+        action_id = builder.add_mention(
+            mention_type="action",
+            text=token.text,
+            lemma=_doc_token_lemma(token),
+            rule_id=ACTION_RULE_ID,
+            char_start=token.idx,
+            char_end=token.idx + len(token.text),
+            token_start=token.i,
+            token_end=token.i + 1,
+            source_text=token.text,
+            source_detail=_doc_token_detail(token),
+        )
+        builder.action_by_token[token.i] = action_id
+
+
+def _extract_doc_event_roles(
+    builder: _RawBuilder,
+    *,
+    doc: Doc,
+    children_by_head: Mapping[int, Sequence[Token]],
+) -> None:
+    for token in doc:
+        action_id = builder.action_by_token.get(token.i)
+        if action_id is None:
+            continue
+        for child in children_by_head.get(token.i, ()):
+            target_id = builder.object_by_token.get(child.i)
+            if target_id is None:
+                continue
+            if child.dep_ == "nsubj":
+                builder.add_edge(
+                    edge_type="event_role",
+                    source_mention_id=action_id,
+                    target_mention_id=target_id,
+                    label="agent",
+                    rule_id=AGENT_RULE_ID,
+                    evidence_text=f"{child.text} -> {token.text}",
+                    source_detail={"dep": child.dep_, "action_i": token.i, "target_i": child.i},
+                )
+            elif child.dep_ in PATIENT_DEPS:
+                builder.add_edge(
+                    edge_type="event_role",
+                    source_mention_id=action_id,
+                    target_mention_id=target_id,
+                    label="patient",
+                    rule_id=PATIENT_RULE_ID,
+                    evidence_text=f"{token.text} -> {child.text}",
+                    source_detail={"dep": child.dep_, "action_i": token.i, "target_i": child.i},
+                )
+
+
+def _extract_doc_relations(
+    builder: _RawBuilder,
+    *,
+    doc: Doc,
+    children_by_head: Mapping[int, Sequence[Token]],
+) -> None:
+    for token in doc:
+        if token.pos_ != "ADP":
+            continue
+        source_id = builder.object_by_token.get(token.head.i)
+        if source_id is None:
+            continue
+        for child in children_by_head.get(token.i, ()):
+            if child.dep_ != "pobj":
+                continue
+            target_id = builder.object_by_token.get(child.i)
+            if target_id is None:
+                continue
+            builder.add_edge(
+                edge_type="relation",
+                source_mention_id=source_id,
+                target_mention_id=target_id,
+                label=_doc_token_lemma(token),
+                rule_id=RELATION_RULE_ID,
+                evidence_text=f"{token.text} -> {child.text}",
+                source_detail={
+                    "prep_i": token.i,
+                    "source_i": token.head.i,
+                    "target_i": child.i,
+                    "target_dep": "pobj",
+                },
+            )
 
 
 def _extract_objects_and_chunk_modifiers(
@@ -365,6 +563,14 @@ def _build_children_by_head(
     return children_by_head
 
 
+def _build_doc_children_by_head(doc: Doc) -> dict[int, list[Token]]:
+    children_by_head: dict[int, list[Token]] = defaultdict(list)
+    for token in doc:
+        if token.i != token.head.i:
+            children_by_head[token.head.i].append(token)
+    return children_by_head
+
+
 def _chunk_tokens(
     chunk: Mapping[str, Any],
     token_by_i: Mapping[int, Mapping[str, Any]],
@@ -383,6 +589,14 @@ def _is_quantity_modifier(token: Mapping[str, Any]) -> bool:
         _optional_text(token, "dep") in QUANTITY_MODIFIER_DEPS
         or _optional_text(token, "pos") == "NUM"
     )
+
+
+def _is_doc_attribute_modifier(token: Token) -> bool:
+    return token.dep_ in ATTRIBUTE_MODIFIER_DEPS
+
+
+def _is_doc_quantity_modifier(token: Token) -> bool:
+    return token.dep_ in QUANTITY_MODIFIER_DEPS or token.pos_ == "NUM"
 
 
 def _chunk_root_detail(chunk: Mapping[str, Any]) -> JsonObject:
@@ -413,6 +627,34 @@ def _token_detail(token: Mapping[str, Any]) -> JsonObject:
     }
 
 
+def _doc_chunk_root_detail(chunk: Any) -> JsonObject:
+    return {
+        "root_i": chunk.root.i,
+        "root_pos": chunk.root.pos_,
+        "root_tag": chunk.root.tag_,
+        "root_dep": chunk.root.dep_,
+        "root_head_i": chunk.root.head.i,
+        "root_head_text": chunk.root.head.text,
+    }
+
+
+def _doc_modifier_detail(token: Token, root_i: int) -> JsonObject:
+    detail = _doc_token_detail(token)
+    detail["root_i"] = root_i
+    return detail
+
+
+def _doc_token_detail(token: Token) -> JsonObject:
+    return {
+        "i": token.i,
+        "pos": token.pos_,
+        "tag": token.tag_,
+        "dep": token.dep_,
+        "head_i": token.head.i,
+        "head_text": token.head.text,
+    }
+
+
 def _token_text(token: Mapping[str, Any]) -> str:
     value = _optional_text(token, "text")
     if value is None or value == "":
@@ -428,6 +670,12 @@ def _token_lemma(token: Mapping[str, Any]) -> str:
     if lower:
         return lower
     return _token_text(token).lower()
+
+
+def _doc_token_lemma(token: Token) -> str:
+    if token.lemma_:
+        return token.lemma_
+    return token.text.lower()
 
 
 def _require_text(record: Mapping[str, Any], key: str) -> str:

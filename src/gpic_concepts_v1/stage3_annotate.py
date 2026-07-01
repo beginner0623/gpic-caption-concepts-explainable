@@ -77,6 +77,18 @@ class _PreparedStage3Doc:
     meta: JsonObject
 
 
+@dataclass(slots=True)
+class AnnotatedStage3Doc:
+    """Annotated spaCy Doc plus the Stage 1/2 metadata needed by fast runners."""
+
+    caption_id: str
+    caption: str
+    doc: Doc
+    protected_spans: list[ProtectedSpanRecord]
+    rule_ids: list[str]
+    meta: JsonObject
+
+
 def register_object_mwe_pos_corrector() -> None:
     """Register R7 as a spaCy component once per Python process."""
     if spacy is None:
@@ -238,6 +250,58 @@ def iter_stage3_records_from_rows(
             strict=True,
         ):
             yield _stage3_record_from_doc(prepared, doc, nlp=nlp)
+
+    for index, row in enumerate(rows):
+        if limit is not None and index >= limit:
+            break
+        caption_record = make_caption_record_from_gpic_row(row)
+        if caption_record.skipped or caption_record.caption_shape != "sentence":
+            raise Stage2InputError("Stage 3 only accepts sentence captions")
+        pending.append(
+            _prepare_stage3_doc(
+                caption_id=caption_record.caption_id,
+                caption=caption_record.caption,
+                nlp=nlp,
+                object_mwes=object_mwes,
+                meta=caption_record.meta,
+            )
+        )
+        if len(pending) >= batch_size:
+            yield from flush_pending()
+            pending.clear()
+
+    if pending:
+        yield from flush_pending()
+
+
+def iter_annotated_docs_from_rows(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    nlp: Language,
+    object_mwes: Sequence[ObjectMweEntry] = (),
+    batch_size: int = DEFAULT_STAGE3_BATCH_SIZE,
+    limit: int | None = None,
+) -> Iterator[AnnotatedStage3Doc]:
+    """Yield annotated spaCy Docs without serializing the Stage 3 evidence table."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be greater than zero")
+    pending: list[_PreparedStage3Doc] = []
+
+    def flush_pending() -> Iterator[AnnotatedStage3Doc]:
+        docs = [item.doc for item in pending]
+        for prepared, doc in zip(
+            pending,
+            nlp.pipe(docs, batch_size=batch_size),
+            strict=True,
+        ):
+            yield AnnotatedStage3Doc(
+                caption_id=prepared.caption_id,
+                caption=prepared.caption,
+                doc=doc,
+                protected_spans=prepared.protected_spans,
+                rule_ids=prepared.stage2_rule_ids + _stage3_rule_ids(prepared.protected_spans),
+                meta=dict(prepared.meta),
+            )
 
     for index, row in enumerate(rows):
         if limit is not None and index >= limit:

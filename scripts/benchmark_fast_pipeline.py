@@ -16,10 +16,14 @@ from gpic_concepts_v1.stage2_preprocess import load_object_mwes
 from gpic_concepts_v1.stage3_annotate import (
     DEFAULT_STAGE3_BATCH_SIZE,
     DEFAULT_STAGE3_MODEL,
+    iter_annotated_docs_from_rows,
     iter_stage3_records_from_rows,
     make_stage3_nlp,
 )
-from gpic_concepts_v1.stage4_extract_raw import extract_raw_concepts_from_stage3_record
+from gpic_concepts_v1.stage4_extract_raw import (
+    extract_raw_concepts_from_doc,
+    extract_raw_concepts_from_stage3_record,
+)
 from gpic_concepts_v1.stage5_canonicalize import (
     canonicalize_raw_graph,
     load_stage5_lexicons,
@@ -65,6 +69,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="Optional maximum number of sentence rows to process.",
     )
+    parser.add_argument(
+        "--raw-extraction-mode",
+        choices=("stage3-record", "doc-direct"),
+        default="stage3-record",
+        help=(
+            "stage3-record preserves the original Stage 3 evidence-table round trip. "
+            "doc-direct applies the same Stage 4 rules directly to annotated spaCy Docs."
+        ),
+    )
     gpu_group = parser.add_mutually_exclusive_group()
     gpu_group.add_argument(
         "--prefer-gpu",
@@ -93,17 +106,30 @@ def main() -> None:
     raw_mentions = []
     raw_edges = []
     sentence_count = 0
-    for stage3_record in iter_stage3_records_from_rows(
-        iter_jsonl(args.input),
-        nlp=nlp,
-        object_mwes=object_mwes,
-        batch_size=args.batch_size,
-        limit=args.limit,
-    ):
-        sentence_count += 1
-        result = extract_raw_concepts_from_stage3_record(stage3_record.to_dict())
-        raw_mentions.extend(result.raw_mentions)
-        raw_edges.extend(result.raw_edges)
+    if args.raw_extraction_mode == "doc-direct":
+        for annotated in iter_annotated_docs_from_rows(
+            iter_jsonl(args.input),
+            nlp=nlp,
+            object_mwes=object_mwes,
+            batch_size=args.batch_size,
+            limit=args.limit,
+        ):
+            sentence_count += 1
+            result = extract_raw_concepts_from_doc(annotated.caption_id, annotated.doc)
+            raw_mentions.extend(result.raw_mentions)
+            raw_edges.extend(result.raw_edges)
+    else:
+        for stage3_record in iter_stage3_records_from_rows(
+            iter_jsonl(args.input),
+            nlp=nlp,
+            object_mwes=object_mwes,
+            batch_size=args.batch_size,
+            limit=args.limit,
+        ):
+            sentence_count += 1
+            result = extract_raw_concepts_from_stage3_record(stage3_record.to_dict())
+            raw_mentions.extend(result.raw_mentions)
+            raw_edges.extend(result.raw_edges)
     stage3_stage4_seconds = perf_counter() - stage3_stage4_start
 
     stage5_start = perf_counter()
@@ -129,6 +155,7 @@ def main() -> None:
         "sentence_count": sentence_count,
         "model": args.model,
         "batch_size": args.batch_size,
+        "raw_extraction_mode": args.raw_extraction_mode,
         "gpu_mode": nlp.meta.get("gpic_gpu_mode", gpu_mode),
         "gpu_enabled": bool(nlp.meta.get("gpic_gpu_enabled", False)),
         "object_mwe_lexicon_size": len(object_mwes),
