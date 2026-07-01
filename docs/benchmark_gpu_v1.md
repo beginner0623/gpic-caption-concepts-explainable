@@ -57,19 +57,21 @@ outputs\benchmark_speed_inprocess\sentence_rows_x10.jsonl
 | 128 | 144.11 | 112.49 | 5.48 | 7.02 |
 | 256 | 146.77 | 113.62 | 5.38 | 6.95 |
 | 512 | 146.78 | 115.34 | 5.38 | 6.85 |
+| 1024 | 172.03 | 130.06 | 4.59 | 6.07 |
+| 2048 | 149.64 | 115.75 | 5.28 | 6.82 |
 
 ## 현재 결론
 
-현재 로컬 RTX 5080 Laptop GPU 기준으로, 이 790개 benchmark에서는 batch 256 또는 512가 가장 빠른 편이다.
+현재 로컬 RTX 5080 Laptop GPU 기준으로, 이 790개 benchmark에서는 batch 1024가 가장 빨랐다.
 
 관측된 steady-state 처리량:
 
 ```text
-약 144-147 captions/sec processing 기준
-약 112-115 captions/sec total 기준
+약 172 captions/sec processing 기준
+약 130 captions/sec total 기준
 ```
 
-기존 CPU fast benchmark보다 processing 기준 약 2.7배 빠르다.
+기존 CPU fast benchmark보다 processing 기준 약 3.2배 빠르다.
 
 ## 3일 100M 기준 환산
 
