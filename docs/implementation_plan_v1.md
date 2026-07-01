@@ -28,7 +28,7 @@ v1 구현의 목표는 high recall이 아니다.
 
 ## 1. 최종 디렉토리 구조 계획
 
-아래 구조를 기준으로 구현한다. 현재 Stage 1~5는 구현했고, Stage 6 count export는 다음 작업이다.
+아래 구조를 기준으로 구현한다. 현재 Stage 1~6은 구현되어 있다.
 
 ```text
 gpic-caption-concepts-explainable/
@@ -318,7 +318,7 @@ lexicon:
 
 대상 rule:
 
-- R24 Count export
+- R25 Count export
 
 작업:
 
@@ -345,6 +345,10 @@ lexicon:
 완료 기준:
 
 - count export는 집계만 수행함
+- 2026-07-01 현재 `outputs/stage6_eval100/` 생성 완료
+- eval100 summary: facts 6411개
+- fact type counts: entity_exists 651, has_attribute 364, has_quantity 16, action_event 222, event_role 204, relation 110, object_pair_in_caption 4844
+- count table row counts: object 309, attribute 171, object-attribute pair 324, action 89, agent/patient pair 173, relation triple 95, object co-occurrence pair 4326
 
 ## 9. Milestone 8: Sample inspection report
 

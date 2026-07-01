@@ -10,7 +10,8 @@
 - Stage 2 spaCy preprocessing 구현됨
 - Stage 3 spaCy linguistic annotation은 `en_core_web_trf` 기준으로 구현됨
 - Stage 4 raw concept extraction 구현됨
-- Stage 5~6은 아직 구현 전
+- Stage 5 canonicalization 구현됨
+- Stage 6 count export 구현됨
 - object MWE lexicon은 `resources/lexicons/object_mwes.tsv`에 header-only로 생성됨
 - Stage 2 output은 concept output이 아니라 token/span inspection output임
 

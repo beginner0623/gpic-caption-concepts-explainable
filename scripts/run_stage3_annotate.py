@@ -10,7 +10,11 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from gpic_concepts_v1.stage3_annotate import DEFAULT_STAGE3_MODEL, run_stage3_annotate
+from gpic_concepts_v1.stage3_annotate import (
+    DEFAULT_STAGE3_BATCH_SIZE,
+    DEFAULT_STAGE3_MODEL,
+    run_stage3_annotate,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,11 +50,29 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="Optional maximum number of sentence rows to process.",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_STAGE3_BATCH_SIZE,
+        help=f"spaCy nlp.pipe batch size. Default: {DEFAULT_STAGE3_BATCH_SIZE}",
+    )
+    gpu_group = parser.add_mutually_exclusive_group()
+    gpu_group.add_argument(
+        "--prefer-gpu",
+        action="store_true",
+        help="Use spaCy GPU if CuPy/CUDA is available; continue on CPU otherwise.",
+    )
+    gpu_group.add_argument(
+        "--require-gpu",
+        action="store_true",
+        help="Require spaCy GPU; fail early if CuPy/CUDA is unavailable.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    gpu_mode = "require" if args.require_gpu else "prefer" if args.prefer_gpu else "none"
     summary = run_stage3_annotate(
         args.input,
         output_path=args.output,
@@ -58,6 +80,8 @@ def main() -> None:
         summary_path=args.summary,
         model=args.model,
         limit=args.limit,
+        batch_size=args.batch_size,
+        gpu_mode=gpu_mode,
     )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
 

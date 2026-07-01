@@ -63,6 +63,11 @@ from gpic_concepts_v1.stage5_canonicalize import (
     load_stage5_lexicons,
     run_stage5_canonicalize,
 )
+from gpic_concepts_v1.stage6_export_counts import (
+    CountExportResult,
+    export_count_facts,
+    run_stage6_export_counts,
+)
 
 __all__ = [
     "PIPELINE_VERSION",
@@ -114,4 +119,7 @@ __all__ = [
     "canonicalize_raw_graph",
     "load_stage5_lexicons",
     "run_stage5_canonicalize",
+    "CountExportResult",
+    "export_count_facts",
+    "run_stage6_export_counts",
 ]

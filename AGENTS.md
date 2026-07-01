@@ -10,14 +10,15 @@ Before creating or editing any code, lexicon, report, or documentation, read:
 
 1. `AGENTS.md`
 2. `docs/rules_v1.md`
+3. `docs/answer_protocol.md`
 
 If the requested change conflicts with `docs/rules_v1.md`, stop and explain the conflict before editing.
 
 ## Current Project State
 
-This project is in the explainable v1 pipeline implementation phase.
+This project has the explainable v1 pipeline implemented through Stage 6.
 
-Stages 1-5 are implemented. Stage 6 count export is the next implementation target.
+Future work must still follow the Rule Gate before adding or changing rules.
 
 ## Scope Boundary
 
@@ -124,3 +125,40 @@ When explaining this repository:
 Use this description:
 
 > an explainable caption-to-concept baseline with documented limitations
+
+## Evidence-Gated Answer Protocol
+
+Follow `docs/answer_protocol.md` for any non-trivial explanation, especially
+claims about current code behavior, runtime environment, GPU/CPU status,
+benchmark speed, rule behavior, or generated outputs.
+
+Do not present an inference as a verified fact.
+
+When making a claim about the current repository or environment, separate:
+
+- verified observation
+- code/file evidence
+- inference
+- unknown or unchecked state
+
+For code behavior:
+
+- inspect the relevant file before explaining the implemented behavior
+- cite the file path or function name in the answer
+- say "not checked in this turn" if the file was not inspected
+
+For runtime and benchmark claims:
+
+- state the exact command or output file used as evidence
+- state model, input size, batch size, stage range, intermediate-file policy,
+  GPU/CPU status, and environment scope
+- never infer hardware capability from one library's runtime status
+- separate physical GPU availability, PyTorch CUDA availability, spaCy GPU/CuPy
+  availability, and the actual device used in the latest run
+
+Forbidden unless independently verified in the current turn:
+
+- "this machine cannot use GPU"
+- "only CPU is available"
+- "the code currently does X" without reading the relevant code
+- "the benchmark speed is X" without the command, input size, and stage range

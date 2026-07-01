@@ -21,9 +21,9 @@
 
 ## 현재 프로젝트 상태
 
-이 프로젝트는 explainable v1 pipeline 구현 단계다.
+이 프로젝트는 explainable v1 pipeline을 Stage 6까지 구현한 상태다.
 
-현재 Stage 1~5는 구현되어 있고, Stage 6 count export는 다음 구현 대상이다.
+앞으로 rule을 추가하거나 바꿀 때도 반드시 Rule Gate를 먼저 따른다.
 
 ## Scope Boundary
 
@@ -130,3 +130,31 @@ v1에서 허용되는 rule family는 아래 항목뿐이다.
 이 repository는 아래처럼 설명한다.
 
 > documented limitations를 가진 explainable caption-to-concept baseline
+
+## Evidence-Gated Answer Protocol / 근거 기반 답변 규칙
+
+중요한 설명, 코드 동작 설명, 속도 측정, CPU/GPU 판단, rule 동작 설명은 반드시 `docs/answer_protocol.md`를 따른다.
+
+핵심 원칙:
+
+- 관찰한 사실과 추론을 섞지 않는다.
+- 현재 코드 동작은 관련 파일을 읽은 뒤에만 설명한다.
+- benchmark나 GPU/CPU 관련 주장은 command, output file, model, input 개수, stage 범위, batch size, 중간 파일 write 여부, 실제 `gpu_enabled` 값을 함께 적는다.
+- 한 라이브러리의 실행 상태로 하드웨어 전체 능력을 단정하지 않는다.
+- physical GPU, driver/CUDA, PyTorch CUDA, spaCy GPU/CuPy, latest run device를 서로 구분한다.
+- rule, repair, fallback, lexicon behavior는 먼저 `docs/rules_v1.md`에 적고 승인받은 뒤 구현한다.
+
+중요 판단은 아래 형식을 사용한다.
+
+```text
+확인됨:
+근거:
+추론:
+미확인:
+```
+
+금지되는 표현:
+
+- "이 PC는 GPU를 못 쓴다"처럼 현재 run 결과를 하드웨어 결론으로 확대하는 말
+- 코드를 읽지 않고 "현재 코드는 이렇게 한다"고 단정하는 말
+- command, input 개수, stage 범위 없이 benchmark 속도를 단정하는 말

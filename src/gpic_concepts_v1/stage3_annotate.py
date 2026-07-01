@@ -7,7 +7,7 @@ and records linguistic evidence. It does not create concepts.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -37,6 +37,7 @@ except ModuleNotFoundError:  # pragma: no cover - keeps non-spaCy tests importab
 
 
 DEFAULT_STAGE3_MODEL = "en_core_web_trf"
+DEFAULT_STAGE3_BATCH_SIZE = 128
 OBJECT_MWE_POS_CORRECTOR = "gpic_object_mwe_pos_corrector"
 
 TAG_RULE_ID = "R6"
@@ -66,6 +67,16 @@ class Stage3Record(JsonRecord):
     meta: JsonObject = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class _PreparedStage3Doc:
+    caption_id: str
+    caption: str
+    doc: Doc
+    protected_spans: list[ProtectedSpanRecord]
+    stage2_rule_ids: list[str]
+    meta: JsonObject
+
+
 def register_object_mwe_pos_corrector() -> None:
     """Register R7 as a spaCy component once per Python process."""
     if spacy is None:
@@ -78,12 +89,17 @@ def register_object_mwe_pos_corrector() -> None:
     Language.component(OBJECT_MWE_POS_CORRECTOR)(_object_mwe_pos_corrector)
 
 
-def make_stage3_nlp(model: str = DEFAULT_STAGE3_MODEL) -> Language:
+def make_stage3_nlp(
+    model: str = DEFAULT_STAGE3_MODEL,
+    *,
+    gpu_mode: str = "none",
+) -> Language:
     """Load the Stage 3 spaCy model and attach the R7 component."""
     if spacy is None:
         raise Stage2DependencyError(
             "Stage 3 requires spaCy. Install/use the project environment."
         )
+    gpu_info = _configure_spacy_gpu(gpu_mode)
     register_object_mwe_pos_corrector()
     try:
         nlp = spacy.load(model, disable=["ner"])
@@ -98,6 +114,8 @@ def make_stage3_nlp(model: str = DEFAULT_STAGE3_MODEL) -> Language:
         else:
             nlp.add_pipe(OBJECT_MWE_POS_CORRECTOR, last=True)
     nlp.meta["gpic_model_id"] = model
+    nlp.meta["gpic_gpu_mode"] = gpu_info["gpu_mode"]
+    nlp.meta["gpic_gpu_enabled"] = gpu_info["gpu_enabled"]
     return nlp
 
 
@@ -129,26 +147,15 @@ def annotate_text(
     meta: Mapping[str, Any] | None = None,
 ) -> Stage3Record:
     """Apply Stage 2 protection and Stage 3 annotation to one sentence caption."""
-    doc = nlp.make_doc(caption)
-    doc, protected_spans, stage2_rule_ids = protect_doc(
-        doc,
-        nlp=nlp,
-        object_mwes=object_mwes,
-    )
-    doc = _run_pipeline_components(nlp, doc)
-    stage3_rule_ids = _stage3_rule_ids(protected_spans)
-
-    return Stage3Record(
+    prepared = _prepare_stage3_doc(
         caption_id=caption_id,
         caption=caption,
-        model=nlp.meta.get("gpic_model_id", DEFAULT_STAGE3_MODEL),
-        tokens=[_token_to_dict(token) for token in doc],
-        sentences=[_sentence_to_dict(sent) for sent in doc.sents],
-        noun_chunks=[_noun_chunk_to_dict(chunk) for chunk in doc.noun_chunks],
-        protected_spans=[record.to_dict() for record in protected_spans],
-        rule_ids=stage2_rule_ids + stage3_rule_ids,
-        meta=dict(meta or {}),
+        nlp=nlp,
+        object_mwes=object_mwes,
+        meta=meta,
     )
+    doc = _run_pipeline_components(nlp, prepared.doc)
+    return _stage3_record_from_doc(prepared, doc, nlp=nlp)
 
 
 def run_stage3_annotate(
@@ -159,32 +166,46 @@ def run_stage3_annotate(
     summary_path: str | Path | None = None,
     model: str = DEFAULT_STAGE3_MODEL,
     limit: int | None = None,
+    batch_size: int = DEFAULT_STAGE3_BATCH_SIZE,
+    gpu_mode: str = "none",
 ) -> dict[str, Any]:
     """Run Stage 3 over Stage 1 sentence rows."""
-    nlp = make_stage3_nlp(model)
+    if batch_size < 1:
+        raise ValueError("batch_size must be greater than zero")
+    nlp = make_stage3_nlp(model, gpu_mode=gpu_mode)
     object_mwes = load_object_mwes(object_mwes_path)
 
-    records: list[Stage3Record] = []
     span_counts: Counter[str] = Counter()
     token_total = 0
     noun_chunk_total = 0
+    total = 0
 
-    for index, row in enumerate(iter_jsonl(input_path)):
-        if limit is not None and index >= limit:
-            break
-        record = annotate_gpic_sentence_row(row, nlp=nlp, object_mwes=object_mwes)
-        records.append(record)
-        token_total += len(record.tokens)
-        noun_chunk_total += len(record.noun_chunks)
-        for span in record.protected_spans:
-            kind = span.get("kind")
-            if isinstance(kind, str):
-                span_counts[kind] += 1
+    def iter_records() -> Any:
+        nonlocal noun_chunk_total, token_total, total
+        for record in iter_stage3_records_from_rows(
+            iter_jsonl(input_path),
+            nlp=nlp,
+            object_mwes=object_mwes,
+            batch_size=batch_size,
+            limit=limit,
+        ):
+            total += 1
+            token_total += len(record.tokens)
+            noun_chunk_total += len(record.noun_chunks)
+            for span in record.protected_spans:
+                kind = span.get("kind")
+                if isinstance(kind, str):
+                    span_counts[kind] += 1
+            yield record
 
-    write_jsonl(output_path, records)
+    written = write_jsonl(output_path, iter_records())
     summary = {
-        "total": len(records),
+        "total": total,
+        "written": written,
         "model": model,
+        "batch_size": batch_size,
+        "gpu_mode": nlp.meta.get("gpic_gpu_mode", gpu_mode),
+        "gpu_enabled": bool(nlp.meta.get("gpic_gpu_enabled", False)),
         "output_path": str(output_path),
         "object_mwe_lexicon_size": len(object_mwes),
         "token_total": token_total,
@@ -196,12 +217,123 @@ def run_stage3_annotate(
     return summary
 
 
+def iter_stage3_records_from_rows(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    nlp: Language,
+    object_mwes: Sequence[ObjectMweEntry] = (),
+    batch_size: int = DEFAULT_STAGE3_BATCH_SIZE,
+    limit: int | None = None,
+) -> Iterator[Stage3Record]:
+    """Yield Stage 3 records from Stage 1 sentence rows using batched nlp.pipe."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be greater than zero")
+    pending: list[_PreparedStage3Doc] = []
+
+    def flush_pending() -> Iterator[Stage3Record]:
+        docs = [item.doc for item in pending]
+        for prepared, doc in zip(
+            pending,
+            nlp.pipe(docs, batch_size=batch_size),
+            strict=True,
+        ):
+            yield _stage3_record_from_doc(prepared, doc, nlp=nlp)
+
+    for index, row in enumerate(rows):
+        if limit is not None and index >= limit:
+            break
+        caption_record = make_caption_record_from_gpic_row(row)
+        if caption_record.skipped or caption_record.caption_shape != "sentence":
+            raise Stage2InputError("Stage 3 only accepts sentence captions")
+        pending.append(
+            _prepare_stage3_doc(
+                caption_id=caption_record.caption_id,
+                caption=caption_record.caption,
+                nlp=nlp,
+                object_mwes=object_mwes,
+                meta=caption_record.meta,
+            )
+        )
+        if len(pending) >= batch_size:
+            yield from flush_pending()
+            pending.clear()
+
+    if pending:
+        yield from flush_pending()
+
+
 def _object_mwe_pos_corrector(doc: Doc) -> Doc:
     for token in doc:
         if token._.get(OBJECT_MWE_TOKEN_EXTENSION):
             token.tag_ = "NN"
             token.pos_ = "NOUN"
     return doc
+
+
+def _configure_spacy_gpu(gpu_mode: str) -> JsonObject:
+    normalized = gpu_mode.lower()
+    if normalized not in {"none", "prefer", "require"}:
+        raise ValueError("gpu_mode must be one of: none, prefer, require")
+    if normalized == "none":
+        return {"gpu_mode": "none", "gpu_enabled": False}
+    if spacy is None:
+        raise Stage2DependencyError(
+            "Stage 3 requires spaCy. Install/use the project environment."
+        )
+    if normalized == "prefer":
+        return {"gpu_mode": "prefer", "gpu_enabled": bool(spacy.prefer_gpu())}
+    try:
+        spacy.require_gpu()
+    except Exception as exc:  # pragma: no cover - depends on local CUDA/CuPy setup.
+        raise Stage3DependencyError(
+            "Could not activate spaCy GPU. Install a CuPy build matching CUDA, "
+            "or rerun without --require-gpu."
+        ) from exc
+    return {"gpu_mode": "require", "gpu_enabled": True}
+
+
+def _prepare_stage3_doc(
+    *,
+    caption_id: str,
+    caption: str,
+    nlp: Language,
+    object_mwes: Sequence[ObjectMweEntry] = (),
+    meta: Mapping[str, Any] | None = None,
+) -> _PreparedStage3Doc:
+    doc = nlp.make_doc(caption)
+    doc, protected_spans, stage2_rule_ids = protect_doc(
+        doc,
+        nlp=nlp,
+        object_mwes=object_mwes,
+    )
+    return _PreparedStage3Doc(
+        caption_id=caption_id,
+        caption=caption,
+        doc=doc,
+        protected_spans=protected_spans,
+        stage2_rule_ids=stage2_rule_ids,
+        meta=dict(meta or {}),
+    )
+
+
+def _stage3_record_from_doc(
+    prepared: _PreparedStage3Doc,
+    doc: Doc,
+    *,
+    nlp: Language,
+) -> Stage3Record:
+    stage3_rule_ids = _stage3_rule_ids(prepared.protected_spans)
+    return Stage3Record(
+        caption_id=prepared.caption_id,
+        caption=prepared.caption,
+        model=nlp.meta.get("gpic_model_id", DEFAULT_STAGE3_MODEL),
+        tokens=[_token_to_dict(token) for token in doc],
+        sentences=[_sentence_to_dict(sent) for sent in doc.sents],
+        noun_chunks=[_noun_chunk_to_dict(chunk) for chunk in doc.noun_chunks],
+        protected_spans=[record.to_dict() for record in prepared.protected_spans],
+        rule_ids=prepared.stage2_rule_ids + stage3_rule_ids,
+        meta=dict(prepared.meta),
+    )
 
 
 def _run_pipeline_components(nlp: Language, doc: Doc) -> Doc:
