@@ -1,0 +1,21 @@
+.mamba/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Generated outputs and local scratch files
+outputs/
+reports/
+tmp/
+*.log
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+

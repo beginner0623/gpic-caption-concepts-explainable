@@ -1,0 +1,9 @@
+name: gpic-caption-concepts-explainable
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - spacy=3.8
+  - spacy-model-en_core_web_trf=3.8
+  - click
