@@ -23,7 +23,7 @@ v1 output은 count 가능한 record를 만든다.
 - 어떤 Rule ID에서 생성되었는가
 - raw value는 무엇인가
 - canonical value는 무엇인가
-- parent concept은 무엇인가
+- object parent concept은 무엇인가. action/attribute type은 active output에서 보류한다.
 
 중요:
 
@@ -40,6 +40,7 @@ outputs/
 ├─ caption_records.jsonl
 ├─ stage2_records.jsonl
 ├─ stage3_records.jsonl
+├─ gpic_observed_object_inventory.tsv
 ├─ raw_mentions.jsonl
 ├─ raw_edges.jsonl
 ├─ canonical_mentions.jsonl
@@ -52,6 +53,8 @@ outputs/
    ├─ action_counts.tsv
    ├─ agent_patient_pair_counts.tsv
    ├─ relation_triple_counts.tsv
+   ├─ relation_component_counts.tsv
+   ├─ ambiguous_relation_candidate_counts.tsv
    └─ object_cooccurrence_pair_counts.tsv
 ```
 
@@ -189,6 +192,54 @@ Schema:
 - object, attribute, action, relation은 Stage 4에서만 생성된다.
 - NER output은 v1에서 사용하지 않으며 Stage 3 model load 시 disabled 처리한다.
 
+## 4.5. GPIC Observed Object Inventory
+
+파일:
+
+- `gpic_observed_object_inventory.tsv`
+
+단위:
+
+- GPIC Stage 3 records에서 관측된 object span 후보 1개당 1 row
+
+목적:
+
+- Stage 4가 runtime OEWN lookup이나 외부 source-label inventory를 직접 쓰지 않도록, GPIC caption에서 관측된 noun chunk span의 OEWN lookup 결과와 objectness gate 결과를 고정한다.
+
+핵심 field:
+
+| field | 설명 |
+|---|---|
+| `span_key` | lookup key. observed surface를 `strip + lower + whitespace normalize`한 값 |
+| `observed_surface` | GPIC caption에서 실제 관측된 span surface |
+| `decision_status` | 사람이 보는 최종 queue 상태: `chosen`, `needs_manual`, `excluded` |
+| `decision_reason` | queue로 보낸 이유: `selected_object_compatible`, `manual_joined_variant_required`, `manual_objectness_required`, `manual_synset_required`, `no_oewn_noun_synset` |
+| `selected_oewn_synset` | synset이 결정된 경우 selected OEWN synset id |
+| `selected_oewn_lexfile` | selected synset의 OEWN lexfile |
+| `parent_oewn_synsets` | selected synset의 immediate hypernym synset IDs. pipe-separated |
+| `parent_oewn_lexfiles` | parent synset id와 lexfile evidence. pipe-separated |
+| `parent_lemmas` | parent synset id와 lemma display evidence. pipe-separated |
+| `parent_selection_tag` | parent 선정 방식. 보통 `selected_all_immediate_oewn_hypernyms` |
+| `canonical_surface` | selected synset lemma 중 offline canonical rule로 결정한 canonical object surface |
+| `canonical_label_key` | canonical surface의 normalized key |
+| `canonical_selection_tag` | canonical surface 선정 방식 또는 ambiguous 원인 |
+| `canonical_candidate_lemmas` | observed surface variants와 매칭된 candidate OEWN lemmas |
+| `canonical_candidate_lemma_counts` | candidate lemmas의 WN3 count evidence |
+| `google_ngram_candidate_surfaces` | Ngram 비교가 필요할 때의 candidate surfaces |
+| `google_ngram_candidate_mean_frequencies` | 저장된 Ngram frequency evidence |
+| `objectness_gate` | selected synset lexfile의 objectness evidence: `object_compatible`, `conditional`, `hard_conflict`, empty |
+| `all_oewn_synsets` | lookup된 OEWN noun synset 후보 전체 |
+| `all_oewn_lexfiles` | 후보 synset들의 lexfile |
+| `synset_selection_tag` | synset 선택 방식 또는 manual 필요 원인 |
+| `wn30_lemma_counts` | WN3 lemma count evidence |
+
+Stage 4 사용 기준:
+
+- `decision_status=chosen`과 `decision_status=excluded` row는 object mention으로 생성한다.
+- `decision_status=needs_manual` row가 matching되면 Stage 4는 raw fallback으로 넘기지 않고 중단한다.
+- `decision_status=excluded` row는 count에는 포함하되 source detail에 status/reason을 보존한다.
+- inventory에 없는 span은 object로 세지 않는다.
+
 ## 5. RawMention
 
 파일:
@@ -275,6 +326,7 @@ Schema:
 - `has_quantity`
 - `event_role`
 - `relation`
+- `ambiguous_relation_candidate`
 
 Schema:
 
@@ -282,7 +334,7 @@ Schema:
 |---|---|---:|---|
 | `caption_id` | string | yes | source caption id |
 | `edge_id` | string | yes | caption 내부 unique id. 예: `e0` |
-| `edge_type` | string | yes | `has_attribute`, `has_quantity`, `event_role`, `relation` |
+| `edge_type` | string | yes | `has_attribute`, `has_quantity`, `event_role`, `relation`, `ambiguous_relation_candidate` |
 | `source_mention_id` | string | yes | source mention id |
 | `target_mention_id` | string | yes | target mention id |
 | `label` | string | yes | edge label. 예: `agent`, `patient`, `on` |
@@ -336,13 +388,13 @@ Schema:
 | `raw_text` | string | yes | raw surface text |
 | `raw_lemma` | string | yes | raw lemma |
 | `canonical` | string | yes | canonical label |
-| `parent_concepts` | list[string] | yes | parent concept chain. 없으면 empty list |
+| `parent_concepts` | list[string] | yes | object parent synset IDs. object가 아니면 empty list |
 | `canonical_rule_id` | string | yes | R19, R20, R21, R22 중 하나 |
-| `parent_rule_id` | string or null | yes | R23 또는 null |
-| `canonical_source` | string | yes | `lexicon` 또는 `raw_fallback` |
-| `parent_source` | string or null | yes | `lexicon` 또는 null |
+| `parent_rule_id` | string or null | yes | object parent가 있으면 R23, 아니면 null |
+| `canonical_source` | string | yes | `lexicon`, `gpic_observed_inventory`, 또는 `raw_fallback` |
+| `parent_source` | string or null | yes | `selected_oewn_hypernym` 또는 null |
 | `confidence` | string | yes | 기본값 `high`; fallback이면 `medium` 가능 |
-| `canonical_detail` | object | yes | attribute type처럼 canonical label에 붙는 부가 정보. 없으면 `{}` |
+| `canonical_detail` | object | yes | selected synset, parent evidence처럼 canonical label에 붙는 부가 정보. 없으면 `{}`. attribute type은 active output에서 보류 |
 
 예시:
 
@@ -354,13 +406,15 @@ Schema:
   "raw_text": "dogs",
   "raw_lemma": "dog",
   "canonical": "dog",
-  "parent_concepts": ["animal"],
+  "parent_concepts": ["oewn-02085998-n", "oewn-01317541-n"],
   "canonical_rule_id": "R19",
   "parent_rule_id": "R23",
-  "canonical_source": "lexicon",
-  "parent_source": "lexicon",
+  "canonical_source": "gpic_observed_inventory",
+  "parent_source": "selected_oewn_hypernym",
   "confidence": "high",
-  "canonical_detail": {}
+  "canonical_detail": {
+    "parent_selection_tag": "selected_all_immediate_oewn_hypernyms"
+  }
 }
 ```
 
@@ -403,7 +457,8 @@ unknown fallback 예시:
 - canonicalization은 source/target을 바꾸지 않는다.
 - agent/patient를 고치지 않는다.
 - relation source/target을 바꾸지 않는다.
-- relation label은 raw-preserving이다.
+- single ADP relation label은 raw-preserving이다.
+- preposition MWE relation label은 Stage 4 lexicon canonical relation label을 보존한다.
 
 Schema:
 
@@ -419,8 +474,9 @@ Schema:
 | `source_canonical` | string | yes | source mention canonical |
 | `target_canonical` | string | yes | target mention canonical |
 | `rule_id` | string | yes | edge 원 rule id |
-| `canonical_rule_id` | string or null | yes | relation raw-preserving이면 R24, role/attribute edge는 null 가능 |
+| `canonical_rule_id` | string or null | yes | relation canonicalization이면 R24, role/attribute edge는 null 가능 |
 | `confidence` | string | yes | 기본값 `high` |
+| `canonical_detail` | object | yes | Stage 4 edge metadata 보존. preposition MWE relation이면 relation components 포함 가능 |
 
 예시:
 
@@ -437,7 +493,8 @@ Schema:
   "target_canonical": "bench",
   "rule_id": "R18",
   "canonical_rule_id": "R24",
-  "confidence": "high"
+  "confidence": "high",
+  "canonical_detail": {}
 }
 ```
 
@@ -458,11 +515,16 @@ Schema:
 허용 fact type:
 
 - `entity_exists`
+- `attribute_exists`
+- `quantity_exists`
+- `object_parent`
 - `has_attribute`
 - `has_quantity`
 - `action_event`
 - `event_role`
 - `relation`
+- `ambiguous_relation_candidate`
+- `relation_component`
 - `object_pair_in_caption`
 
 공통 schema:
@@ -510,7 +572,7 @@ Schema:
 |---|---|---|
 | `object` | string | canonical object |
 | `parent_concepts` | list[string] | object parent concept |
-| `raw_variants` | list[string] | caption 내 raw lemma variants |
+| `raw_variants` | list[string] | caption 내 raw surface variants. `strip + lower` |
 
 `count_key`:
 
@@ -518,7 +580,66 @@ Schema:
 entity_exists:{object}
 ```
 
-### 10.2 `has_attribute`
+### 10.2 `attribute_exists`
+
+대상:
+
+- attribute mention
+
+`values`:
+
+| field | type | 설명 |
+|---|---|---|
+| `attribute` | string | canonical attribute |
+| `raw_variants` | list[string] | caption 내 raw surface variants. `strip + lower` |
+
+`count_key`:
+
+```text
+attribute_exists:{attribute}
+```
+
+### 10.3 `quantity_exists`
+
+대상:
+
+- quantity mention
+
+`values`:
+
+| field | type | 설명 |
+|---|---|---|
+| `quantity` | string | raw-preserving quantity |
+| `raw_variants` | list[string] | caption 내 raw surface variants. `strip + lower` |
+
+`count_key`:
+
+```text
+quantity_exists:{quantity}
+```
+
+### 10.4 `object_parent`
+
+대상:
+
+- object mention의 parent concept evidence
+
+`values`:
+
+| field | type | 설명 |
+|---|---|---|
+| `object` | string | canonical object |
+| `parent` | string | parent display label |
+| `parent_synset_id` | string | parent OEWN synset id evidence |
+| `raw_variants` | list[string] | object raw variants |
+
+`count_key`:
+
+```text
+object_parent:{object}:{parent}
+```
+
+### 10.5 `has_attribute`
 
 대상:
 
@@ -530,7 +651,6 @@ entity_exists:{object}
 |---|---|---|
 | `object` | string | canonical object |
 | `attribute` | string | canonical attribute |
-| `attribute_type` | string or null | color, material, size 등 explicit lexicon 결과 |
 | `object_parent_concepts` | list[string] | object parent concept |
 
 `count_key`:
@@ -539,7 +659,7 @@ entity_exists:{object}
 has_attribute:{object}:{attribute}
 ```
 
-### 10.3 `has_quantity`
+### 10.6 `has_quantity`
 
 대상:
 
@@ -558,7 +678,7 @@ has_attribute:{object}:{attribute}
 has_quantity:{object}:{quantity}
 ```
 
-### 10.4 `action_event`
+### 10.7 `action_event`
 
 대상:
 
@@ -569,8 +689,7 @@ has_quantity:{object}:{quantity}
 | field | type | 설명 |
 |---|---|---|
 | `action` | string | canonical action |
-| `parent_concepts` | list[string] | action parent concept |
-| `raw_variants` | list[string] | caption 내 raw lemma variants |
+| `raw_variants` | list[string] | caption 내 raw surface variants. `strip + lower` |
 
 `count_key`:
 
@@ -578,7 +697,7 @@ has_quantity:{object}:{quantity}
 action_event:{action}
 ```
 
-### 10.5 `event_role`
+### 10.8 `event_role`
 
 대상:
 
@@ -600,7 +719,7 @@ action_event:{action}
 event_role:{action}:{role}:{target}
 ```
 
-### 10.6 `relation`
+### 10.9 `relation`
 
 대상:
 
@@ -611,8 +730,10 @@ event_role:{action}:{role}:{target}
 | field | type | 설명 |
 |---|---|---|
 | `source` | string | canonical source object |
-| `relation` | string | raw-preserving relation label |
+| `relation` | string | single ADP raw label 또는 preposition MWE canonical relation label |
 | `target` | string | canonical target object |
+| `source_parent_concepts` | list[string] | source parent synset IDs |
+| `target_parent_concepts` | list[string] | target parent synset IDs |
 
 `count_key`:
 
@@ -620,7 +741,55 @@ event_role:{action}:{role}:{target}
 relation:{source}:{relation}:{target}
 ```
 
-### 10.7 `object_pair_in_caption`
+### 10.10 `relation_component`
+
+대상:
+
+- preposition MWE relation edge의 component metadata
+
+`values`:
+
+| field | type | 설명 |
+|---|---|---|
+| `relation` | string | canonical relation MWE label |
+| `component_index` | string | component 순서 index |
+| `component` | string | relation MWE component token |
+| `raw_variants` | list[string] | relation raw span variants |
+
+`count_key`:
+
+```text
+relation_component:{relation}:{component_index}:{component}
+```
+
+### 10.11 `ambiguous_relation_candidate`
+
+대상:
+
+- preposition MWE에서 source 또는 target 후보가 0개이거나 2개 이상인 경우의 후보 relation occurrence
+- normal relation triple로 확정하지 않고 candidate로만 count한다.
+- source 또는 target 후보가 0개인 경우 object mention을 만들지 않고
+  `source_missing` 또는 `target_missing` 상태로 기록한다.
+
+`values`:
+
+| field | type | 설명 |
+|---|---|---|
+| `source_status` | string | `source_resolved`, `source_ambiguous`, or `source_missing` |
+| `relation` | string | preposition MWE canonical relation label |
+| `target_status` | string | `target_resolved`, `target_ambiguous`, or `target_missing` |
+| `candidate_sources` | list[string] | canonical candidate source objects or `source_missing` |
+| `candidate_targets` | list[string] | canonical candidate target objects or `target_missing` |
+| `candidate_pair_count` | string | preserved Stage 4 candidate edge count for this matched occurrence |
+| `raw_variants` | list[string] | matched raw MWE span variants |
+
+`count_key`:
+
+```text
+ambiguous_relation_candidate:{source_status}:{relation}:{target_status}
+```
+
+### 10.12 `object_pair_in_caption`
 
 대상:
 
@@ -629,6 +798,7 @@ relation:{source}:{relation}:{target}
 기준:
 
 - 같은 caption 기준
+- unique canonical object label 기준
 - 순서쌍 directed pair로 저장
 - 자기 자신 pair는 만들지 않음
 
@@ -638,6 +808,8 @@ relation:{source}:{relation}:{target}
 |---|---|---|
 | `source_object` | string | canonical object |
 | `target_object` | string | canonical object |
+| `source_parent_concepts` | list[string] | source parent synset IDs |
+| `target_parent_concepts` | list[string] | target parent synset IDs |
 
 `count_key`:
 
@@ -659,7 +831,7 @@ count export는 새 concept을 만들지 않는다.
 | `count` | integer | fact row count |
 | `caption_count` | integer | unique caption count |
 | `example_caption_ids` | list[string] | 일부 example ids |
-| `raw_variants` | list[string] | raw lemma/text variants |
+| `raw_variants` | list[string] | raw surface variants. `strip + lower` |
 | `rule_ids` | list[string] | 관련 rule ids |
 
 ### 11.2 table별 key
@@ -667,11 +839,16 @@ count export는 새 concept을 만들지 않는다.
 | file | source fact type | primary key |
 |---|---|---|
 | `object_counts.tsv` | `entity_exists` | `object` |
-| `attribute_counts.tsv` | `has_attribute` | `attribute` |
+| `attribute_counts.tsv` | `attribute_exists` | `attribute` |
+| `quantity_counts.tsv` | `quantity_exists` | `quantity` |
+| `object_parent_counts.tsv` | `object_parent` | `object`, `parent` |
 | `object_attribute_pair_counts.tsv` | `has_attribute` | `object`, `attribute` |
+| `object_quantity_pair_counts.tsv` | `has_quantity` | `object`, `quantity` |
 | `action_counts.tsv` | `action_event` | `action` |
 | `agent_patient_pair_counts.tsv` | `event_role` | `action`, `role`, `target` |
 | `relation_triple_counts.tsv` | `relation` | `source`, `relation`, `target` |
+| `relation_component_counts.tsv` | `relation_component` | `relation`, `component_index`, `component` |
+| `ambiguous_relation_candidate_counts.tsv` | `ambiguous_relation_candidate` | `candidate_source`, `relation`, `target` |
 | `object_cooccurrence_pair_counts.tsv` | `object_pair_in_caption` | `source_object`, `target_object` |
 
 ## 12. ID 규칙

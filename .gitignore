@@ -12,10 +12,12 @@ env/
 outputs/
 reports/
 tmp/
+.tmp_tests/
+resources/nltk_data/
+resources/wn_data/
 *.log
 
 # OS/editor files
 .DS_Store
 Thumbs.db
 .vscode/
-

@@ -7,3 +7,7 @@ dependencies:
   - spacy=3.8
   - spacy-model-en_core_web_trf=3.8
   - click
+  - nltk
+  - pytest
+  - pip:
+      - wn==1.1.0

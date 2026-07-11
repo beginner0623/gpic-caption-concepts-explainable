@@ -19,7 +19,7 @@ v1 구현의 목표는 high recall이 아니다.
 - 각 mention과 edge가 어떤 Rule ID에서 나왔는지 추적 가능해야 한다.
 - count export 단계에서는 새 linguistic interpretation을 하지 않아야 한다.
 - 누락된 정보는 patch하지 않고 limitation으로 남겨야 한다.
-- relation MWE, phrasal action, pronoun resolution, passive normalization은 v1에서 구현하지 않는다.
+- 문서화되지 않은 relation MWE repair, pronoun resolution, passive normalization은 v1에서 구현하지 않는다.
 - 이전 prototype의 repair logic을 복사하지 않는다.
 - tag-list caption은 v1에서 별도 segment parser를 쓰지 않는다.
 - tag-list caption은 v1 extraction 대상에서 제외한다.
@@ -41,18 +41,21 @@ gpic-caption-concepts-explainable/
 │  ├─ environment_setup_v1.md
 │  └─ known_limitations_v1.md
 ├─ resources/
+│  ├─ gpic_inventory/
+│  │  └─ observed_object_span_inventory.tsv
 │  └─ lexicons/
-│     ├─ object_mwes.tsv
 │     ├─ object_synonyms.tsv
 │     ├─ object_parents.tsv
 │     ├─ attribute_synonyms.tsv
 │     ├─ attribute_types.tsv
 │     ├─ action_synonyms.tsv
-│     └─ action_parents.tsv
+│     ├─ action_types.tsv
+│     └─ preposition_mwes.tsv
 ├─ scripts/
 │  ├─ run_stage1_records.py
 │  ├─ run_stage2_preprocess.py
 │  ├─ run_stage3_annotate.py
+│  ├─ build_gpic_observed_object_inventory.py
 │  ├─ run_stage4_extract_raw.py
 │  ├─ run_pipeline_v1.py
 │  ├─ inspect_sample_v1.py
@@ -156,18 +159,15 @@ gpic-caption-concepts-explainable/
 
 - R2 Tokenization
 - R3 Quote span merge
-- R4 Object MWE merge
 - R5 Hyphen word merge
 
 작업:
 
 1. `stage2_preprocess.py` 작성
-2. spaCy tokenizer 사용
+2. `en_core_web_trf` tokenizer-only `nlp.make_doc()` 사용
 3. quote span detector 구현
-4. object MWE lexicon loader 구현
-5. PhraseMatcher + filter_spans + Retokenizer 적용
-6. hyphen word detector 구현
-7. Stage 1에서 `sentence`로 통과한 caption만 preprocessing에 들어옴
+4. hyphen word detector 구현
+5. Stage 1에서 `sentence`로 통과한 caption만 preprocessing에 들어옴
 
 산출물:
 
@@ -175,16 +175,10 @@ gpic-caption-concepts-explainable/
 - token list
 - protected span metadata
 
-lexicon:
-
-- `resources/lexicons/object_mwes.tsv`
-- 초기 상태는 header-only
-- GPIC sample을 보고 자동으로 항목을 추가하지 않음
-
 검증:
 
 - quote span이 하나의 token으로 merge되는지 확인
-- object MWE lexicon에 있는 phrase만 merge되는지 확인
+- object MWE phrase가 Stage 2 tokenization에서 merge되지 않는지 확인
 - hyphen word가 merge되는지 확인
 - relation MWE가 merge되지 않는지 확인
 - quote placeholder 치환이 일어나지 않는지 확인
@@ -200,7 +194,6 @@ lexicon:
 대상 rule:
 
 - R6 TAG annotation
-- R7 Object MWE POS correction
 - R8 Dependency parsing
 - R9 POS, MORPH annotation
 - R10 Lemmatization
@@ -210,8 +203,7 @@ lexicon:
 
 1. `stage3_annotate.py` 작성
 2. `en_core_web_trf` spaCy model pipeline 구성
-3. object MWE POS correction component 작성
-4. token annotation inspection helper 작성
+3. token annotation inspection helper 작성
 
 산출물:
 
@@ -221,7 +213,6 @@ lexicon:
 
 검증:
 
-- object MWE merge token만 POS=`NOUN`, TAG=`NN` 보정되는지 확인
 - 일반 token의 POS/TAG를 custom rule로 덮어쓰지 않는지 확인
 - noun chunk가 downstream extraction 입력으로 제공되는지 확인
 
@@ -231,25 +222,79 @@ lexicon:
 
 ## 6. Milestone 5: Stage 4 구현
 
+### 6.1 GPIC observed object inventory 구축
+
+대상:
+
+- Stage 3 records
+- GPIC caption에서 실제로 관측된 noun chunk span
+
+작업:
+
+1. `build_gpic_observed_object_inventory.py` 작성
+2. noun chunk 내부에서 root를 오른쪽 끝으로 갖는 left-expanding span 생성
+3. DET/ADP/PRON 같은 function-word로 시작하는 multiword span은 OEWN probe 전에 제외
+4. 각 span을 OEWN noun lookup으로 probe
+5. span head가 plural common noun이면 head lemma surface를 observed exact surface보다 먼저 lookup
+6. plural common noun이 아니면 observed exact surface를 먼저 lookup
+7. separator 제거로 붙인 `joined_variant` lookup hit는 false positive 위험이 있으므로 automatic `chosen`으로 올리지 않고 `needs_manual`로 기록
+8. OEWN noun synset이 있는 가장 긴 span을 observed inventory row로 기록
+9. 사람이 보는 main queue 상태와 원인을 TSV에 기록
+   - `decision_status`: `chosen`, `needs_manual`, `excluded`
+   - `decision_reason`: `selected_object_compatible`, `manual_joined_variant_required`, `manual_objectness_required`, `manual_synset_required`, `no_oewn_noun_synset`
+   - `objectness_gate`: reason 설명용 evidence
+10. `decision_status=needs_manual` row는 runtime extraction과 canonical enrichment에서 자동으로 해결하지 않음
+11. `needs_manual` row가 하나라도 남아 있으면 canonical enrichment command를 실패 처리함
+12. manual resolution이 끝난 inventory에 대해 selected synset의 immediate hypernym 전체를 parent evidence로 기록
+13. manual resolution이 끝난 inventory에 대해 offline canonical rule로 canonical surface를 기록
+14. canonical surface 선정은 selected synset lemma set, observed caption surface variants, WN3 lemma count, observed exact surface, 저장된 Google Ngram evidence 순서로 진행
+15. canonical ambiguous row가 남으면 ambiguous TSV와 summary를 남기고 canonical enrichment command를 실패 처리함
+
+산출물:
+
+- `resources/gpic_inventory/observed_object_span_inventory.tsv`
+
+명시적 제외:
+
+- COCO/LVIS/Objects365/OpenImages/Visual Genome source-label inventory를 읽지 않음
+- 외부 source label을 GPIC caption span의 synonym/canonical으로 사용하지 않음
+
+검증:
+
+- generated TSV가 GPIC Stage 3 records만 입력으로 쓰는지 확인
+- `decision_status`와 `decision_reason` row count를 확인
+- plural common noun exact lookup pollution이 head lemma lookup으로 줄어드는지 확인
+- function-word-start span이 joined false positive로 가지 않고 root object로 내려가는지 확인
+- `joined_variant` lookup hit가 자동 `chosen`으로 올라가지 않는지 확인
+- `needs_manual` row가 남아 있으면 Stage 4 extraction 전에 해결해야 함
+- `needs_manual` row가 남아 있으면 canonical enrichment 전에 해결해야 함
+- canonical ambiguous row가 남아 있으면 Stage 4 extraction 전에 해결해야 함
+
+### 6.2 Raw concept extraction
+
 대상 rule:
 
-- R12 Noun chunk root to object
+- R12 Noun chunk selected span to object
 - R13 Noun chunk modifier to attribute
 - R14 Noun chunk modifier to quantity
 - R15 VERB to action
 - R16 `nsubj` to agent
 - R17 `obj` or `dobj` to patient
-- R18 ADP plus direct `pobj` to relation
+- R18 Single ADP plus direct `pobj` to relation
+- R18.1 Preposition MWE plus final direct `pobj` to relation
 
 작업:
 
 1. `stage4_extract_raw.py` 작성
-2. `stage3_records.jsonl`을 입력으로 사용
-3. noun chunk root 기반 object mention 생성
-4. noun chunk 내부 modifier 기반 attribute/quantity 생성
-5. VERB token 기반 action mention 생성
-6. dependency child 기반 agent/patient edge 생성
-7. ADP/preposition + direct `pobj` 기반 relation edge 생성
+2. `stage3_records.jsonl`과 GPIC observed object inventory를 입력으로 사용
+3. noun chunk 내부에서 root를 오른쪽 끝으로 갖는 left-expanding span 생성
+4. GPIC observed inventory에 row가 있는 가장 긴 selected span으로 object mention 생성
+5. selected span 내부 token을 consumed 처리하고 같은 object mention으로 매핑
+6. selected span 밖 noun chunk modifier 기반 attribute/quantity 생성
+7. VERB token 기반 action mention 생성
+8. dependency child와 selected-span object mapping 기반 agent/patient edge 생성
+9. preposition MWE + final direct `pobj`와 selected-span object mapping 기반 relation edge 생성
+10. remaining ADP/preposition + direct `pobj`와 selected-span object mapping 기반 relation edge 생성
 
 산출물:
 
@@ -261,38 +306,45 @@ lexicon:
 - mention마다 Rule ID가 있는지 확인
 - edge마다 Rule ID가 있는지 확인
 - relation/action edge 생성을 위해 새 object mention을 추가하지 않는지 확인
+- GPIC observed inventory에 row가 없는 noun chunk를 object로 세지 않는지 확인
+- GPIC observed inventory row가 `decision_status=excluded`여도 status metadata를 보존한 object mention으로 세는지 확인
+- GPIC observed inventory row가 `decision_status=needs_manual`이면 Stage 4가 중단되는지 확인
+- GPIC observed inventory row에 selected synset이 있는데 `canonical_surface`가 비어 있으면 Stage 4가 중단되는지 확인
+- plural common noun lookup이 head lemma query로 선택되어도 raw mention text는 observed surface로 유지되는지 확인
+- selected span 내부 token이 attribute/quantity로 중복 추출되지 않는지 확인
 - `pobj`가 action patient로 들어가지 않는지 확인
 - passive voice rewrite가 일어나지 않는지 확인
 - pronoun resolution이 일어나지 않는지 확인
-- relation MWE collapse가 일어나지 않는지 확인
+- preposition MWE relation은 문서화된 R18.1과 lexicon metadata로만 생성되는지 확인
 - tag-list 전용 segment grouping이 일어나지 않는지 확인
 - tag-list caption이 Stage 4에 들어오지 않는지 확인
 
 완료 기준:
 
 - raw extraction 결과가 dependency와 noun chunk에서 직접 보이는 정보로만 구성됨
+- object span/synset 확정은 GPIC observed inventory를 기준으로 함
 
 ## 7. Milestone 6: Stage 5 구현
 
 대상 rule:
 
-- R19 Object synonym canonicalization
-- R20 Attribute synonym and type canonicalization
+- R19 Object canonicalization from GPIC observed inventory
+- R20 Attribute synonym canonicalization
 - R21 Quantity raw-preserving canonicalization
 - R22 Action synonym canonicalization
-- R23 Parent concept mapping
-- R24 Relation raw-preserving
+- R23 Object parent concept mapping from selected OEWN immediate hypernym evidence
+- R24 Relation canonicalization
 
 작업:
 
 1. `stage5_canonicalize.py` 작성
 2. TSV lexicon loader 작성
-3. object canonical lookup 구현
-4. attribute canonical/type lookup 구현
+3. object selected synset metadata, canonical surface evidence, raw surface fallback 구현
+4. attribute canonical lookup 구현. attribute type은 active Stage 5 output에서 보류
 5. quantity raw-preserving 구현
 6. action canonical lookup 구현
-7. parent concept lookup 구현
-8. relation raw-preserving policy 구현
+7. selected OEWN synset이 있는 object는 source detail의 immediate hypernym parent evidence를 `parent_concepts`로 보존
+8. single ADP relation raw-preserving policy와 preposition MWE relation label preservation 구현
 
 산출물:
 
@@ -301,17 +353,18 @@ lexicon:
 
 검증:
 
-- unknown term은 raw lemma를 유지하는지 확인
-- relation label이 새로 collapse되지 않는지 확인
+- unknown term은 raw surface를 유지하는지 확인
+- GPIC observed inventory에 `canonical_surface`가 있으면 object canonical로 쓰는지 확인
+- relation label이 Stage 4 evidence 없이 새로 collapse되지 않는지 확인
 - canonicalization 단계에서 agent/patient/source/target이 바뀌지 않는지 확인
-- parent concept이 explicit TSV에 있는 경우에만 붙는지 확인
+- selected synset parent evidence가 있는 object에 `parent_concepts`, `parent_source=selected_oewn_hypernym`이 붙는지 확인
 
 완료 기준:
 
 - Stage 5는 label normalization만 수행하고 graph repair를 하지 않음
 - 2026-07-01 현재 `outputs/stage5_eval100/` 생성 완료
 - eval100 summary: canonical mentions 1253, canonical edges 694
-- header-only lexicon 상태라 canonical source는 전부 `raw_fallback`, parent는 전부 empty
+- object canonical source는 GPIC observed inventory canonical evidence가 있으면 `gpic_observed_inventory`, 없으면 `raw_fallback`이며, object parent는 selected OEWN synset immediate hypernym evidence가 있을 때만 채워짐
 - local mention id collision 방지를 위해 canonical edge lookup은 `(caption_id, mention_id)` 기준으로 수행
 
 ## 8. Milestone 7: Stage 6 구현
@@ -330,6 +383,9 @@ lexicon:
 6. agent/patient pair count export
 7. relation triple count export
 8. object co-occurrence pair count export
+   - 같은 caption 안의 unique canonical object label set에서 directed pair 생성
+   - `source_object != target_object`
+   - 같은 caption 안에 같은 canonical object mention이 여러 개 있어도 self pair는 만들지 않음
 
 산출물:
 
@@ -341,6 +397,7 @@ lexicon:
 - count export에서 새 mention이나 edge가 생성되지 않는지 확인
 - count row가 raw evidence와 Rule ID로 역추적 가능한지 확인
 - object co-occurrence pair는 같은 caption 기준으로만 계산되는지 확인
+- raw variants는 lemma가 아니라 raw surface `strip + lower` 기준인지 확인
 
 완료 기준:
 
@@ -394,11 +451,12 @@ lexicon:
 테스트 항목:
 
 - quote는 object로 count되지 않음
-- object MWE lexicon에 있는 phrase만 merge됨
+- Stage 2/3에서 object MWE merge 또는 POS correction이 일어나지 않음
+- Stage 4에서 noun chunk 내부 selected span 기준으로 object span이 결정됨
 - tag-list caption이 comma segment extractor로 빠지지 않음
 - tag-list caption이 sentence pipeline으로도 들어가지 않음
 - tag-list caption이 `tag_list_deferred`로 skip됨
-- relation MWE collapse가 일어나지 않음
+- preposition MWE relation은 문서화된 R18.1 경로로만 생성됨
 - `pobj`는 action patient로 들어가지 않음
 - pronoun resolution이 일어나지 않음
 - passive voice normalization이 일어나지 않음

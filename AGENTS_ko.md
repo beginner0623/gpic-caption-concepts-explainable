@@ -27,14 +27,17 @@
 
 ## Scope Boundary
 
-허용되는 구조는 `docs/rules_v1.md`에 적힌 6단계 pipeline뿐이다.
+허용되는 구조는 `docs/rules_v1.md`에 적힌 pipeline뿐이다.
 
 1. caption shape judgment
 2. spaCy preprocessing
 3. spaCy linguistic annotation
+3.5. GPIC observed object inventory preparation
 4. raw concept extraction
 5. canonicalization
 6. count export
+
+Stage 3.5는 Stage 3과 Stage 4 사이에서 쓰는 명시적 offline preparation 단계다. hidden extraction이나 repair stage로 취급하지 않는다.
 
 사용자가 명시적으로 `docs/rules_v1.md` 업데이트를 승인하지 않는 한, stage, hidden repair, fallback chain, extra lexicon family를 추가하지 않는다.
 
@@ -56,6 +59,49 @@
 
 이 형식으로 설명할 수 없는 rule은 구현하지 않는다.
 
+### Rule Impact Review Gate
+
+extraction, canonicalization, count에 영향을 줄 수 있는 rule 또는 lexicon을 추가하거나 바꾸기 전에는 `docs/rule_change_review_log_v1.md`에 먼저 검토를 남긴다.
+
+각 검토에는 반드시 아래 분류를 적는다.
+
+- rule generality classification:
+  - general rule
+  - source-specific evidence rule
+  - explicit user-approved manual decision
+  - one-off patch / rescue mapping
+
+코드를 수정하기 전에 제안된 변경이 위 네 종류 중 무엇인지 먼저 분류한다.
+특정 case 하나를 살리기 위한 one-off patch, dataset-label rescue mapping, semantic alias이면 자동 rule로 구현하지 않는다.
+그 경우에는 사용자가 해당 manual decision을 명시적으로 승인하지 않는 한 unresolved, ambiguous, rejected 중 하나로 남긴다.
+
+### Lexicon Candidate Gate
+
+source-label 후보를 만들 때 semantic alias, label-specific rescue mapping, one-off manual lookup을 자동 rule처럼 넣지 않는다.
+
+자동 lookup recovery로 허용되는 것은 문서화된 형태 기반 normalization뿐이다.
+
+허용:
+
+- 대소문자 normalization
+- whitespace normalization
+- hyphen, underscore, space separator variant
+- separator 제거 joined variant
+- WordNet/OEWN Morphy 결과
+
+사용자가 해당 label 결정을 명시적으로 승인하기 전에는 금지:
+
+- `potted plant -> pot plant` 같은 semantic alias
+- `sports ball -> ball` 같은 head fallback
+- 특정 label 하나를 살리기 위한 dataset-label rescue mapping
+- candidate-generation code 안에 숨긴 manual query replacement
+
+승인된 자동 lookup rule로 해결되지 않는 source label은 `unresolved`로 남긴다.
+visual object category와 맞지 않는 synset만 조회되면 evidence를 기록하고 `rejected` 또는 `ambiguous`로 남긴다.
+
+Manual decision은 사용자가 특정 synset 선택 또는 reject를 명시적으로 승인한 경우에만 넣는다.
+Manual decision은 lookup query 자체를 몰래 바꾸는 근거로 쓰지 않는다.
+
 ## V1에서 허용되는 것
 
 v1에서 허용되는 rule family는 아래 항목뿐이다.
@@ -63,27 +109,31 @@ v1에서 허용되는 rule family는 아래 항목뿐이다.
 - caption shape judgment: sentence vs tag-list
 - spaCy tokenization
 - raw quote span merge
-- explicit object lexicon 기반 object MWE merge
 - plain hyphen word merge
 - spaCy tagger
-- object MWE POS correction
 - spaCy dependency parser
 - spaCy attribute ruler
 - spaCy lemmatizer
 - spaCy noun chunks
-- noun chunk root to object
+- Stage 3 GPIC records에서 GPIC observed object span inventory 구축
+- GPIC observed inventory를 통한 noun chunk selected span to object
 - noun chunk modifier to attribute or quantity
 - VERB token to action
 - `nsubj` child to agent
 - `obj` 또는 `dobj` child to patient
 - ADP/preposition plus direct `pobj` to relation
+- review가 끝난 preposition MWE lexicon span plus final direct `pobj` to relation
+- action-attached preposition MWE에서 direct `nsubj`/`obj`/`dobj` object argument 기반 source candidate 보존
 - object synonym canonicalization
 - attribute synonym and type canonicalization
 - quantity raw-preserving canonicalization
 - action synonym canonicalization
 - parent concept mapping
-- relation raw-preserving policy
+- single ADP relation raw-preserving policy
+- 문서화된 Stage 4 preposition MWE metadata 기반 relation MWE label 보존과 relation component count export
 - flat count export
+
+COCO, LVIS, Objects365, OpenImages, Visual Genome, V3Det, ImageNet 같은 외부 source-label inventory는 `docs/rules_v1.md`가 명시적으로 바뀌기 전까지 GPIC caption pipeline의 active runtime input이 아니다. 이런 파일은 historical probe 또는 offline evidence로만 취급한다.
 
 ## V1에서 금지되는 것
 
@@ -96,10 +146,10 @@ v1에서 허용되는 rule family는 아래 항목뿐이다.
 - inherited agent repair
 - skipped reference role recovery
 - self-edge repair
-- PP source disambiguation
+- semantic PP source disambiguation
 - with-absolute recovery
 - scene context fallback rules
-- relation MWE collapse
+- 문서화되지 않은 relation MWE repair 또는 semantic relation source/target recovery
 - phrasal action collapse
 - Python code 내부의 broad hidden hardcoded word list
 - GPIC-error-specific patch rules
@@ -116,6 +166,23 @@ v1에서 허용되는 rule family는 아래 항목뿐이다.
 - 이전 prototype의 logic을 복사하지 않는다.
 - dependency를 추가할 때는 왜 필요한지 문서화한다.
 - generated report를 손으로 수정하지 않는다.
+
+## 파일 쓰기와 escalation 규칙
+
+PermissionError를 대화 기억으로 처리하지 않는다.
+
+generated artifact를 만드는 script를 실행하기 전에, 출력 경로가 현재 Codex sandbox의 writable root 안인지 먼저 구분한다.
+
+- 출력 경로가 현재 writable root 안이면 bounded command를 일반 sandbox에서 먼저 실행한다.
+- 출력 경로가 현재 writable root 밖이면 실패할 sandbox 실행을 먼저 하지 않는다.
+- 이 경우 처음부터 같은 좁은 bounded command를 `require_escalated`로 실행한다.
+- 이때 원인은 script logic failure가 아니라 "active repo/output path가 현재 sandbox writable root 밖"이라고 기록한다.
+
+generated artifact script는 직접 target script를 호출하지 말고 `scripts\run_script_with_timeout.py`를 통해 실행한다.
+
+`require_escalated`로 성공한 것은 permission 문제가 해결됐다는 뜻이 아니다. 해당 command를 sandbox 밖에서 승인받아 실행했다는 뜻이다.
+
+manual code/docs edit는 가능한 한 `apply_patch`를 사용한다. 큰 TSV/JSON/HTML/Markdown 같은 generated artifact는 script로 생성한다.
 
 ## 커뮤니케이션 규칙
 

@@ -23,10 +23,12 @@
 | dependency | 이유 |
 |---|---|
 | `spacy=3.8` | Stage 2 tokenization, PhraseMatcher, Retokenizer, filter_spans 실행 |
-| `spacy-model-en_core_web_trf=3.8` | Stage 3 TAG, dependency, POS, MORPH, lemma, noun chunk annotation 기본 모델 |
+| `spacy-model-en_core_web_trf=3.8` | Stage 2 tokenizer source, Stage 3 TAG, dependency, POS, MORPH, lemma, noun chunk annotation 기본 모델 |
 | `click` | 현재 conda-forge spaCy import 검증에서 필요한 runtime dependency를 명시 고정 |
 
-Stage 2는 tokenizer-only `spacy.blank("en")`를 사용한다.
+Stage 2는 `en_core_web_trf`를 tokenizer-only로 load해서 사용한다.
+`transformer`, `tagger`, `parser`, `attribute_ruler`, `lemmatizer`, `ner`는 제외하고
+`nlp.make_doc(caption)`만 Stage 2 tokenization에 사용한다.
 
 Stage 3부터는 `en_core_web_trf`를 기본 모델로 사용한다.
 

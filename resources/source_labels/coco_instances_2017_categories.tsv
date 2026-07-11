@@ -1,0 +1,81 @@
+dataset	category_id	label	supercategory	source_version
+COCO	1	person	person	instances_2017
+COCO	2	bicycle	vehicle	instances_2017
+COCO	3	car	vehicle	instances_2017
+COCO	4	motorcycle	vehicle	instances_2017
+COCO	5	airplane	vehicle	instances_2017
+COCO	6	bus	vehicle	instances_2017
+COCO	7	train	vehicle	instances_2017
+COCO	8	truck	vehicle	instances_2017
+COCO	9	boat	vehicle	instances_2017
+COCO	10	traffic light	outdoor	instances_2017
+COCO	11	fire hydrant	outdoor	instances_2017
+COCO	13	stop sign	outdoor	instances_2017
+COCO	14	parking meter	outdoor	instances_2017
+COCO	15	bench	outdoor	instances_2017
+COCO	16	bird	animal	instances_2017
+COCO	17	cat	animal	instances_2017
+COCO	18	dog	animal	instances_2017
+COCO	19	horse	animal	instances_2017
+COCO	20	sheep	animal	instances_2017
+COCO	21	cow	animal	instances_2017
+COCO	22	elephant	animal	instances_2017
+COCO	23	bear	animal	instances_2017
+COCO	24	zebra	animal	instances_2017
+COCO	25	giraffe	animal	instances_2017
+COCO	27	backpack	accessory	instances_2017
+COCO	28	umbrella	accessory	instances_2017
+COCO	31	handbag	accessory	instances_2017
+COCO	32	tie	accessory	instances_2017
+COCO	33	suitcase	accessory	instances_2017
+COCO	34	frisbee	sports	instances_2017
+COCO	35	skis	sports	instances_2017
+COCO	36	snowboard	sports	instances_2017
+COCO	37	sports ball	sports	instances_2017
+COCO	38	kite	sports	instances_2017
+COCO	39	baseball bat	sports	instances_2017
+COCO	40	baseball glove	sports	instances_2017
+COCO	41	skateboard	sports	instances_2017
+COCO	42	surfboard	sports	instances_2017
+COCO	43	tennis racket	sports	instances_2017
+COCO	44	bottle	kitchen	instances_2017
+COCO	46	wine glass	kitchen	instances_2017
+COCO	47	cup	kitchen	instances_2017
+COCO	48	fork	kitchen	instances_2017
+COCO	49	knife	kitchen	instances_2017
+COCO	50	spoon	kitchen	instances_2017
+COCO	51	bowl	kitchen	instances_2017
+COCO	52	banana	food	instances_2017
+COCO	53	apple	food	instances_2017
+COCO	54	sandwich	food	instances_2017
+COCO	55	orange	food	instances_2017
+COCO	56	broccoli	food	instances_2017
+COCO	57	carrot	food	instances_2017
+COCO	58	hot dog	food	instances_2017
+COCO	59	pizza	food	instances_2017
+COCO	60	donut	food	instances_2017
+COCO	61	cake	food	instances_2017
+COCO	62	chair	furniture	instances_2017
+COCO	63	couch	furniture	instances_2017
+COCO	64	potted plant	furniture	instances_2017
+COCO	65	bed	furniture	instances_2017
+COCO	67	dining table	furniture	instances_2017
+COCO	70	toilet	furniture	instances_2017
+COCO	72	tv	electronic	instances_2017
+COCO	73	laptop	electronic	instances_2017
+COCO	74	mouse	electronic	instances_2017
+COCO	75	remote	electronic	instances_2017
+COCO	76	keyboard	electronic	instances_2017
+COCO	77	cell phone	electronic	instances_2017
+COCO	78	microwave	appliance	instances_2017
+COCO	79	oven	appliance	instances_2017
+COCO	80	toaster	appliance	instances_2017
+COCO	81	sink	appliance	instances_2017
+COCO	82	refrigerator	appliance	instances_2017
+COCO	84	book	indoor	instances_2017
+COCO	85	clock	indoor	instances_2017
+COCO	86	vase	indoor	instances_2017
+COCO	87	scissors	indoor	instances_2017
+COCO	88	teddy bear	indoor	instances_2017
+COCO	89	hair drier	indoor	instances_2017
+COCO	90	toothbrush	indoor	instances_2017

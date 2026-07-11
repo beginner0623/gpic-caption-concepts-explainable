@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
-import csv
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,27 +19,31 @@ from gpic_concepts_v1.stage1 import make_caption_record_from_gpic_row
 try:  # pragma: no cover - exercised when spaCy is installed.
     import spacy
     from spacy.language import Language
-    from spacy.matcher import PhraseMatcher
-    from spacy.tokens import Doc, Span, Token
+    from spacy.tokens import Doc, Span
     from spacy.util import filter_spans
 except ModuleNotFoundError as exc:  # pragma: no cover - keeps non-spaCy tests importable.
     spacy = None
     Language = Any  # type: ignore[misc,assignment]
-    PhraseMatcher = Any  # type: ignore[misc,assignment]
     Doc = Any  # type: ignore[misc,assignment]
     Span = Any  # type: ignore[misc,assignment]
-    Token = Any  # type: ignore[misc,assignment]
     filter_spans = None
     SPACY_IMPORT_ERROR = exc
 else:
     SPACY_IMPORT_ERROR = None
 
 
-OBJECT_MWE_RULE_ID = "R4"
 QUOTE_RULE_ID = "R3"
 HYPHEN_RULE_ID = "R5"
 TOKENIZATION_RULE_ID = "R2"
-OBJECT_MWE_TOKEN_EXTENSION = "gpic_object_mwe"
+DEFAULT_STAGE2_TOKENIZER_MODEL = "en_core_web_trf"
+STAGE2_TOKENIZER_EXCLUDE = (
+    "transformer",
+    "tagger",
+    "parser",
+    "attribute_ruler",
+    "lemmatizer",
+    "ner",
+)
 
 
 class Stage2InputError(ValueError):
@@ -49,22 +52,6 @@ class Stage2InputError(ValueError):
 
 class Stage2DependencyError(RuntimeError):
     """Raised when spaCy is required but unavailable."""
-
-
-@dataclass(slots=True)
-class ObjectMweEntry:
-    phrase: str
-    canonical: str
-    source: str = ""
-    notes: str = ""
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.phrase, str) or self.phrase.strip() == "":
-            raise ValueError("object MWE phrase must be a non-empty string")
-        if not isinstance(self.canonical, str) or self.canonical.strip() == "":
-            raise ValueError("object MWE canonical must be a non-empty string")
-        self.phrase = self.phrase.strip()
-        self.canonical = self.canonical.strip()
 
 
 @dataclass(slots=True)
@@ -101,59 +88,24 @@ def require_spacy() -> None:
 
 
 def make_stage2_nlp() -> Language:
-    """Create the tokenizer-only English spaCy object used by Stage 2."""
+    """Create the tokenizer-only spaCy object used by Stage 2."""
     require_spacy()
-    return spacy.blank("en")
-
-
-def ensure_stage2_extensions() -> None:
-    """Register spaCy extensions used to carry Stage 2 metadata forward."""
-    require_spacy()
-    if not Token.has_extension(OBJECT_MWE_TOKEN_EXTENSION):
-        Token.set_extension(OBJECT_MWE_TOKEN_EXTENSION, default=False)
-
-
-def load_object_mwes(path: str | Path) -> list[ObjectMweEntry]:
-    """Load the explicit object MWE lexicon used by R4.
-
-    The file may be header-only. No object MWE is inferred from GPIC data here.
-    """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(path)
-
-    with path.open("rt", encoding="utf-8", newline="") as handle:
-        filtered_lines = (
-            line for line in handle if line.strip() and not line.lstrip().startswith("#")
+    try:
+        return spacy.load(
+            DEFAULT_STAGE2_TOKENIZER_MODEL,
+            exclude=list(STAGE2_TOKENIZER_EXCLUDE),
         )
-        reader = csv.DictReader(filtered_lines, delimiter="\t")
-        if reader.fieldnames is None:
-            return []
-        if "phrase" not in reader.fieldnames:
-            raise ValueError("object MWE lexicon must contain a 'phrase' column")
-
-        entries: list[ObjectMweEntry] = []
-        for row in reader:
-            phrase = (row.get("phrase") or "").strip()
-            if not phrase:
-                continue
-            canonical = (row.get("canonical") or phrase).strip()
-            entries.append(
-                ObjectMweEntry(
-                    phrase=phrase,
-                    canonical=canonical,
-                    source=(row.get("source") or "").strip(),
-                    notes=(row.get("notes") or "").strip(),
-                )
-            )
-        return entries
+    except OSError as exc:
+        raise Stage2DependencyError(
+            "Stage 2 requires the en_core_web_trf tokenizer. "
+            "Install/use the project environment."
+        ) from exc
 
 
 def preprocess_gpic_sentence_row(
     row: Mapping[str, Any],
     *,
     nlp: Language,
-    object_mwes: Sequence[ObjectMweEntry] = (),
 ) -> Stage2Record:
     """Preprocess one confirmed sentence GPIC row.
 
@@ -167,7 +119,6 @@ def preprocess_gpic_sentence_row(
         caption_id=caption_record.caption_id,
         caption=caption_record.caption,
         nlp=nlp,
-        object_mwes=object_mwes,
         meta=caption_record.meta,
     )
 
@@ -177,13 +128,12 @@ def preprocess_text(
     caption_id: str,
     caption: str,
     nlp: Language,
-    object_mwes: Sequence[ObjectMweEntry] = (),
     meta: Mapping[str, Any] | None = None,
 ) -> Stage2Record:
-    """Apply R2-R5 to one sentence caption and return inspection metadata."""
+    """Apply sentence tokenization and protected-span retokenization."""
     require_spacy()
     doc = nlp.make_doc(caption)
-    doc, span_records, rule_ids = protect_doc(doc, nlp=nlp, object_mwes=object_mwes)
+    doc, span_records, rule_ids = protect_doc(doc, nlp=nlp)
 
     return Stage2Record(
         caption_id=caption_id,
@@ -199,10 +149,8 @@ def protect_doc(
     doc: Doc,
     *,
     nlp: Language,
-    object_mwes: Sequence[ObjectMweEntry] = (),
 ) -> tuple[Doc, list[ProtectedSpanRecord], list[str]]:
-    """Apply R2-R5 span protection to an already tokenized Doc."""
-    ensure_stage2_extensions()
+    """Apply quote and hyphen span protection to an already tokenized Doc."""
     span_records: list[ProtectedSpanRecord] = []
     rule_ids = [TOKENIZATION_RULE_ID]
 
@@ -211,10 +159,7 @@ def protect_doc(
         rule_ids.append(QUOTE_RULE_ID)
         span_records.extend(quote_records)
 
-    doc, mwe_records = _merge_object_mwe_spans(doc, nlp=nlp, object_mwes=object_mwes)
-    if mwe_records:
-        rule_ids.append(OBJECT_MWE_RULE_ID)
-        span_records.extend(mwe_records)
+    _ = nlp
 
     doc, hyphen_records = _merge_hyphen_word_spans(doc)
     if hyphen_records:
@@ -229,20 +174,18 @@ def run_stage2_preprocess(
     input_path: str | Path,
     *,
     output_path: str | Path,
-    object_mwes_path: str | Path,
     summary_path: str | Path | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
     """Run Stage 2 over sentence rows produced by Stage 1."""
     nlp = make_stage2_nlp()
-    object_mwes = load_object_mwes(object_mwes_path)
 
     records: list[Stage2Record] = []
     span_counts: Counter[str] = Counter()
     for index, row in enumerate(iter_jsonl(input_path)):
         if limit is not None and index >= limit:
             break
-        record = preprocess_gpic_sentence_row(row, nlp=nlp, object_mwes=object_mwes)
+        record = preprocess_gpic_sentence_row(row, nlp=nlp)
         records.append(record)
         for span in record.protected_spans:
             kind = span.get("kind")
@@ -253,7 +196,6 @@ def run_stage2_preprocess(
     summary = {
         "total": len(records),
         "output_path": str(output_path),
-        "object_mwe_lexicon_size": len(object_mwes),
         "protected_span_counts": dict(sorted(span_counts.items())),
     }
     if summary_path is not None:
@@ -286,46 +228,6 @@ def _find_quote_spans(doc: Doc) -> list[Span]:
             curly_start = None
 
     return spans
-
-
-def _merge_object_mwe_spans(
-    doc: Doc,
-    *,
-    nlp: Language,
-    object_mwes: Sequence[ObjectMweEntry],
-) -> tuple[Doc, list[ProtectedSpanRecord]]:
-    if not object_mwes:
-        return doc, []
-
-    matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
-    matcher.add("OBJECT_MWE", [nlp.make_doc(entry.phrase) for entry in object_mwes])
-    entries_by_phrase = {
-        _normalize_phrase(entry.phrase): entry
-        for entry in object_mwes
-    }
-
-    spans = [doc[start:end] for _match_id, start, end in matcher(doc)]
-    spans = filter_spans(spans)
-    records: list[ProtectedSpanRecord] = []
-    for span in spans:
-        entry = entries_by_phrase.get(_normalize_phrase(span.text))
-        records.append(
-            ProtectedSpanRecord(
-                kind="object_mwe",
-                text=span.text,
-                rule_id=OBJECT_MWE_RULE_ID,
-                char_start=span.start_char,
-                char_end=span.end_char,
-                canonical=entry.canonical if entry is not None else _normalize_phrase(span.text),
-                source=entry.source if entry is not None else None,
-            )
-        )
-
-    with doc.retokenize() as retokenizer:
-        for span in spans:
-            retokenizer.merge(span)
-    _mark_object_mwe_tokens(doc, records)
-    return doc, records
 
 
 def _merge_hyphen_word_spans(doc: Doc) -> tuple[Doc, list[ProtectedSpanRecord]]:
@@ -397,15 +299,6 @@ def _attach_final_token_spans(doc: Doc, records: Sequence[ProtectedSpanRecord]) 
                 break
 
 
-def _mark_object_mwe_tokens(doc: Doc, records: Sequence[ProtectedSpanRecord]) -> None:
-    ensure_stage2_extensions()
-    for record in records:
-        for token in doc:
-            if token.idx == record.char_start and token.idx + len(token.text) == record.char_end:
-                token._.set(OBJECT_MWE_TOKEN_EXTENSION, True)
-                break
-
-
 def _token_to_dict(token: Any) -> JsonObject:
     return {
         "i": token.i,
@@ -415,10 +308,6 @@ def _token_to_dict(token: Any) -> JsonObject:
         "char_end": token.idx + len(token.text),
         "whitespace": token.whitespace_,
     }
-
-
-def _normalize_phrase(text: str) -> str:
-    return " ".join(text.strip().lower().split())
 
 
 def _is_hyphen_part(text: str) -> bool:

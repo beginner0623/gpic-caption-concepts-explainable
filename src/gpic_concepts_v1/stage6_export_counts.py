@@ -13,6 +13,7 @@ import csv
 from pathlib import Path
 from typing import Any
 
+from gpic_concepts_v1.atomic_io import atomic_text_writer
 from gpic_concepts_v1.io_jsonl import iter_jsonl, write_jsonl
 from gpic_concepts_v1.schema import (
     CanonicalEdge,
@@ -20,7 +21,8 @@ from gpic_concepts_v1.schema import (
     CountRow,
     FactRow,
     JsonObject,
-    make_local_id,
+    MISSING_SOURCE_MENTION_ID,
+    MISSING_TARGET_MENTION_ID,
 )
 
 
@@ -54,8 +56,13 @@ def export_count_facts(
 
     facts: list[FactRow] = []
     facts.extend(_entity_exists_facts(mentions, start_index=len(facts)))
+    facts.extend(_attribute_exists_facts(mentions, start_index=len(facts)))
+    facts.extend(_quantity_exists_facts(mentions, start_index=len(facts)))
+    facts.extend(_object_parent_facts(mentions, start_index=len(facts)))
     facts.extend(_action_event_facts(mentions, start_index=len(facts)))
     facts.extend(_edge_facts(edges, mention_by_key, start_index=len(facts)))
+    facts.extend(_ambiguous_relation_candidate_facts(edges, mention_by_key, start_index=len(facts)))
+    facts.extend(_relation_component_facts(edges, start_index=len(facts)))
     facts.extend(_object_pair_facts(mentions, start_index=len(facts)))
 
     count_tables = {
@@ -64,18 +71,40 @@ def export_count_facts(
             fact_type="entity_exists",
             table_key_prefix="object",
             value_fields=("object",),
+            extra_value_fields=("parent_concepts", "parent_synset_ids"),
         ),
         "attribute_counts.tsv": _aggregate_facts(
             facts,
-            fact_type="has_attribute",
+            fact_type="attribute_exists",
             table_key_prefix="attribute",
             value_fields=("attribute",),
+        ),
+        "quantity_counts.tsv": _aggregate_facts(
+            facts,
+            fact_type="quantity_exists",
+            table_key_prefix="quantity",
+            value_fields=("quantity",),
+        ),
+        "object_parent_counts.tsv": _aggregate_facts(
+            facts,
+            fact_type="object_parent",
+            table_key_prefix="object_parent",
+            value_fields=("object", "parent"),
+            extra_value_fields=("parent_synset_id",),
         ),
         "object_attribute_pair_counts.tsv": _aggregate_facts(
             facts,
             fact_type="has_attribute",
             table_key_prefix="object_attribute_pair",
             value_fields=("object", "attribute"),
+            extra_value_fields=("object_parent_concepts", "object_parent_synset_ids"),
+        ),
+        "object_quantity_pair_counts.tsv": _aggregate_facts(
+            facts,
+            fact_type="has_quantity",
+            table_key_prefix="object_quantity_pair",
+            value_fields=("object", "quantity"),
+            extra_value_fields=("object_parent_concepts", "object_parent_synset_ids"),
         ),
         "action_counts.tsv": _aggregate_facts(
             facts,
@@ -88,18 +117,48 @@ def export_count_facts(
             fact_type="event_role",
             table_key_prefix="event_role",
             value_fields=("action", "role", "target"),
+            extra_value_fields=("target_parent_concepts", "target_parent_synset_ids"),
         ),
         "relation_triple_counts.tsv": _aggregate_facts(
             facts,
             fact_type="relation",
             table_key_prefix="relation",
             value_fields=("source", "relation", "target"),
+            extra_value_fields=(
+                "source_parent_concepts",
+                "source_parent_synset_ids",
+                "target_parent_concepts",
+                "target_parent_synset_ids",
+            ),
+        ),
+        "relation_component_counts.tsv": _aggregate_facts(
+            facts,
+            fact_type="relation_component",
+            table_key_prefix="relation_component",
+            value_fields=("relation", "component_index", "component"),
+        ),
+        "ambiguous_relation_candidate_counts.tsv": _aggregate_facts(
+            facts,
+            fact_type="ambiguous_relation_candidate",
+            table_key_prefix="ambiguous_relation_candidate",
+            value_fields=("source_status", "relation", "target_status"),
+            extra_value_fields=(
+                "candidate_sources",
+                "candidate_targets",
+                "candidate_pair_count",
+            ),
         ),
         "object_cooccurrence_pair_counts.tsv": _aggregate_facts(
             facts,
             fact_type="object_pair_in_caption",
             table_key_prefix="object_pair_in_caption",
             value_fields=("source_object", "target_object"),
+            extra_value_fields=(
+                "source_parent_concepts",
+                "source_parent_synset_ids",
+                "target_parent_concepts",
+                "target_parent_synset_ids",
+            ),
         ),
     }
     return CountExportResult(facts=facts, count_tables=count_tables)
@@ -150,6 +209,30 @@ def run_stage6_export_counts(
     return summary
 
 
+def _make_fact_row(
+    *,
+    caption_id: str,
+    fact_index: int,
+    fact_type: str,
+    count_key: str,
+    rule_ids: list[str],
+    source_mention_ids: list[str],
+    source_edge_ids: list[str],
+    values: JsonObject,
+) -> FactRow:
+    # Stage 6 builds these fields from already validated records and constants.
+    fact = object.__new__(FactRow)
+    fact.caption_id = caption_id
+    fact.fact_id = f"f{fact_index}"
+    fact.fact_type = fact_type  # type: ignore[assignment]
+    fact.count_key = count_key
+    fact.rule_ids = rule_ids
+    fact.source_mention_ids = source_mention_ids
+    fact.source_edge_ids = source_edge_ids
+    fact.values = values
+    return fact
+
+
 def _entity_exists_facts(
     mentions: Sequence[CanonicalMention],
     *,
@@ -160,9 +243,9 @@ def _entity_exists_facts(
         if mention.mention_type != "object":
             continue
         facts.append(
-            FactRow(
+            _make_fact_row(
                 caption_id=mention.caption_id,
-                fact_id=make_local_id("f", start_index + len(facts)),
+                fact_index=start_index + len(facts),
                 fact_type="entity_exists",
                 count_key=f"entity_exists:{mention.canonical}",
                 rule_ids=_mention_rule_ids(mention),
@@ -171,6 +254,7 @@ def _entity_exists_facts(
                 values={
                     "object": mention.canonical,
                     "parent_concepts": mention.parent_concepts,
+                    "parent_synset_ids": _parent_synset_ids(mention),
                     "raw_variants": [_raw_variant(mention)],
                 },
             ),
@@ -188,9 +272,9 @@ def _action_event_facts(
         if mention.mention_type != "action":
             continue
         facts.append(
-            FactRow(
+            _make_fact_row(
                 caption_id=mention.caption_id,
-                fact_id=make_local_id("f", start_index + len(facts)),
+                fact_index=start_index + len(facts),
                 fact_type="action_event",
                 count_key=f"action_event:{mention.canonical}",
                 rule_ids=_mention_rule_ids(mention),
@@ -198,11 +282,98 @@ def _action_event_facts(
                 source_edge_ids=[],
                 values={
                     "action": mention.canonical,
-                    "parent_concepts": mention.parent_concepts,
                     "raw_variants": [_raw_variant(mention)],
                 },
             ),
         )
+    return facts
+
+
+def _attribute_exists_facts(
+    mentions: Sequence[CanonicalMention],
+    *,
+    start_index: int,
+) -> list[FactRow]:
+    facts: list[FactRow] = []
+    for mention in mentions:
+        if mention.mention_type != "attribute":
+            continue
+        facts.append(
+            _make_fact_row(
+                caption_id=mention.caption_id,
+                fact_index=start_index + len(facts),
+                fact_type="attribute_exists",
+                count_key=f"attribute_exists:{mention.canonical}",
+                rule_ids=_mention_rule_ids(mention),
+                source_mention_ids=[mention.mention_id],
+                source_edge_ids=[],
+                values={
+                    "attribute": mention.canonical,
+                    "raw_variants": [_raw_variant(mention)],
+                },
+            ),
+        )
+    return facts
+
+
+def _quantity_exists_facts(
+    mentions: Sequence[CanonicalMention],
+    *,
+    start_index: int,
+) -> list[FactRow]:
+    facts: list[FactRow] = []
+    for mention in mentions:
+        if mention.mention_type != "quantity":
+            continue
+        facts.append(
+            _make_fact_row(
+                caption_id=mention.caption_id,
+                fact_index=start_index + len(facts),
+                fact_type="quantity_exists",
+                count_key=f"quantity_exists:{mention.canonical}",
+                rule_ids=_mention_rule_ids(mention),
+                source_mention_ids=[mention.mention_id],
+                source_edge_ids=[],
+                values={
+                    "quantity": mention.canonical,
+                    "raw_variants": [_raw_variant(mention)],
+                },
+            ),
+        )
+    return facts
+
+
+def _object_parent_facts(
+    mentions: Sequence[CanonicalMention],
+    *,
+    start_index: int,
+) -> list[FactRow]:
+    facts: list[FactRow] = []
+    for mention in mentions:
+        if mention.mention_type != "object" or not mention.parent_concepts:
+            continue
+        parent_synset_ids = _parent_synset_ids(mention)
+        for index, parent in enumerate(mention.parent_concepts):
+            parent_synset_id = (
+                parent_synset_ids[index] if index < len(parent_synset_ids) else ""
+            )
+            facts.append(
+                _make_fact_row(
+                    caption_id=mention.caption_id,
+                    fact_index=start_index + len(facts),
+                    fact_type="object_parent",
+                    count_key=f"object_parent:{mention.canonical}:{parent}",
+                    rule_ids=_mention_rule_ids(mention),
+                    source_mention_ids=[mention.mention_id],
+                    source_edge_ids=[],
+                    values={
+                        "object": mention.canonical,
+                        "parent": parent,
+                        "parent_synset_id": parent_synset_id,
+                        "raw_variants": [_raw_variant(mention)],
+                    },
+                ),
+            )
     return facts
 
 
@@ -214,20 +385,24 @@ def _edge_facts(
 ) -> list[FactRow]:
     facts: list[FactRow] = []
     for edge in edges:
+        if edge.edge_type == "ambiguous_relation_candidate":
+            continue
         source = _require_mention(mention_by_key, edge.caption_id, edge.source_mention_id)
         target = _require_mention(mention_by_key, edge.caption_id, edge.target_mention_id)
         if edge.edge_type == "has_attribute":
             values = {
                 "object": source.canonical,
                 "attribute": target.canonical,
-                "attribute_type": target.canonical_detail.get("attribute_type"),
                 "object_parent_concepts": source.parent_concepts,
+                "object_parent_synset_ids": _parent_synset_ids(source),
             }
             count_key = f"has_attribute:{source.canonical}:{target.canonical}"
         elif edge.edge_type == "has_quantity":
             values = {
                 "object": source.canonical,
                 "quantity": target.canonical,
+                "object_parent_concepts": source.parent_concepts,
+                "object_parent_synset_ids": _parent_synset_ids(source),
             }
             count_key = f"has_quantity:{source.canonical}:{target.canonical}"
         elif edge.edge_type == "event_role":
@@ -236,6 +411,7 @@ def _edge_facts(
                 "role": edge.canonical_label,
                 "target": target.canonical,
                 "target_parent_concepts": target.parent_concepts,
+                "target_parent_synset_ids": _parent_synset_ids(target),
             }
             count_key = f"event_role:{source.canonical}:{edge.canonical_label}:{target.canonical}"
         elif edge.edge_type == "relation":
@@ -243,16 +419,20 @@ def _edge_facts(
                 "source": source.canonical,
                 "relation": edge.canonical_label,
                 "target": target.canonical,
+                "source_parent_concepts": source.parent_concepts,
+                "source_parent_synset_ids": _parent_synset_ids(source),
+                "target_parent_concepts": target.parent_concepts,
+                "target_parent_synset_ids": _parent_synset_ids(target),
             }
             count_key = f"relation:{source.canonical}:{edge.canonical_label}:{target.canonical}"
         else:
             raise ValueError(f"unsupported edge type: {edge.edge_type}")
 
         facts.append(
-            FactRow(
+            _make_fact_row(
                 caption_id=edge.caption_id,
-                fact_id=make_local_id("f", start_index + len(facts)),
-                fact_type=edge.edge_type,  # type: ignore[arg-type]
+                fact_index=start_index + len(facts),
+                fact_type=edge.edge_type,
                 count_key=count_key,
                 rule_ids=_edge_rule_ids(edge, source, target),
                 source_mention_ids=[edge.source_mention_id, edge.target_mention_id],
@@ -260,6 +440,149 @@ def _edge_facts(
                 values=values,
             ),
         )
+    return facts
+
+
+def _ambiguous_relation_candidate_facts(
+    edges: Sequence[CanonicalEdge],
+    mention_by_key: Mapping[tuple[str, str], CanonicalMention],
+    *,
+    start_index: int,
+) -> list[FactRow]:
+    grouped_edges: dict[tuple[str, str, tuple[str, ...]], list[CanonicalEdge]] = defaultdict(list)
+    for edge in edges:
+        if edge.edge_type != "ambiguous_relation_candidate":
+            continue
+        matched_token_indices = _matched_token_indices_key(edge)
+        key = (edge.caption_id, edge.canonical_label, matched_token_indices)
+        grouped_edges[key].append(edge)
+
+    facts: list[FactRow] = []
+    for (caption_id, relation, _matched_token_indices), group in sorted(grouped_edges.items()):
+        candidate_sources: set[str] = set()
+        candidate_targets: set[str] = set()
+        source_mention_ids: set[str] = set()
+        rule_ids: set[str] = set()
+        source_missing = False
+        target_missing = False
+        for edge in group:
+            rule_ids.update(_edge_only_rule_ids(edge))
+            if edge.source_mention_id == MISSING_SOURCE_MENTION_ID:
+                source_missing = True
+                candidate_sources.add("source_missing")
+            else:
+                source = _require_mention(mention_by_key, edge.caption_id, edge.source_mention_id)
+                candidate_sources.add(source.canonical)
+                source_mention_ids.add(edge.source_mention_id)
+                rule_ids.update(source_mention_rule_ids_without_parent(source))
+                if source.parent_rule_id is not None:
+                    rule_ids.add(source.parent_rule_id)
+            if edge.target_mention_id == MISSING_TARGET_MENTION_ID:
+                target_missing = True
+                candidate_targets.add("target_missing")
+            else:
+                target = _require_mention(mention_by_key, edge.caption_id, edge.target_mention_id)
+                candidate_targets.add(target.canonical)
+                source_mention_ids.add(edge.target_mention_id)
+                rule_ids.update(source_mention_rule_ids_without_parent(target))
+                if target.parent_rule_id is not None:
+                    rule_ids.add(target.parent_rule_id)
+
+        source_status = _relation_candidate_status(
+            candidate_sources,
+            missing=source_missing,
+            endpoint_name="source",
+        )
+        target_status = _relation_candidate_status(
+            candidate_targets,
+            missing=target_missing,
+            endpoint_name="target",
+        )
+        facts.append(
+            _make_fact_row(
+                caption_id=caption_id,
+                fact_index=start_index + len(facts),
+                fact_type="ambiguous_relation_candidate",
+                count_key=(
+                    "ambiguous_relation_candidate:"
+                    f"{source_status}:{relation}:{target_status}"
+                ),
+                rule_ids=sorted(rule_ids),
+                source_mention_ids=sorted(source_mention_ids),
+                source_edge_ids=sorted(edge.edge_id for edge in group),
+                values={
+                    "source_status": source_status,
+                    "relation": relation,
+                    "target_status": target_status,
+                    "candidate_sources": sorted(candidate_sources),
+                    "candidate_targets": sorted(candidate_targets),
+                    "candidate_pair_count": str(len(group)),
+                    "raw_variants": sorted({_edge_raw_variant(edge) for edge in group}),
+                },
+            ),
+        )
+    return facts
+
+
+def _relation_candidate_status(
+    candidates: set[str],
+    *,
+    missing: bool,
+    endpoint_name: str,
+) -> str:
+    if missing:
+        return f"{endpoint_name}_missing"
+    if len(candidates) > 1:
+        return f"{endpoint_name}_ambiguous"
+    return f"{endpoint_name}_resolved"
+
+
+def _matched_token_indices_key(edge: CanonicalEdge) -> tuple[str, ...]:
+    value = edge.canonical_detail.get("matched_token_indices")
+    if isinstance(value, list):
+        return tuple(str(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(str(item) for item in value)
+    return (edge.edge_id,)
+
+
+def _relation_component_facts(
+    edges: Sequence[CanonicalEdge],
+    *,
+    start_index: int,
+) -> list[FactRow]:
+    facts: list[FactRow] = []
+    for edge in edges:
+        if edge.edge_type != "relation":
+            continue
+        components = edge.canonical_detail.get("relation_components")
+        if not isinstance(components, list):
+            continue
+        raw_variant = _edge_raw_variant(edge)
+        for index, component in enumerate(components):
+            component_text = str(component).strip().lower()
+            if not component_text:
+                continue
+            facts.append(
+                _make_fact_row(
+                    caption_id=edge.caption_id,
+                    fact_index=start_index + len(facts),
+                    fact_type="relation_component",
+                    count_key=(
+                        "relation_component:"
+                        f"{edge.canonical_label}:{index}:{component_text}"
+                    ),
+                    rule_ids=_edge_only_rule_ids(edge),
+                    source_mention_ids=[edge.source_mention_id, edge.target_mention_id],
+                    source_edge_ids=[edge.edge_id],
+                    values={
+                        "relation": edge.canonical_label,
+                        "component_index": str(index),
+                        "component": component_text,
+                        "raw_variants": [raw_variant],
+                    },
+                ),
+            )
     return facts
 
 
@@ -278,38 +601,69 @@ def _object_pair_facts(
     for caption_id in sorted(objects_by_caption):
         object_map = objects_by_caption[caption_id]
         canonical_objects = sorted(object_map)
+        mention_ids_by_object = {
+            canonical: [mention.mention_id for mention in object_mentions]
+            for canonical, object_mentions in object_map.items()
+        }
+        rule_ids_by_object = {
+            canonical: {
+                rule_id
+                for mention in object_mentions
+                for rule_id in _mention_rule_ids(mention)
+            }
+            for canonical, object_mentions in object_map.items()
+        }
+        parent_concepts_by_object = {
+            canonical: sorted(
+                {
+                    parent
+                    for mention in object_mentions
+                    for parent in mention.parent_concepts
+                },
+            )
+            for canonical, object_mentions in object_map.items()
+        }
+        parent_synset_ids_by_object = {
+            canonical: sorted(
+                {
+                    parent_synset_id
+                    for mention in object_mentions
+                    for parent_synset_id in _parent_synset_ids(mention)
+                },
+            )
+            for canonical, object_mentions in object_map.items()
+        }
         for source_object in canonical_objects:
             for target_object in canonical_objects:
                 if source_object == target_object:
                     continue
-                source_mentions = object_map[source_object]
-                target_mentions = object_map[target_object]
-                source_mention_ids = [
-                    mention.mention_id
-                    for mention in source_mentions + target_mentions
-                ]
+                rule_ids = sorted(
+                    rule_ids_by_object[source_object]
+                    | rule_ids_by_object[target_object]
+                    | {COUNT_RULE_ID},
+                )
                 facts.append(
-                    FactRow(
+                    _make_fact_row(
                         caption_id=caption_id,
-                        fact_id=make_local_id("f", start_index + len(facts)),
+                        fact_index=start_index + len(facts),
                         fact_type="object_pair_in_caption",
                         count_key=(
                             "object_pair_in_caption:"
                             f"{source_object}:{target_object}"
                         ),
-                        rule_ids=sorted(
-                            set(
-                                rule_id
-                                for mention in source_mentions + target_mentions
-                                for rule_id in _mention_rule_ids(mention)
-                            )
-                            | {COUNT_RULE_ID},
+                        rule_ids=rule_ids,
+                        source_mention_ids=(
+                            mention_ids_by_object[source_object]
+                            + mention_ids_by_object[target_object]
                         ),
-                        source_mention_ids=source_mention_ids,
                         source_edge_ids=[],
                         values={
                             "source_object": source_object,
                             "target_object": target_object,
+                            "source_parent_concepts": parent_concepts_by_object[source_object],
+                            "source_parent_synset_ids": parent_synset_ids_by_object[source_object],
+                            "target_parent_concepts": parent_concepts_by_object[target_object],
+                            "target_parent_synset_ids": parent_synset_ids_by_object[target_object],
                         },
                     ),
                 )
@@ -322,6 +676,7 @@ def _aggregate_facts(
     fact_type: str,
     table_key_prefix: str,
     value_fields: Sequence[str],
+    extra_value_fields: Sequence[str] = (),
 ) -> list[CountRow]:
     buckets: dict[tuple[str, ...], list[FactRow]] = defaultdict(list)
     for fact in facts:
@@ -337,6 +692,8 @@ def _aggregate_facts(
             field: value
             for field, value in zip(value_fields, key_values, strict=True)
         }
+        for field in extra_value_fields:
+            values[field] = _collect_value_field(bucket, field)
         count_key = ":".join((table_key_prefix, *key_values))
         rows.append(
             CountRow(
@@ -353,6 +710,19 @@ def _aggregate_facts(
     return rows
 
 
+def _collect_value_field(facts: Iterable[FactRow], field: str) -> str:
+    values: set[str] = set()
+    for fact in facts:
+        value = fact.values.get(field)
+        if isinstance(value, list):
+            values.update(str(item) for item in value if str(item))
+        elif value is not None:
+            text = str(value)
+            if text:
+                values.add(text)
+    return "|".join(sorted(values))
+
+
 def _write_count_table_tsv(path: Path, rows: Sequence[CountRow]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     value_fields = _value_fields(rows)
@@ -365,7 +735,7 @@ def _write_count_table_tsv(path: Path, rows: Sequence[CountRow]) -> None:
         "raw_variants",
         "rule_ids",
     ]
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    with atomic_text_writer(path, newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
         writer.writeheader()
         for row in rows:
@@ -420,6 +790,13 @@ def _edge_rule_ids(
     return _unique_sorted(rule_ids)
 
 
+def _edge_only_rule_ids(edge: CanonicalEdge) -> list[str]:
+    rule_ids = [edge.rule_id]
+    if edge.canonical_rule_id is not None:
+        rule_ids.append(edge.canonical_rule_id)
+    return _unique_sorted(rule_ids)
+
+
 def source_mention_rule_ids_without_parent(mention: CanonicalMention) -> list[str]:
     return [
         RAW_MENTION_RULE_BY_TYPE[mention.mention_type],
@@ -445,9 +822,28 @@ def _collect_rule_ids(facts: Iterable[FactRow]) -> list[str]:
 
 
 def _raw_variant(mention: CanonicalMention) -> str:
-    if mention.raw_lemma:
-        return mention.raw_lemma
-    return mention.raw_text
+    raw_text = mention.raw_text.strip().lower()
+    if raw_text:
+        return raw_text
+    return mention.raw_lemma.strip().lower()
+
+
+def _edge_raw_variant(edge: CanonicalEdge) -> str:
+    raw_span = edge.canonical_detail.get("raw_span_surface")
+    if isinstance(raw_span, str) and raw_span.strip():
+        return raw_span.strip().lower()
+    return edge.label.strip().lower()
+
+
+def _parent_synset_ids(mention: CanonicalMention) -> list[str]:
+    value = mention.canonical_detail.get("parent_oewn_synsets")
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str) and item]
+    if isinstance(value, tuple):
+        return [item for item in value if isinstance(item, str) and item]
+    if isinstance(value, str) and value:
+        return [item for item in value.split("|") if item]
+    return []
 
 
 def _unique_sorted(values: Iterable[str]) -> list[str]:

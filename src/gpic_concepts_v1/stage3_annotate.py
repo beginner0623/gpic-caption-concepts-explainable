@@ -10,19 +10,16 @@ from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from gpic_concepts_v1.io_jsonl import iter_jsonl, write_jsonl
 from gpic_concepts_v1.schema import JsonObject, JsonRecord, PIPELINE_VERSION
 from gpic_concepts_v1.stage1 import make_caption_record_from_gpic_row
 from gpic_concepts_v1.stage2_preprocess import (
-    OBJECT_MWE_TOKEN_EXTENSION,
-    ObjectMweEntry,
     ProtectedSpanRecord,
     Stage2DependencyError,
     Stage2InputError,
-    ensure_stage2_extensions,
-    load_object_mwes,
     protect_doc,
     spacy,
 )
@@ -38,10 +35,8 @@ except ModuleNotFoundError:  # pragma: no cover - keeps non-spaCy tests importab
 
 DEFAULT_STAGE3_MODEL = "en_core_web_trf"
 DEFAULT_STAGE3_BATCH_SIZE = 128
-OBJECT_MWE_POS_CORRECTOR = "gpic_object_mwe_pos_corrector"
 
 TAG_RULE_ID = "R6"
-OBJECT_MWE_POS_RULE_ID = "R7"
 PARSER_RULE_ID = "R8"
 POS_MORPH_RULE_ID = "R9"
 LEMMA_RULE_ID = "R10"
@@ -89,16 +84,15 @@ class AnnotatedStage3Doc:
     meta: JsonObject
 
 
-def register_object_mwe_pos_corrector() -> None:
-    """Register R7 as a spaCy component once per Python process."""
-    if spacy is None:
-        raise Stage2DependencyError(
-            "Stage 3 requires spaCy. Install/use the project environment."
-        )
-    ensure_stage2_extensions()
-    if Language.has_factory(OBJECT_MWE_POS_CORRECTOR):
-        return
-    Language.component(OBJECT_MWE_POS_CORRECTOR)(_object_mwe_pos_corrector)
+@dataclass(slots=True)
+class Stage3Timing:
+    """Benchmark-only timing accumulator for Stage 2 preparation and Stage 3."""
+
+    stage2_seconds: float = 0.0
+    stage3_seconds: float = 0.0
+    stage2_doc_count: int = 0
+    stage3_doc_count: int = 0
+    stage3_batch_count: int = 0
 
 
 def make_stage3_nlp(
@@ -106,13 +100,12 @@ def make_stage3_nlp(
     *,
     gpu_mode: str = "none",
 ) -> Language:
-    """Load the Stage 3 spaCy model and attach the R7 component."""
+    """Load the Stage 3 spaCy model."""
     if spacy is None:
         raise Stage2DependencyError(
             "Stage 3 requires spaCy. Install/use the project environment."
         )
     gpu_info = _configure_spacy_gpu(gpu_mode)
-    register_object_mwe_pos_corrector()
     try:
         nlp = spacy.load(model, disable=["ner"])
     except OSError as exc:
@@ -120,11 +113,6 @@ def make_stage3_nlp(
             f"Could not load spaCy model {model!r}. Run scripts/setup_env.ps1."
         ) from exc
 
-    if OBJECT_MWE_POS_CORRECTOR not in nlp.pipe_names:
-        if "parser" in nlp.pipe_names:
-            nlp.add_pipe(OBJECT_MWE_POS_CORRECTOR, before="parser")
-        else:
-            nlp.add_pipe(OBJECT_MWE_POS_CORRECTOR, last=True)
     nlp.meta["gpic_model_id"] = model
     nlp.meta["gpic_gpu_mode"] = gpu_info["gpu_mode"]
     nlp.meta["gpic_gpu_enabled"] = gpu_info["gpu_enabled"]
@@ -135,7 +123,6 @@ def annotate_gpic_sentence_row(
     row: Mapping[str, Any],
     *,
     nlp: Language,
-    object_mwes: Sequence[ObjectMweEntry] = (),
 ) -> Stage3Record:
     """Annotate one confirmed sentence GPIC row."""
     caption_record = make_caption_record_from_gpic_row(row)
@@ -145,7 +132,6 @@ def annotate_gpic_sentence_row(
         caption_id=caption_record.caption_id,
         caption=caption_record.caption,
         nlp=nlp,
-        object_mwes=object_mwes,
         meta=caption_record.meta,
     )
 
@@ -155,7 +141,6 @@ def annotate_text(
     caption_id: str,
     caption: str,
     nlp: Language,
-    object_mwes: Sequence[ObjectMweEntry] = (),
     meta: Mapping[str, Any] | None = None,
 ) -> Stage3Record:
     """Apply Stage 2 protection and Stage 3 annotation to one sentence caption."""
@@ -163,7 +148,6 @@ def annotate_text(
         caption_id=caption_id,
         caption=caption,
         nlp=nlp,
-        object_mwes=object_mwes,
         meta=meta,
     )
     doc = _run_pipeline_components(nlp, prepared.doc)
@@ -174,7 +158,6 @@ def run_stage3_annotate(
     input_path: str | Path,
     *,
     output_path: str | Path,
-    object_mwes_path: str | Path,
     summary_path: str | Path | None = None,
     model: str = DEFAULT_STAGE3_MODEL,
     limit: int | None = None,
@@ -185,7 +168,6 @@ def run_stage3_annotate(
     if batch_size < 1:
         raise ValueError("batch_size must be greater than zero")
     nlp = make_stage3_nlp(model, gpu_mode=gpu_mode)
-    object_mwes = load_object_mwes(object_mwes_path)
 
     span_counts: Counter[str] = Counter()
     token_total = 0
@@ -197,7 +179,6 @@ def run_stage3_annotate(
         for record in iter_stage3_records_from_rows(
             iter_jsonl(input_path),
             nlp=nlp,
-            object_mwes=object_mwes,
             batch_size=batch_size,
             limit=limit,
         ):
@@ -219,7 +200,6 @@ def run_stage3_annotate(
         "gpu_mode": nlp.meta.get("gpic_gpu_mode", gpu_mode),
         "gpu_enabled": bool(nlp.meta.get("gpic_gpu_enabled", False)),
         "output_path": str(output_path),
-        "object_mwe_lexicon_size": len(object_mwes),
         "token_total": token_total,
         "noun_chunk_total": noun_chunk_total,
         "protected_span_counts": dict(sorted(span_counts.items())),
@@ -233,9 +213,9 @@ def iter_stage3_records_from_rows(
     rows: Iterable[Mapping[str, Any]],
     *,
     nlp: Language,
-    object_mwes: Sequence[ObjectMweEntry] = (),
     batch_size: int = DEFAULT_STAGE3_BATCH_SIZE,
     limit: int | None = None,
+    timing: Stage3Timing | None = None,
 ) -> Iterator[Stage3Record]:
     """Yield Stage 3 records from Stage 1 sentence rows using batched nlp.pipe."""
     if batch_size < 1:
@@ -244,11 +224,21 @@ def iter_stage3_records_from_rows(
 
     def flush_pending() -> Iterator[Stage3Record]:
         docs = [item.doc for item in pending]
-        for prepared, doc in zip(
-            pending,
-            nlp.pipe(docs, batch_size=batch_size),
-            strict=True,
-        ):
+        if timing is None:
+            for prepared, doc in zip(
+                pending,
+                nlp.pipe(docs, batch_size=batch_size),
+                strict=True,
+            ):
+                yield _stage3_record_from_doc(prepared, doc, nlp=nlp)
+            return
+
+        stage3_start = perf_counter()
+        annotated_docs = list(nlp.pipe(docs, batch_size=batch_size))
+        timing.stage3_seconds += perf_counter() - stage3_start
+        timing.stage3_doc_count += len(annotated_docs)
+        timing.stage3_batch_count += 1
+        for prepared, doc in zip(pending, annotated_docs, strict=True):
             yield _stage3_record_from_doc(prepared, doc, nlp=nlp)
 
     for index, row in enumerate(rows):
@@ -257,15 +247,17 @@ def iter_stage3_records_from_rows(
         caption_record = make_caption_record_from_gpic_row(row)
         if caption_record.skipped or caption_record.caption_shape != "sentence":
             raise Stage2InputError("Stage 3 only accepts sentence captions")
-        pending.append(
-            _prepare_stage3_doc(
-                caption_id=caption_record.caption_id,
-                caption=caption_record.caption,
-                nlp=nlp,
-                object_mwes=object_mwes,
-                meta=caption_record.meta,
-            )
+        stage2_start = perf_counter()
+        prepared = _prepare_stage3_doc(
+            caption_id=caption_record.caption_id,
+            caption=caption_record.caption,
+            nlp=nlp,
+            meta=caption_record.meta,
         )
+        if timing is not None:
+            timing.stage2_seconds += perf_counter() - stage2_start
+            timing.stage2_doc_count += 1
+        pending.append(prepared)
         if len(pending) >= batch_size:
             yield from flush_pending()
             pending.clear()
@@ -278,9 +270,9 @@ def iter_annotated_docs_from_rows(
     rows: Iterable[Mapping[str, Any]],
     *,
     nlp: Language,
-    object_mwes: Sequence[ObjectMweEntry] = (),
     batch_size: int = DEFAULT_STAGE3_BATCH_SIZE,
     limit: int | None = None,
+    timing: Stage3Timing | None = None,
 ) -> Iterator[AnnotatedStage3Doc]:
     """Yield annotated spaCy Docs without serializing the Stage 3 evidence table."""
     if batch_size < 1:
@@ -289,11 +281,28 @@ def iter_annotated_docs_from_rows(
 
     def flush_pending() -> Iterator[AnnotatedStage3Doc]:
         docs = [item.doc for item in pending]
-        for prepared, doc in zip(
-            pending,
-            nlp.pipe(docs, batch_size=batch_size),
-            strict=True,
-        ):
+        if timing is None:
+            for prepared, doc in zip(
+                pending,
+                nlp.pipe(docs, batch_size=batch_size),
+                strict=True,
+            ):
+                yield AnnotatedStage3Doc(
+                    caption_id=prepared.caption_id,
+                    caption=prepared.caption,
+                    doc=doc,
+                    protected_spans=prepared.protected_spans,
+                    rule_ids=prepared.stage2_rule_ids + _stage3_rule_ids(prepared.protected_spans),
+                    meta=dict(prepared.meta),
+                )
+            return
+
+        stage3_start = perf_counter()
+        annotated_docs = list(nlp.pipe(docs, batch_size=batch_size))
+        timing.stage3_seconds += perf_counter() - stage3_start
+        timing.stage3_doc_count += len(annotated_docs)
+        timing.stage3_batch_count += 1
+        for prepared, doc in zip(pending, annotated_docs, strict=True):
             yield AnnotatedStage3Doc(
                 caption_id=prepared.caption_id,
                 caption=prepared.caption,
@@ -309,29 +318,23 @@ def iter_annotated_docs_from_rows(
         caption_record = make_caption_record_from_gpic_row(row)
         if caption_record.skipped or caption_record.caption_shape != "sentence":
             raise Stage2InputError("Stage 3 only accepts sentence captions")
-        pending.append(
-            _prepare_stage3_doc(
-                caption_id=caption_record.caption_id,
-                caption=caption_record.caption,
-                nlp=nlp,
-                object_mwes=object_mwes,
-                meta=caption_record.meta,
-            )
+        stage2_start = perf_counter()
+        prepared = _prepare_stage3_doc(
+            caption_id=caption_record.caption_id,
+            caption=caption_record.caption,
+            nlp=nlp,
+            meta=caption_record.meta,
         )
+        if timing is not None:
+            timing.stage2_seconds += perf_counter() - stage2_start
+            timing.stage2_doc_count += 1
+        pending.append(prepared)
         if len(pending) >= batch_size:
             yield from flush_pending()
             pending.clear()
 
     if pending:
         yield from flush_pending()
-
-
-def _object_mwe_pos_corrector(doc: Doc) -> Doc:
-    for token in doc:
-        if token._.get(OBJECT_MWE_TOKEN_EXTENSION):
-            token.tag_ = "NN"
-            token.pos_ = "NOUN"
-    return doc
 
 
 def _configure_spacy_gpu(gpu_mode: str) -> JsonObject:
@@ -361,14 +364,12 @@ def _prepare_stage3_doc(
     caption_id: str,
     caption: str,
     nlp: Language,
-    object_mwes: Sequence[ObjectMweEntry] = (),
     meta: Mapping[str, Any] | None = None,
 ) -> _PreparedStage3Doc:
     doc = nlp.make_doc(caption)
     doc, protected_spans, stage2_rule_ids = protect_doc(
         doc,
         nlp=nlp,
-        object_mwes=object_mwes,
     )
     return _PreparedStage3Doc(
         caption_id=caption_id,
@@ -407,10 +408,8 @@ def _run_pipeline_components(nlp: Language, doc: Doc) -> Doc:
 
 
 def _stage3_rule_ids(protected_spans: Sequence[ProtectedSpanRecord]) -> list[str]:
-    rule_ids = [TAG_RULE_ID, PARSER_RULE_ID, POS_MORPH_RULE_ID, LEMMA_RULE_ID, NOUN_CHUNK_RULE_ID]
-    if any(span.kind == "object_mwe" for span in protected_spans):
-        rule_ids.insert(1, OBJECT_MWE_POS_RULE_ID)
-    return rule_ids
+    _ = protected_spans
+    return [TAG_RULE_ID, PARSER_RULE_ID, POS_MORPH_RULE_ID, LEMMA_RULE_ID, NOUN_CHUNK_RULE_ID]
 
 
 def _token_to_dict(token: Token) -> JsonObject:
@@ -427,7 +426,6 @@ def _token_to_dict(token: Token) -> JsonObject:
         "char_start": token.idx,
         "char_end": token.idx + len(token.text),
         "whitespace": token.whitespace_,
-        "is_object_mwe": bool(token._.get(OBJECT_MWE_TOKEN_EXTENSION)),
     }
 
 

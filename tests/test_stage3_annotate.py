@@ -1,14 +1,19 @@
 from pathlib import Path
+import importlib.util
+import os
 import tempfile
 import unittest
+import uuid
 
 from gpic_concepts_v1.io_jsonl import iter_jsonl, write_jsonl
-from gpic_concepts_v1.stage2_preprocess import ObjectMweEntry, Stage2InputError
+from gpic_concepts_v1.stage2_preprocess import Stage2InputError
 from gpic_concepts_v1.stage3_annotate import (
     DEFAULT_STAGE3_MODEL,
     Stage3DependencyError,
+    Stage3Timing,
     annotate_gpic_sentence_row,
     annotate_text,
+    iter_annotated_docs_from_rows,
     make_stage3_nlp,
     run_stage3_annotate,
     spacy,
@@ -18,11 +23,7 @@ from gpic_concepts_v1.stage3_annotate import (
 def can_load_trf_model() -> bool:
     if spacy is None:
         return False
-    try:
-        spacy.load(DEFAULT_STAGE3_MODEL, disable=["ner"])
-    except OSError:
-        return False
-    return True
+    return importlib.util.find_spec(DEFAULT_STAGE3_MODEL) is not None
 
 
 @unittest.skipUnless(can_load_trf_model(), "en_core_web_trf is not installed")
@@ -57,26 +58,46 @@ class Stage3AnnotateTest(unittest.TestCase):
         with self.assertRaises(Stage2InputError):
             annotate_gpic_sentence_row(row, nlp=self.nlp)
 
-    def test_object_mwe_pos_correction_marks_only_object_mwe_tokens(self) -> None:
+    def test_object_mwe_pos_correction_is_not_part_of_stage3(self) -> None:
         record = annotate_text(
             caption_id="c2",
             caption="A traffic light stands near the road.",
             nlp=self.nlp,
-            object_mwes=[
-                ObjectMweEntry(
-                    phrase="traffic light",
-                    canonical="traffic_light",
-                    source="test",
-                )
-            ],
         )
         mwe_tokens = [token for token in record.tokens if token["text"] == "traffic light"]
+        traffic = [token for token in record.tokens if token["text"] == "traffic"]
+        light = [token for token in record.tokens if token["text"] == "light"]
 
-        self.assertEqual(len(mwe_tokens), 1)
-        self.assertTrue(mwe_tokens[0]["is_object_mwe"])
-        self.assertEqual(mwe_tokens[0]["pos"], "NOUN")
-        self.assertEqual(mwe_tokens[0]["tag"], "NN")
-        self.assertIn("R7", record.rule_ids)
+        self.assertEqual(mwe_tokens, [])
+        self.assertEqual(len(traffic), 1)
+        self.assertEqual(len(light), 1)
+        self.assertNotIn("R7", record.rule_ids)
+
+    def test_iter_annotated_docs_records_stage2_and_stage3_timing(self) -> None:
+        rows = [
+            {
+                "key": "k1",
+                "caption": "A dog sits on a bench.",
+                "caption_type": "short",
+            }
+        ]
+        timing = Stage3Timing()
+
+        docs = list(
+            iter_annotated_docs_from_rows(
+                rows,
+                nlp=self.nlp,
+                batch_size=1,
+                timing=timing,
+            )
+        )
+
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(timing.stage2_doc_count, 1)
+        self.assertEqual(timing.stage3_doc_count, 1)
+        self.assertEqual(timing.stage3_batch_count, 1)
+        self.assertGreaterEqual(timing.stage2_seconds, 0.0)
+        self.assertGreater(timing.stage3_seconds, 0.0)
 
     def test_run_stage3_annotate_writes_records(self) -> None:
         rows = [
@@ -86,19 +107,17 @@ class Stage3AnnotateTest(unittest.TestCase):
                 "caption_type": "short",
             }
         ]
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+        tmp_path = _stage3_temp_base() / uuid.uuid4().hex
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        try:
             input_path = tmp_path / "sentence_rows.jsonl"
             output_path = tmp_path / "stage3_records.jsonl"
             summary_path = tmp_path / "summary.jsonl"
-            lexicon_path = tmp_path / "object_mwes.tsv"
             write_jsonl(input_path, rows)
-            lexicon_path.write_text("phrase\tcanonical\tsource\tnotes\n", encoding="utf-8")
 
             summary = run_stage3_annotate(
                 input_path,
                 output_path=output_path,
-                object_mwes_path=lexicon_path,
                 summary_path=summary_path,
             )
             records = list(iter_jsonl(output_path))
@@ -109,6 +128,35 @@ class Stage3AnnotateTest(unittest.TestCase):
             self.assertGreater(summary["noun_chunk_total"], 0)
             self.assertEqual(len(records), 1)
             self.assertEqual(summary_rows[0]["model"], DEFAULT_STAGE3_MODEL)
+        finally:
+            for path in sorted(tmp_path.rglob("*"), reverse=True):
+                if path.is_file():
+                    path.unlink(missing_ok=True)
+                elif path.is_dir():
+                    path.rmdir()
+            tmp_path.rmdir()
+
+
+def _stage3_temp_base() -> Path:
+    roots = [
+        os.environ.get("GPIC_TEST_TEMP_ROOT"),
+        str(Path.cwd() / ".tmp_tests"),
+        r"C:\Users\Public\Documents\ESTsoft\CreatorTemp",
+        tempfile.gettempdir(),
+    ]
+    for root in roots:
+        if not root:
+            continue
+        base = Path(root) / "stage3_annotate"
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            probe = base / f"{uuid.uuid4().hex}.tmp"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return base
+        except PermissionError:
+            continue
+    raise PermissionError("no writable temp directory for stage3 tests")
 
 
 if __name__ == "__main__":

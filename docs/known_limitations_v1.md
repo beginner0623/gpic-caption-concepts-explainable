@@ -166,17 +166,19 @@ v1은 inherited agent repair를 하지 않는다.
 
 ### 5.4 Relation 한계
 
-v1 relation은 ADP/preposition과 direct `pobj`에 기반한다.
+v1 relation은 single ADP/preposition + direct `pobj` 또는 reviewed
+preposition MWE + final direct `pobj`에 기반한다.
 
 하지 않는 것:
 
-- `in front of`, `on top of`, `next to` 같은 relation MWE collapse
+- reviewed preposition MWE lexicon 밖의 relation MWE repair
 - relation source disambiguation
 - self-edge repair
 - prepositional object를 action patient로 바꾸는 해석
 - relation label semantic normalization
 
-따라서 relation table에는 raw preposition 중심의 단순 relation이 나온다.
+따라서 relation table에는 single ADP raw relation과 documented preposition
+MWE relation만 나온다.
 
 ## 6. Reference와 coreference 한계
 

@@ -32,11 +32,6 @@ def parse_args() -> argparse.Namespace:
         help="Output stage3_records.jsonl path.",
     )
     parser.add_argument(
-        "--object-mwes",
-        required=True,
-        help="Object MWE TSV lexicon path.",
-    )
-    parser.add_argument(
         "--summary",
         help="Optional output JSONL path for one Stage 3 summary row.",
     )
@@ -76,7 +71,6 @@ def main() -> None:
     summary = run_stage3_annotate(
         args.input,
         output_path=args.output,
-        object_mwes_path=args.object_mwes,
         summary_path=args.summary,
         model=args.model,
         limit=args.limit,

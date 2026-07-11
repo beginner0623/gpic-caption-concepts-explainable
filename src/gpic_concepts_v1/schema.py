@@ -12,42 +12,71 @@ from typing import Any, Literal, TypeAlias
 
 
 PIPELINE_VERSION = "v1_explainable"
+MISSING_SOURCE_MENTION_ID = "__missing_source__"
+MISSING_TARGET_MENTION_ID = "__missing_target__"
+MISSING_ENDPOINT_MENTION_IDS = frozenset(
+    (MISSING_SOURCE_MENTION_ID, MISSING_TARGET_MENTION_ID)
+)
 
 CaptionShape: TypeAlias = Literal["sentence", "tag_list"]
 Confidence: TypeAlias = Literal["high", "medium", "low"]
 MentionType: TypeAlias = Literal["object", "attribute", "quantity", "action"]
-EdgeType: TypeAlias = Literal["has_attribute", "has_quantity", "event_role", "relation"]
+EdgeType: TypeAlias = Literal[
+    "has_attribute",
+    "has_quantity",
+    "event_role",
+    "relation",
+    "ambiguous_relation_candidate",
+]
 FactType: TypeAlias = Literal[
     "entity_exists",
+    "attribute_exists",
+    "quantity_exists",
+    "object_parent",
     "has_attribute",
     "has_quantity",
     "action_event",
     "event_role",
     "relation",
+    "ambiguous_relation_candidate",
+    "relation_component",
     "object_pair_in_caption",
 ]
-CanonicalSource: TypeAlias = Literal["lexicon", "raw_fallback"]
-ParentSource: TypeAlias = Literal["lexicon"]
+CanonicalSource: TypeAlias = Literal["lexicon", "raw_fallback", "gpic_observed_inventory"]
+ParentSource: TypeAlias = Literal["lexicon", "selected_oewn_hypernym"]
 JsonObject: TypeAlias = dict[str, Any]
 
 
 CAPTION_SHAPES = frozenset(("sentence", "tag_list"))
 CONFIDENCES = frozenset(("high", "medium", "low"))
 MENTION_TYPES = frozenset(("object", "attribute", "quantity", "action"))
-EDGE_TYPES = frozenset(("has_attribute", "has_quantity", "event_role", "relation"))
+EDGE_TYPES = frozenset(
+    (
+        "has_attribute",
+        "has_quantity",
+        "event_role",
+        "relation",
+        "ambiguous_relation_candidate",
+    )
+)
 FACT_TYPES = frozenset(
     (
         "entity_exists",
+        "attribute_exists",
+        "quantity_exists",
+        "object_parent",
         "has_attribute",
         "has_quantity",
         "action_event",
         "event_role",
         "relation",
+        "ambiguous_relation_candidate",
+        "relation_component",
         "object_pair_in_caption",
     )
 )
-CANONICAL_SOURCES = frozenset(("lexicon", "raw_fallback"))
-PARENT_SOURCES = frozenset(("lexicon",))
+CANONICAL_SOURCES = frozenset(("lexicon", "raw_fallback", "gpic_observed_inventory"))
+PARENT_SOURCES = frozenset(("lexicon", "selected_oewn_hypernym"))
 
 
 def make_local_id(prefix: Literal["m", "e", "f"], index: int) -> str:
@@ -107,6 +136,12 @@ def _require_local_id(name: str, value: str, prefix: str) -> None:
     suffix = value[len(prefix) :]
     if not value.startswith(prefix) or not suffix.isdigit():
         raise ValueError(f"{name} must look like {prefix}0, {prefix}1, ...: {value!r}")
+
+
+def _require_edge_endpoint_id(name: str, value: str, edge_type: str) -> None:
+    if edge_type == "ambiguous_relation_candidate" and value in MISSING_ENDPOINT_MENTION_IDS:
+        return
+    _require_local_id(name, value, "m")
 
 
 def _require_optional_int(name: str, value: int | None) -> None:
@@ -215,8 +250,8 @@ class RawEdge(JsonRecord):
         _require_text("caption_id", self.caption_id)
         _require_local_id("edge_id", self.edge_id, "e")
         _require_choice("edge_type", self.edge_type, EDGE_TYPES)
-        _require_local_id("source_mention_id", self.source_mention_id, "m")
-        _require_local_id("target_mention_id", self.target_mention_id, "m")
+        _require_edge_endpoint_id("source_mention_id", self.source_mention_id, self.edge_type)
+        _require_edge_endpoint_id("target_mention_id", self.target_mention_id, self.edge_type)
         _require_text("label", self.label)
         _require_text("rule_id", self.rule_id)
         _require_stage("stage", self.stage, 4)
@@ -272,13 +307,14 @@ class CanonicalEdge(JsonRecord):
     rule_id: str
     canonical_rule_id: str | None
     confidence: Confidence = "high"
+    canonical_detail: JsonObject = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _require_text("caption_id", self.caption_id)
         _require_local_id("edge_id", self.edge_id, "e")
         _require_choice("edge_type", self.edge_type, EDGE_TYPES)
-        _require_local_id("source_mention_id", self.source_mention_id, "m")
-        _require_local_id("target_mention_id", self.target_mention_id, "m")
+        _require_edge_endpoint_id("source_mention_id", self.source_mention_id, self.edge_type)
+        _require_edge_endpoint_id("target_mention_id", self.target_mention_id, self.edge_type)
         _require_text("label", self.label)
         _require_text("canonical_label", self.canonical_label)
         _require_text("source_canonical", self.source_canonical)
@@ -286,6 +322,7 @@ class CanonicalEdge(JsonRecord):
         _require_text("rule_id", self.rule_id)
         _require_optional_text("canonical_rule_id", self.canonical_rule_id)
         _require_choice("confidence", self.confidence, CONFIDENCES)
+        _require_json_object("canonical_detail", self.canonical_detail)
 
 
 @dataclass(slots=True)

@@ -1,8 +1,10 @@
 import gzip
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+import uuid
 
 from gpic_concepts_v1.io_jsonl import iter_jsonl
 from gpic_concepts_v1.stage1_loader import run_stage1_records
@@ -37,8 +39,9 @@ class Stage1LoaderTest(unittest.TestCase):
                 "dataset_split": ["val"],
             },
         ]
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+        tmp_path = _stage1_temp_base() / uuid.uuid4().hex
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        try:
             input_path = tmp_path / "input.jsonl.gz"
             caption_records_path = tmp_path / "caption_records.jsonl"
             sentence_rows_path = tmp_path / "sentence_rows.jsonl"
@@ -63,14 +66,17 @@ class Stage1LoaderTest(unittest.TestCase):
             self.assertEqual(len(sentence_rows), 2)
             self.assertEqual({row["key"] for row in sentence_rows}, {"k1", "k3"})
             self.assertEqual(summary_rows[0]["caption_type_counts"]["tag"], 1)
+        finally:
+            _remove_temp_tree(tmp_path)
 
     def test_limit_applies_across_inputs(self) -> None:
         rows = [
             {"key": "k1", "caption": "A dog.", "caption_type": "short"},
             {"key": "k2", "caption": "A cat.", "caption_type": "short"},
         ]
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+        tmp_path = _stage1_temp_base() / uuid.uuid4().hex
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        try:
             input_path = tmp_path / "input.jsonl.gz"
             output_path = tmp_path / "caption_records.jsonl"
             write_gz_jsonl(input_path, rows)
@@ -83,6 +89,39 @@ class Stage1LoaderTest(unittest.TestCase):
 
             self.assertEqual(summary["total"], 1)
             self.assertEqual(len(list(iter_jsonl(output_path))), 1)
+        finally:
+            _remove_temp_tree(tmp_path)
+
+
+def _stage1_temp_base() -> Path:
+    roots = [
+        os.environ.get("GPIC_TEST_TEMP_ROOT"),
+        str(Path.cwd() / ".tmp_tests"),
+        r"C:\Users\Public\Documents\ESTsoft\CreatorTemp",
+        tempfile.gettempdir(),
+    ]
+    for root in roots:
+        if not root:
+            continue
+        base = Path(root) / "stage1_loader"
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            probe = base / f"{uuid.uuid4().hex}.tmp"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return base
+        except PermissionError:
+            continue
+    raise PermissionError("no writable temp directory for stage1 tests")
+
+
+def _remove_temp_tree(path: Path) -> None:
+    for child in sorted(path.rglob("*"), reverse=True):
+        if child.is_file():
+            child.unlink(missing_ok=True)
+        elif child.is_dir():
+            child.rmdir()
+    path.rmdir()
 
 
 if __name__ == "__main__":

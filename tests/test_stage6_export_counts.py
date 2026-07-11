@@ -1,10 +1,13 @@
 from pathlib import Path
 import csv
+import os
 import tempfile
 import unittest
+import uuid
 
 from gpic_concepts_v1.io_jsonl import iter_jsonl, write_jsonl
 from gpic_concepts_v1.schema import CanonicalEdge, CanonicalMention
+from gpic_concepts_v1.schema import MISSING_SOURCE_MENTION_ID
 from gpic_concepts_v1.stage6_export_counts import (
     export_count_facts,
     run_stage6_export_counts,
@@ -50,6 +53,7 @@ def edge(
     rule_id: str,
     *,
     canonical_rule_id: str | None = None,
+    canonical_detail: dict[str, object] | None = None,
 ) -> CanonicalEdge:
     return CanonicalEdge(
         caption_id=caption_id,
@@ -63,6 +67,7 @@ def edge(
         target_canonical="unused",
         rule_id=rule_id,
         canonical_rule_id=canonical_rule_id,
+        canonical_detail=canonical_detail or {},
     )
 
 
@@ -79,6 +84,7 @@ class Stage6ExportCountsTest(unittest.TestCase):
                 raw_lemma="dog",
                 parent_concepts=["animal"],
                 parent_rule_id="R23",
+                canonical_detail={"parent_oewn_synsets": ["oewn-animal-n"]},
             ),
             mention(
                 "c1",
@@ -97,8 +103,7 @@ class Stage6ExportCountsTest(unittest.TestCase):
                 "R22",
                 raw_text="sits",
                 raw_lemma="sit",
-                parent_concepts=["body_pose_action"],
-                parent_rule_id="R23",
+                canonical_detail={"action_type": "pose"},
             ),
             mention("c1", "m4", "object", "bench", "R19"),
             mention("c2", "m0", "object", "cat", "R19"),
@@ -108,31 +113,229 @@ class Stage6ExportCountsTest(unittest.TestCase):
             edge("c1", "e0", "has_attribute", "m0", "m1", "has_attribute", "R13"),
             edge("c1", "e1", "has_quantity", "m0", "m2", "has_quantity", "R14"),
             edge("c1", "e2", "event_role", "m3", "m0", "agent", "R16"),
-            edge("c1", "e3", "relation", "m0", "m4", "on", "R18", canonical_rule_id="R24"),
+            edge(
+                "c1",
+                "e3",
+                "relation",
+                "m0",
+                "m4",
+                "in front of",
+                "R18.1",
+                canonical_rule_id="R24",
+                canonical_detail={
+                    "relation_source": "preposition_mwe",
+                    "raw_span_surface": "in front of",
+                    "relation_components": ["in", "front", "of"],
+                },
+            ),
+            edge(
+                "c1",
+                "e4",
+                "ambiguous_relation_candidate",
+                "m0",
+                "m4",
+                "in front of",
+                "R18.1",
+                canonical_rule_id="R24",
+                canonical_detail={
+                    "relation_source": "preposition_mwe",
+                    "raw_span_surface": "in front of",
+                    "candidate_source_count": 2,
+                    "relation_components": ["in", "front", "of"],
+                },
+            ),
             edge("c2", "e0", "relation", "m0", "m1", "on", "R18", canonical_rule_id="R24"),
         ]
 
         result = export_count_facts(mentions, edges)
         fact_types = [fact.fact_type for fact in result.facts]
         self.assertEqual(fact_types.count("entity_exists"), 4)
+        self.assertEqual(fact_types.count("attribute_exists"), 1)
+        self.assertEqual(fact_types.count("quantity_exists"), 1)
+        self.assertEqual(fact_types.count("object_parent"), 1)
         self.assertEqual(fact_types.count("action_event"), 1)
         self.assertEqual(fact_types.count("has_attribute"), 1)
         self.assertEqual(fact_types.count("has_quantity"), 1)
         self.assertEqual(fact_types.count("event_role"), 1)
         self.assertEqual(fact_types.count("relation"), 2)
+        self.assertEqual(fact_types.count("ambiguous_relation_candidate"), 1)
+        self.assertEqual(fact_types.count("relation_component"), 3)
         self.assertEqual(fact_types.count("object_pair_in_caption"), 4)
 
         relation_rows = result.count_tables["relation_triple_counts.tsv"]
         relation_keys = {row.count_key for row in relation_rows}
-        self.assertIn("relation:dog:on:bench", relation_keys)
+        self.assertIn("relation:dog:in front of:bench", relation_keys)
         self.assertIn("relation:cat:on:mat", relation_keys)
 
         attribute_rows = result.count_tables["attribute_counts.tsv"]
         self.assertEqual(attribute_rows[0].count_key, "attribute:red")
+        object_rows = result.count_tables["object_counts.tsv"]
+        dog_row = next(row for row in object_rows if row.count_key == "object:dog")
+        self.assertEqual(dog_row.raw_variants, ["dogs"])
+        self.assertEqual(dog_row.values["parent_concepts"], "animal")
+        self.assertEqual(dog_row.values["parent_synset_ids"], "oewn-animal-n")
+        dog_relation_row = next(
+            row for row in relation_rows if row.count_key == "relation:dog:in front of:bench"
+        )
+        self.assertEqual(dog_relation_row.values["source_parent_concepts"], "animal")
+        self.assertEqual(dog_relation_row.values["source_parent_synset_ids"], "oewn-animal-n")
+        action_fact = next(fact for fact in result.facts if fact.fact_type == "action_event")
+        self.assertNotIn("action_type", action_fact.values)
         pair_rows = result.count_tables["object_cooccurrence_pair_counts.tsv"]
         pair_keys = {row.count_key for row in pair_rows}
         self.assertIn("object_pair_in_caption:dog:bench", pair_keys)
         self.assertIn("object_pair_in_caption:bench:dog", pair_keys)
+        dog_bench_pair = next(
+            row for row in pair_rows if row.count_key == "object_pair_in_caption:dog:bench"
+        )
+        self.assertEqual(dog_bench_pair.values["source_parent_concepts"], "animal")
+        self.assertEqual(dog_bench_pair.values["source_parent_synset_ids"], "oewn-animal-n")
+        attribute_fact = next(fact for fact in result.facts if fact.fact_type == "has_attribute")
+        self.assertNotIn("attribute_type", attribute_fact.values)
+        relation_component_rows = result.count_tables["relation_component_counts.tsv"]
+        relation_component_keys = {row.count_key for row in relation_component_rows}
+        self.assertIn("relation_component:in front of:0:in", relation_component_keys)
+        self.assertIn("relation_component:in front of:1:front", relation_component_keys)
+        self.assertIn("relation_component:in front of:2:of", relation_component_keys)
+        candidate_rows = result.count_tables["ambiguous_relation_candidate_counts.tsv"]
+        candidate_keys = {row.count_key for row in candidate_rows}
+        self.assertIn(
+            "ambiguous_relation_candidate:source_resolved:in front of:target_resolved",
+            candidate_keys,
+        )
+        parent_rows = result.count_tables["object_parent_counts.tsv"]
+        self.assertEqual(parent_rows[0].values["parent_synset_id"], "oewn-animal-n")
+        object_attribute_rows = result.count_tables["object_attribute_pair_counts.tsv"]
+        self.assertNotIn("attribute_type", object_attribute_rows[0].values)
+
+    def test_ambiguous_relation_candidate_count_is_per_mwe_occurrence(self) -> None:
+        mentions = [
+            mention("c1", "m0", "object", "text", "R19"),
+            mention("c1", "m1", "object", "cup title", "R19"),
+            mention("c1", "m2", "object", "date text", "R19"),
+            mention("c1", "m3", "object", "hashtag", "R19"),
+        ]
+        detail = {
+            "relation_source": "preposition_mwe",
+            "raw_span_surface": "along with",
+            "matched_token_indices": [75, 76],
+            "candidate_source_count": 2,
+            "candidate_target_count": 2,
+            "relation_components": ["along", "with"],
+        }
+        edges = [
+            edge(
+                "c1",
+                "e0",
+                "ambiguous_relation_candidate",
+                "m0",
+                "m2",
+                "along with",
+                "R18.1",
+                canonical_rule_id="R24",
+                canonical_detail=detail,
+            ),
+            edge(
+                "c1",
+                "e1",
+                "ambiguous_relation_candidate",
+                "m0",
+                "m3",
+                "along with",
+                "R18.1",
+                canonical_rule_id="R24",
+                canonical_detail=detail,
+            ),
+            edge(
+                "c1",
+                "e2",
+                "ambiguous_relation_candidate",
+                "m1",
+                "m2",
+                "along with",
+                "R18.1",
+                canonical_rule_id="R24",
+                canonical_detail=detail,
+            ),
+            edge(
+                "c1",
+                "e3",
+                "ambiguous_relation_candidate",
+                "m1",
+                "m3",
+                "along with",
+                "R18.1",
+                canonical_rule_id="R24",
+                canonical_detail=detail,
+            ),
+        ]
+
+        result = export_count_facts(mentions, edges)
+        facts = [
+            fact
+            for fact in result.facts
+            if fact.fact_type == "ambiguous_relation_candidate"
+        ]
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0].values["source_status"], "source_ambiguous")
+        self.assertEqual(facts[0].values["target_status"], "target_ambiguous")
+        self.assertEqual(facts[0].values["candidate_pair_count"], "4")
+        self.assertEqual(facts[0].source_edge_ids, ["e0", "e1", "e2", "e3"])
+
+        rows = result.count_tables["ambiguous_relation_candidate_counts.tsv"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows[0].count_key,
+            "ambiguous_relation_candidate:source_ambiguous:along with:target_ambiguous",
+        )
+        self.assertEqual(rows[0].count, 1)
+        self.assertEqual(rows[0].values["candidate_pair_count"], "4")
+        self.assertEqual(rows[0].values["candidate_targets"], "date text|hashtag")
+
+    def test_missing_source_ambiguous_relation_candidate_count(self) -> None:
+        mentions = [
+            mention("c1", "m0", "object", "wall", "R19"),
+        ]
+        edges = [
+            edge(
+                "c1",
+                "e0",
+                "ambiguous_relation_candidate",
+                MISSING_SOURCE_MENTION_ID,
+                "m0",
+                "in front of",
+                "R18.1",
+                canonical_rule_id="R24",
+                canonical_detail={
+                    "relation_source": "preposition_mwe",
+                    "raw_span_surface": "in front of",
+                    "matched_token_indices": [4, 5, 6],
+                    "candidate_source_count": 0,
+                    "candidate_target_count": 1,
+                    "source_endpoint_status": "source_missing",
+                    "target_endpoint_status": "target_resolved",
+                    "relation_components": ["in", "front", "of"],
+                },
+            ),
+        ]
+
+        result = export_count_facts(mentions, edges)
+        facts = [
+            fact
+            for fact in result.facts
+            if fact.fact_type == "ambiguous_relation_candidate"
+        ]
+
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0].values["source_status"], "source_missing")
+        self.assertEqual(facts[0].values["target_status"], "target_resolved")
+        self.assertEqual(facts[0].values["candidate_sources"], ["source_missing"])
+        self.assertEqual(facts[0].values["candidate_targets"], ["wall"])
+        self.assertEqual(facts[0].source_mention_ids, ["m0"])
+        self.assertEqual(
+            facts[0].count_key,
+            "ambiguous_relation_candidate:source_missing:in front of:target_resolved",
+        )
 
     def test_run_stage6_writes_facts_and_tsv_tables(self) -> None:
         mentions = [
@@ -144,8 +347,9 @@ class Stage6ExportCountsTest(unittest.TestCase):
             edge("c1", "e0", "event_role", "m2", "m0", "agent", "R16"),
             edge("c1", "e1", "relation", "m0", "m1", "on", "R18", canonical_rule_id="R24"),
         ]
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+        tmp_path = _stage6_temp_base() / uuid.uuid4().hex
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        try:
             canonical_mentions_path = tmp_path / "canonical_mentions.jsonl"
             canonical_edges_path = tmp_path / "canonical_edges.jsonl"
             output_dir = tmp_path / "stage6"
@@ -163,6 +367,7 @@ class Stage6ExportCountsTest(unittest.TestCase):
             self.assertTrue((output_dir / "facts.jsonl").exists())
             self.assertTrue((output_dir / "object_counts.tsv").exists())
             self.assertTrue((output_dir / "relation_triple_counts.tsv").exists())
+            self.assertTrue((output_dir / "ambiguous_relation_candidate_counts.tsv").exists())
             self.assertEqual(summary["fact_type_counts"]["relation"], 1)
             self.assertEqual(len(list(iter_jsonl(output_dir / "facts.jsonl"))), summary["fact_total"])
             self.assertEqual(list(iter_jsonl(summary_path))[0]["fact_total"], summary["fact_total"])
@@ -170,6 +375,35 @@ class Stage6ExportCountsTest(unittest.TestCase):
             with (output_dir / "object_counts.tsv").open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle, delimiter="\t"))
             self.assertEqual(rows[0]["count"], "1")
+        finally:
+            for path in sorted(tmp_path.rglob("*"), reverse=True):
+                if path.is_file():
+                    path.unlink(missing_ok=True)
+                elif path.is_dir():
+                    path.rmdir()
+            tmp_path.rmdir()
+
+
+def _stage6_temp_base() -> Path:
+    roots = [
+        os.environ.get("GPIC_TEST_TEMP_ROOT"),
+        str(Path.cwd() / ".tmp_tests"),
+        r"C:\Users\Public\Documents\ESTsoft\CreatorTemp",
+        tempfile.gettempdir(),
+    ]
+    for root in roots:
+        if not root:
+            continue
+        base = Path(root) / "stage6_export_counts"
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            probe = base / f"{uuid.uuid4().hex}.tmp"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return base
+        except PermissionError:
+            continue
+    raise PermissionError("no writable temp directory for stage6 tests")
 
 
 if __name__ == "__main__":

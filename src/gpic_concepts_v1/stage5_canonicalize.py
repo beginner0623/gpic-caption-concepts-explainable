@@ -3,12 +3,15 @@
 Stage 5 consumes Stage 4 raw mentions and raw edges. It only applies the
 documented v1 canonicalization rules R19-R24:
 
-- object synonym lookup
-- attribute synonym and type lookup
+- object selected-synset canonical surface when GPIC inventory provides it,
+  otherwise raw-surface fallback
+- attribute synonym lookup
 - quantity raw-preserving
 - action synonym lookup
-- parent concept lookup
-- relation raw-preserving
+- object parent concepts from selected OEWN immediate hypernym evidence
+- no action parent concepts until an action-parent lexicon is built
+- relation raw-preserving for single-ADP labels, while preserving Stage 4
+  preposition MWE relation labels and metadata
 
 It does not create new mentions, rewrite source/target IDs, resolve references,
 or repair event roles.
@@ -28,6 +31,8 @@ from gpic_concepts_v1.schema import (
     CanonicalEdge,
     CanonicalMention,
     JsonObject,
+    MISSING_SOURCE_MENTION_ID,
+    MISSING_TARGET_MENTION_ID,
     RawEdge,
     RawMention,
 )
@@ -54,7 +59,7 @@ class Stage5Lexicons:
     attribute_synonyms: Mapping[str, LexiconValue]
     attribute_types: Mapping[str, LexiconValue]
     action_synonyms: Mapping[str, LexiconValue]
-    action_parents: Mapping[str, tuple[LexiconValue, ...]]
+    action_types: Mapping[str, LexiconValue]
 
 
 @dataclass(slots=True)
@@ -72,7 +77,7 @@ def load_stage5_lexicons(lexicon_dir: str | Path) -> Stage5Lexicons:
         attribute_synonyms=_load_value_map(root / "attribute_synonyms.tsv", "raw", "canonical"),
         attribute_types=_load_value_map(root / "attribute_types.tsv", "canonical", "attribute_type"),
         action_synonyms=_load_value_map(root / "action_synonyms.tsv", "raw", "canonical"),
-        action_parents=_load_multi_value_map(root / "action_parents.tsv", "canonical", "parent"),
+        action_types=_load_value_map(root / "action_types.tsv", "canonical", "action_type"),
     )
 
 
@@ -165,11 +170,57 @@ def _canonicalize_mention(
 
     if raw.mention_type == "object":
         canonical_rule_id = OBJECT_CANON_RULE_ID
-        canonical, canonical_source = _lookup_or_fallback(
-            raw_label,
-            lexicons.object_synonyms,
+        canonical = raw_label
+        canonical_source = "raw_fallback"
+        inventory_canonical = raw.source_detail.get("canonical_surface")
+        if isinstance(inventory_canonical, str) and inventory_canonical:
+            canonical = inventory_canonical
+            canonical_source = "gpic_observed_inventory"
+            detail["canonical_selection_tag"] = raw.source_detail.get(
+                "canonical_selection_tag",
+                "",
+            )
+            canonical_label_key = raw.source_detail.get("canonical_label_key")
+            if isinstance(canonical_label_key, str) and canonical_label_key:
+                detail["canonical_label_key"] = canonical_label_key
+        canonical_candidate_lemmas = _source_detail_list(
+            raw.source_detail,
+            "canonical_candidate_lemmas",
         )
-        parent_concepts, parent_source = _lookup_parents(canonical, lexicons.object_parents)
+        if canonical_candidate_lemmas:
+            detail["canonical_candidate_lemmas"] = canonical_candidate_lemmas
+        canonical_candidate_counts = raw.source_detail.get("canonical_candidate_lemma_counts")
+        if isinstance(canonical_candidate_counts, str) and canonical_candidate_counts:
+            detail["canonical_candidate_lemma_counts"] = canonical_candidate_counts
+        ngram_surfaces = _source_detail_list(
+            raw.source_detail,
+            "google_ngram_candidate_surfaces",
+        )
+        if ngram_surfaces:
+            detail["google_ngram_candidate_surfaces"] = ngram_surfaces
+        ngram_frequencies = raw.source_detail.get("google_ngram_candidate_mean_frequencies")
+        if isinstance(ngram_frequencies, str) and ngram_frequencies:
+            detail["google_ngram_candidate_mean_frequencies"] = ngram_frequencies
+        parent_synset_ids = _source_detail_list(raw.source_detail, "parent_oewn_synsets")
+        parent_source = "selected_oewn_hypernym" if parent_synset_ids else None
+        selected_synset = raw.source_detail.get("selected_oewn_synset")
+        if isinstance(selected_synset, str) and selected_synset:
+            detail["selected_oewn_synset"] = selected_synset
+            selected_lexfile = raw.source_detail.get("selected_oewn_lexfile")
+            if isinstance(selected_lexfile, str) and selected_lexfile:
+                detail["selected_oewn_lexfile"] = selected_lexfile
+        parent_lexfiles = _source_detail_list(raw.source_detail, "parent_oewn_lexfiles")
+        parent_lemmas = _source_detail_list(raw.source_detail, "parent_lemmas")
+        parent_concepts = _parent_display_labels(parent_lemmas, parent_synset_ids)
+        parent_selection_tag = raw.source_detail.get("parent_selection_tag")
+        if parent_synset_ids:
+            detail["parent_oewn_synsets"] = parent_synset_ids
+        if parent_lexfiles:
+            detail["parent_oewn_lexfiles"] = parent_lexfiles
+        if parent_lemmas:
+            detail["parent_lemmas"] = parent_lemmas
+        if isinstance(parent_selection_tag, str) and parent_selection_tag:
+            detail["parent_selection_tag"] = parent_selection_tag
     elif raw.mention_type == "attribute":
         canonical_rule_id = ATTRIBUTE_CANON_RULE_ID
         canonical, canonical_source = _lookup_or_fallback(
@@ -178,11 +229,6 @@ def _canonicalize_mention(
         )
         parent_concepts = []
         parent_source = None
-        attribute_type = lexicons.attribute_types.get(_key(canonical))
-        if attribute_type is not None:
-            detail["attribute_type"] = attribute_type.value
-            if attribute_type.source is not None:
-                detail["attribute_type_source"] = attribute_type.source
     elif raw.mention_type == "quantity":
         canonical_rule_id = QUANTITY_CANON_RULE_ID
         canonical = raw_label
@@ -195,7 +241,8 @@ def _canonicalize_mention(
             raw_label,
             lexicons.action_synonyms,
         )
-        parent_concepts, parent_source = _lookup_parents(canonical, lexicons.action_parents)
+        parent_concepts = []
+        parent_source = None
     else:
         raise ValueError(f"unsupported mention type: {raw.mention_type}")
 
@@ -211,7 +258,7 @@ def _canonicalize_mention(
         parent_rule_id=PARENT_RULE_ID if parent_concepts else None,
         canonical_source=canonical_source,  # type: ignore[arg-type]
         parent_source=parent_source,  # type: ignore[arg-type]
-        confidence="high" if canonical_source == "lexicon" else "medium",
+        confidence="high" if canonical_source != "raw_fallback" else "medium",
         canonical_detail=detail,
     )
 
@@ -221,17 +268,29 @@ def _canonicalize_edge(
     *,
     canonical_by_key: Mapping[tuple[str, str], CanonicalMention],
 ) -> CanonicalEdge:
-    source = _require_canonical_mention(
+    source = _canonical_mention_or_missing(
         canonical_by_key,
         raw.caption_id,
         raw.source_mention_id,
     )
-    target = _require_canonical_mention(
+    target = _canonical_mention_or_missing(
         canonical_by_key,
         raw.caption_id,
         raw.target_mention_id,
     )
-    canonical_rule_id = RELATION_CANON_RULE_ID if raw.edge_type == "relation" else None
+    relation_like = raw.edge_type in {"relation", "ambiguous_relation_candidate"}
+    canonical_rule_id = RELATION_CANON_RULE_ID if relation_like else None
+    detail = dict(raw.source_detail)
+    if relation_like:
+        detail["relation_canonical_policy"] = (
+            "preposition_mwe_preserved"
+            if detail.get("relation_source") == "preposition_mwe"
+            else "single_adp_raw_preserving"
+        )
+    if source is None:
+        detail.setdefault("source_endpoint_status", "source_missing")
+    if target is None:
+        detail.setdefault("target_endpoint_status", "target_missing")
 
     return CanonicalEdge(
         caption_id=raw.caption_id,
@@ -241,11 +300,12 @@ def _canonicalize_edge(
         target_mention_id=raw.target_mention_id,
         label=raw.label,
         canonical_label=raw.label,
-        source_canonical=source.canonical,
-        target_canonical=target.canonical,
+        source_canonical=source.canonical if source is not None else "source_missing",
+        target_canonical=target.canonical if target is not None else "target_missing",
         rule_id=raw.rule_id,
         canonical_rule_id=canonical_rule_id,
         confidence=raw.confidence,
+        canonical_detail=detail,
     )
 
 
@@ -269,8 +329,30 @@ def _lookup_parents(
     return [entry.value for entry in entries], "lexicon"
 
 
+def _source_detail_list(source_detail: Mapping[str, Any], key: str) -> list[str]:
+    value = source_detail.get(key)
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str) and item]
+    if isinstance(value, tuple):
+        return [item for item in value if isinstance(item, str) and item]
+    if isinstance(value, str) and value:
+        return [item for item in value.split("|") if item]
+    return []
+
+
+def _parent_display_labels(parent_lemmas: Sequence[str], parent_synset_ids: Sequence[str]) -> list[str]:
+    labels: list[str] = []
+    for value in parent_lemmas:
+        _, separator, label = value.partition(":")
+        display = label if separator else value
+        display = "; ".join(part.strip() for part in display.split(";") if part.strip())
+        if display:
+            labels.append(display)
+    return labels if labels else list(parent_synset_ids)
+
+
 def _raw_label(raw: RawMention) -> str:
-    label = raw.lemma.strip() if raw.lemma.strip() else raw.text.strip().lower()
+    label = raw.text.strip().lower()
     if not label:
         raise ValueError(f"raw mention {raw.mention_id} has no label")
     return label
@@ -365,3 +447,13 @@ def _require_canonical_mention(
             f"edge endpoint {(caption_id, mention_id)!r} has no canonical mention",
         )
     return mention
+
+
+def _canonical_mention_or_missing(
+    canonical_by_key: Mapping[tuple[str, str], CanonicalMention],
+    caption_id: str,
+    mention_id: str,
+) -> CanonicalMention | None:
+    if mention_id in {MISSING_SOURCE_MENTION_ID, MISSING_TARGET_MENTION_ID}:
+        return None
+    return _require_canonical_mention(canonical_by_key, caption_id, mention_id)

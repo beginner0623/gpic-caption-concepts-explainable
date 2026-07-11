@@ -8,6 +8,7 @@ from gpic_concepts_v1.schema import (
     CaptionRecord,
     CountRow,
     FactRow,
+    MISSING_SOURCE_MENTION_ID,
     RawEdge,
     RawMention,
     make_global_id,
@@ -100,6 +101,43 @@ class SchemaTest(unittest.TestCase):
 
         self.assertEqual(mention.parent_concepts, ["animal"])
         self.assertEqual(edge.canonical_label, "on")
+
+    def test_missing_endpoint_ids_are_only_for_ambiguous_relation_candidates(self) -> None:
+        raw_edge = RawEdge(
+            caption_id="000001",
+            edge_id="e0",
+            edge_type="ambiguous_relation_candidate",
+            source_mention_id=MISSING_SOURCE_MENTION_ID,
+            target_mention_id="m0",
+            label="in front of",
+            rule_id="R18.1",
+        )
+        canonical_edge = CanonicalEdge(
+            caption_id="000001",
+            edge_id="e0",
+            edge_type="ambiguous_relation_candidate",
+            source_mention_id=MISSING_SOURCE_MENTION_ID,
+            target_mention_id="m0",
+            label="in front of",
+            canonical_label="in front of",
+            source_canonical="source_missing",
+            target_canonical="wall",
+            rule_id="R18.1",
+            canonical_rule_id="R24",
+        )
+
+        self.assertEqual(raw_edge.source_mention_id, MISSING_SOURCE_MENTION_ID)
+        self.assertEqual(canonical_edge.source_canonical, "source_missing")
+        with self.assertRaises(ValueError):
+            RawEdge(
+                caption_id="000001",
+                edge_id="e1",
+                edge_type="relation",
+                source_mention_id=MISSING_SOURCE_MENTION_ID,
+                target_mention_id="m0",
+                label="in front of",
+                rule_id="R18.1",
+            )
 
     def test_fact_and_count_rows(self) -> None:
         fact = FactRow(
