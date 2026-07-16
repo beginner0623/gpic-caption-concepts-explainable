@@ -72,7 +72,7 @@ class ProgressWriter:
         if self._path is None:
             return
         now = time.time()
-        current_rss_kib = current_rss_kib()
+        rss_kib = current_rss_kib()
         payload: dict[str, Any] = {
             "status": status,
             "stage": self.stage_name,
@@ -81,10 +81,10 @@ class ProgressWriter:
             "started_at_epoch": self.started_at,
             "updated_at_epoch": now,
             "elapsed_seconds": round(now - self.started_at, 3),
-            "current_rss_kib": current_rss_kib,
+            "current_rss_kib": rss_kib,
             "current_rss_gib": (
-                round(current_rss_kib / 1024 / 1024, 3)
-                if current_rss_kib is not None
+                round(rss_kib / 1024 / 1024, 3)
+                if rss_kib is not None
                 else None
             ),
             "memory_limit_gib": self.memory_config.resolved_memory_limit_gib,

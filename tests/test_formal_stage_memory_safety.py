@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
+import tempfile
 import unittest
 
-from gpic_concepts_v1.runtime_memory import MemorySafetyConfig
+from gpic_concepts_v1.runtime_memory import MemorySafetyConfig, ProgressWriter
 from gpic_concepts_v1.stage4_extract_raw import run_stage4_extract_raw
 from gpic_concepts_v1.stage5_canonicalize import run_stage5_canonicalize
 from gpic_concepts_v1.stage6_export_counts import run_stage6_export_counts
@@ -63,6 +65,23 @@ class FormalStageMemorySafetyContractTest(unittest.TestCase):
             rss_reserve_gib=40,
         )
         self.assertEqual(by_reserve.effective_max_rss_gib, 200)
+
+    def test_progress_writer_records_memory_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            progress_path = Path(root) / "progress.json"
+            writer = ProgressWriter(
+                progress_path,
+                stage_name="stage-test",
+                memory_config=MemorySafetyConfig(memory_limit_gib=32),
+            )
+            writer.write(status="running", phase="probe", note="ok")
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(progress["status"], "running")
+        self.assertEqual(progress["stage"], "stage-test")
+        self.assertEqual(progress["memory_limit_gib"], 32)
+        self.assertEqual(progress["memory_limit_source"], "explicit")
+        self.assertIn("current_rss_kib", progress)
 
 
 if __name__ == "__main__":

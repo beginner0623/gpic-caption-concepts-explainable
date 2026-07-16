@@ -397,9 +397,11 @@ class Stage6ExportCountsTest(unittest.TestCase):
             )
 
             self.assertTrue((output_dir / "facts.jsonl").exists())
+            self.assertTrue((output_dir / "stage6_count_accumulators.sqlite3").exists())
             self.assertTrue((output_dir / "object_counts.tsv").exists())
             self.assertTrue((output_dir / "relation_triple_counts.tsv").exists())
             self.assertTrue((output_dir / "ambiguous_relation_candidate_counts.tsv").exists())
+            self.assertEqual(summary["count_backend"], "sqlite")
             self.assertEqual(summary["fact_type_counts"]["relation"], 1)
             self.assertEqual(len(list(iter_jsonl(output_dir / "facts.jsonl"))), summary["fact_total"])
             self.assertEqual(list(iter_jsonl(summary_path))[0]["fact_total"], summary["fact_total"])
@@ -407,6 +409,62 @@ class Stage6ExportCountsTest(unittest.TestCase):
             with (output_dir / "object_counts.tsv").open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle, delimiter="\t"))
             self.assertEqual(rows[0]["count"], "1")
+        finally:
+            for path in sorted(tmp_path.rglob("*"), reverse=True):
+                if path.is_file():
+                    path.unlink(missing_ok=True)
+                elif path.is_dir():
+                    path.rmdir()
+            tmp_path.rmdir()
+
+    def test_sqlite_and_memory_count_backends_match(self) -> None:
+        mentions = [
+            mention("c1", "m0", "object", "dog", "R19"),
+            mention("c1", "m1", "object", "bench", "R19"),
+            mention("c1", "m2", "action", "sit", "R22"),
+            mention("c2", "m0", "object", "dog", "R19"),
+            mention("c2", "m1", "object", "bench", "R19"),
+        ]
+        edges = [
+            edge("c1", "e0", "event_role", "m2", "m0", "agent", "R16"),
+            edge("c1", "e1", "relation", "m0", "m1", "on", "R18", canonical_rule_id="R24"),
+            edge("c2", "e0", "relation", "m0", "m1", "on", "R18", canonical_rule_id="R24"),
+        ]
+        tmp_path = _stage6_temp_base() / uuid.uuid4().hex
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        try:
+            canonical_mentions_path = tmp_path / "canonical_mentions.jsonl"
+            canonical_edges_path = tmp_path / "canonical_edges.jsonl"
+            write_jsonl(canonical_mentions_path, mentions)
+            write_jsonl(canonical_edges_path, edges)
+
+            sqlite_dir = tmp_path / "sqlite"
+            memory_dir = tmp_path / "memory"
+            run_stage6_export_counts(
+                canonical_mentions_path,
+                canonical_edges_path,
+                output_dir=sqlite_dir,
+                count_backend="sqlite",
+                sqlite_cache_rows=1,
+            )
+            run_stage6_export_counts(
+                canonical_mentions_path,
+                canonical_edges_path,
+                output_dir=memory_dir,
+                count_backend="memory",
+            )
+
+            for file_name in (
+                "object_counts.tsv",
+                "relation_triple_counts.tsv",
+                "object_cooccurrence_pair_counts.tsv",
+                "agent_patient_pair_counts.tsv",
+            ):
+                with self.subTest(file_name=file_name):
+                    self.assertEqual(
+                        (sqlite_dir / file_name).read_text(encoding="utf-8"),
+                        (memory_dir / file_name).read_text(encoding="utf-8"),
+                    )
         finally:
             for path in sorted(tmp_path.rglob("*"), reverse=True):
                 if path.is_file():

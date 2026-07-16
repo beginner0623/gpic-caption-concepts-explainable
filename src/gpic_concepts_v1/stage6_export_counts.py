@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import csv
 import json
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 from gpic_concepts_v1.atomic_io import atomic_text_writer
@@ -59,6 +60,7 @@ class CountAccumulator:
     values: dict[str, str]
     count: int = 0
     caption_count: int = 0
+    first_caption_id: str | None = None
     last_caption_id: str | None = None
     example_caption_ids: list[str] | None = None
     raw_variants: set[str] | None = None
@@ -300,6 +302,9 @@ def run_stage6_export_counts(
     rss_limit_fraction: float = 0.75,
     rss_reserve_gib: float = 16.0,
     progress_path: str | Path | None = None,
+    count_backend: str = "sqlite",
+    sqlite_db_path: str | Path | None = None,
+    sqlite_cache_rows: int = 50_000,
 ) -> dict[str, Any]:
     """Run Stage 6 and write facts plus TSV count tables.
 
@@ -311,7 +316,12 @@ def run_stage6_export_counts(
     output_root.mkdir(parents=True, exist_ok=True)
     facts_path = output_root / "facts.jsonl"
 
-    table_buckets = _new_count_table_buckets()
+    count_store = _make_count_store(
+        backend=count_backend,
+        output_root=output_root,
+        sqlite_db_path=sqlite_db_path,
+        sqlite_cache_rows=sqlite_cache_rows,
+    )
     fact_type_counts: dict[str, int] = defaultdict(int)
     fact_total = 0
     caption_group_total = 0
@@ -358,7 +368,7 @@ def run_stage6_export_counts(
                         json.dumps(to_jsonable(fact), ensure_ascii=False, sort_keys=True),
                     )
                     facts_handle.write("\n")
-                    _accumulate_count_fact(table_buckets, fact)
+                    count_store.accumulate(fact)
                     fact_type_counts[fact.fact_type] += 1
                     fact_total += 1
                 caption_group_total += 1
@@ -382,6 +392,7 @@ def run_stage6_export_counts(
                     f"group or the files are not in the same caption order: {leftover_caption!r}",
                 )
     except Exception as exc:
+        count_store.close()
         progress.write(
             status="failed",
             phase="stage6_streaming",
@@ -409,12 +420,10 @@ def run_stage6_export_counts(
 
     table_paths: dict[str, str] = {}
     table_row_counts: dict[str, int] = {}
-    for spec in COUNT_TABLE_SPECS:
-        rows = _count_rows_from_buckets(table_buckets[spec.file_name])
-        path = output_root / spec.file_name
-        _write_count_table_tsv(path, rows)
-        table_paths[spec.file_name] = str(path)
-        table_row_counts[spec.file_name] = len(rows)
+    try:
+        table_paths, table_row_counts = count_store.write_tables(output_root)
+    finally:
+        count_store.close()
 
     summary = {
         "canonical_mentions_path": str(canonical_mentions_path),
@@ -426,6 +435,9 @@ def run_stage6_export_counts(
         "table_paths": table_paths,
         "table_row_counts": dict(sorted(table_row_counts.items())),
         "export_mode": "streaming_count_accumulator",
+        "count_backend": count_store.backend_name,
+        "sqlite_db_path": count_store.db_path_for_summary,
+        "sqlite_cache_rows": sqlite_cache_rows if count_store.backend_name == "sqlite" else None,
         "memory_limit_gib": memory_config.resolved_memory_limit_gib,
         "memory_limit_source": memory_config.memory_limit_source,
         "rss_limit_fraction": rss_limit_fraction,
@@ -522,6 +534,264 @@ class _CaptionGroupReader:
         self._next = next(self._groups, None)
 
 
+class _MemoryCountStore:
+    backend_name = "memory"
+    db_path_for_summary: str | None = None
+
+    def __init__(self) -> None:
+        self._table_buckets = _new_count_table_buckets()
+
+    def accumulate(self, fact: FactRow) -> None:
+        _accumulate_count_fact(self._table_buckets, fact)
+
+    def write_tables(self, output_root: Path) -> tuple[dict[str, str], dict[str, int]]:
+        table_paths: dict[str, str] = {}
+        table_row_counts: dict[str, int] = {}
+        for spec in COUNT_TABLE_SPECS:
+            rows = _count_rows_from_buckets(self._table_buckets[spec.file_name])
+            path = output_root / spec.file_name
+            _write_count_table_tsv(path, rows)
+            table_paths[spec.file_name] = str(path)
+            table_row_counts[spec.file_name] = len(rows)
+        return table_paths, table_row_counts
+
+    def close(self) -> None:
+        return
+
+
+class _SqliteCountStore:
+    backend_name = "sqlite"
+
+    def __init__(self, db_path: str | Path, *, cache_rows: int) -> None:
+        if cache_rows < 1:
+            raise ValueError("--sqlite-cache-rows must be greater than zero")
+        self._db_path = Path(db_path)
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        for path in (
+            self._db_path,
+            self._db_path.with_name(self._db_path.name + "-wal"),
+            self._db_path.with_name(self._db_path.name + "-shm"),
+        ):
+            path.unlink(missing_ok=True)
+        self.db_path_for_summary = str(self._db_path)
+        self._cache_rows_limit = cache_rows
+        self._cache = _new_count_table_buckets()
+        self._cache_row_count = 0
+        self._conn = sqlite3.connect(str(self._db_path))
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA temp_store=FILE")
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS count_accumulators (
+                table_name TEXT NOT NULL,
+                key_json TEXT NOT NULL,
+                count_key TEXT NOT NULL,
+                values_json TEXT NOT NULL,
+                count INTEGER NOT NULL,
+                caption_count INTEGER NOT NULL,
+                last_caption_id TEXT,
+                example_caption_ids_json TEXT NOT NULL,
+                raw_variants_json TEXT NOT NULL,
+                rule_ids_json TEXT NOT NULL,
+                PRIMARY KEY (table_name, key_json)
+            )
+            """,
+        )
+        self._conn.commit()
+
+    def accumulate(self, fact: FactRow) -> None:
+        spec = COUNT_TABLE_SPEC_BY_FACT_TYPE.get(fact.fact_type)
+        if spec is None:
+            return
+        key_values = tuple(str(fact.values[field]) for field in spec.value_fields)
+        bucket = self._cache[spec.file_name]
+        before = len(bucket)
+        _accumulate_count_fact(self._cache, fact)
+        if len(bucket) != before:
+            self._cache_row_count += 1
+            if self._cache_row_count >= self._cache_rows_limit:
+                self.flush()
+
+    def flush(self) -> None:
+        if self._cache_row_count == 0:
+            return
+        with self._conn:
+            for table_name, bucket in self._cache.items():
+                for key_values, accumulator in bucket.items():
+                    self._merge_accumulator(table_name, key_values, accumulator)
+        self._cache = _new_count_table_buckets()
+        self._cache_row_count = 0
+
+    def write_tables(self, output_root: Path) -> tuple[dict[str, str], dict[str, int]]:
+        self.flush()
+        table_paths: dict[str, str] = {}
+        table_row_counts: dict[str, int] = {}
+        for spec in COUNT_TABLE_SPECS:
+            path = output_root / spec.file_name
+            row_count = _write_count_table_tsv_from_iter(
+                path,
+                value_fields=(*spec.value_fields, *spec.extra_value_fields),
+                rows=self._iter_count_rows(spec.file_name),
+            )
+            table_paths[spec.file_name] = str(path)
+            table_row_counts[spec.file_name] = row_count
+        return table_paths, table_row_counts
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def _merge_accumulator(
+        self,
+        table_name: str,
+        key_values: tuple[str, ...],
+        accumulator: CountAccumulator,
+    ) -> None:
+        key_json = _json_dumps_list(key_values)
+        row = self._conn.execute(
+            """
+            SELECT count_key, values_json, count, caption_count, last_caption_id,
+                   example_caption_ids_json, raw_variants_json, rule_ids_json
+            FROM count_accumulators
+            WHERE table_name = ? AND key_json = ?
+            """,
+            (table_name, key_json),
+        ).fetchone()
+        if row is None:
+            self._conn.execute(
+                """
+                INSERT INTO count_accumulators (
+                    table_name, key_json, count_key, values_json, count,
+                    caption_count, last_caption_id, example_caption_ids_json,
+                    raw_variants_json, rule_ids_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    table_name,
+                    key_json,
+                    accumulator.count_key,
+                    _json_dumps_mapping(accumulator.values),
+                    accumulator.count,
+                    accumulator.caption_count,
+                    accumulator.last_caption_id,
+                    _json_dumps_list(accumulator.example_caption_ids or []),
+                    _json_dumps_list(sorted(accumulator.raw_variants or set())),
+                    _json_dumps_list(sorted(accumulator.rule_ids or set())),
+                ),
+            )
+            return
+
+        (
+            count_key,
+            values_json,
+            old_count,
+            old_caption_count,
+            old_last_caption_id,
+            example_caption_ids_json,
+            raw_variants_json,
+            rule_ids_json,
+        ) = row
+        merged_caption_count = int(old_caption_count) + accumulator.caption_count
+        if (
+            accumulator.first_caption_id is not None
+            and old_last_caption_id == accumulator.first_caption_id
+        ):
+            merged_caption_count -= 1
+        self._conn.execute(
+            """
+            UPDATE count_accumulators
+            SET values_json = ?,
+                count = ?,
+                caption_count = ?,
+                last_caption_id = ?,
+                example_caption_ids_json = ?,
+                raw_variants_json = ?,
+                rule_ids_json = ?
+            WHERE table_name = ? AND key_json = ?
+            """,
+            (
+                _json_dumps_mapping(
+                    _merge_values(
+                        _json_loads_mapping(values_json),
+                        accumulator.values,
+                    ),
+                ),
+                int(old_count) + accumulator.count,
+                merged_caption_count,
+                accumulator.last_caption_id or old_last_caption_id,
+                _json_dumps_list(
+                    _limited_sorted_union(
+                        _json_loads_list(example_caption_ids_json),
+                        accumulator.example_caption_ids or [],
+                        limit=5,
+                    ),
+                ),
+                _json_dumps_list(
+                    sorted(
+                        set(_json_loads_list(raw_variants_json))
+                        | set(accumulator.raw_variants or set()),
+                    ),
+                ),
+                _json_dumps_list(
+                    sorted(
+                        set(_json_loads_list(rule_ids_json))
+                        | set(accumulator.rule_ids or set()),
+                    ),
+                ),
+                table_name,
+                key_json,
+            ),
+        )
+
+    def _iter_count_rows(self, table_name: str) -> Iterable[CountRow]:
+        for row in self._conn.execute(
+            """
+            SELECT count_key, values_json, count, caption_count,
+                   example_caption_ids_json, raw_variants_json, rule_ids_json
+            FROM count_accumulators
+            WHERE table_name = ?
+            ORDER BY count DESC, count_key ASC
+            """,
+            (table_name,),
+        ):
+            (
+                count_key,
+                values_json,
+                count,
+                caption_count,
+                example_caption_ids_json,
+                raw_variants_json,
+                rule_ids_json,
+            ) = row
+            yield CountRow(
+                count_key=count_key,
+                count=int(count),
+                caption_count=int(caption_count),
+                example_caption_ids=_json_loads_list(example_caption_ids_json),
+                raw_variants=_json_loads_list(raw_variants_json),
+                rule_ids=_json_loads_list(rule_ids_json),
+                values=_json_loads_mapping(values_json),
+            )
+
+
+def _make_count_store(
+    *,
+    backend: str,
+    output_root: Path,
+    sqlite_db_path: str | Path | None,
+    sqlite_cache_rows: int,
+) -> _MemoryCountStore | _SqliteCountStore:
+    if backend == "memory":
+        return _MemoryCountStore()
+    if backend == "sqlite":
+        return _SqliteCountStore(
+            sqlite_db_path or output_root / "stage6_count_accumulators.sqlite3",
+            cache_rows=sqlite_cache_rows,
+        )
+    raise ValueError("--count-backend must be one of: memory, sqlite")
+
+
 def _new_count_table_buckets() -> dict[str, dict[tuple[str, ...], CountAccumulator]]:
     return {
         spec.file_name: {}
@@ -554,6 +824,8 @@ def _accumulate_count_fact(
 
     accumulator.count += 1
     if accumulator.last_caption_id != fact.caption_id:
+        if accumulator.first_caption_id is None:
+            accumulator.first_caption_id = fact.caption_id
         accumulator.caption_count += 1
         accumulator.last_caption_id = fact.caption_id
         if accumulator.example_caption_ids is not None:
@@ -614,6 +886,49 @@ def _count_rows_from_buckets(
     ]
     rows.sort(key=lambda row: (-row.count, row.count_key))
     return rows
+
+
+def _json_dumps_list(values: Sequence[str]) -> str:
+    return json.dumps(list(values), ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_dumps_mapping(values: Mapping[str, str]) -> str:
+    return json.dumps(dict(values), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _json_loads_list(value: str) -> list[str]:
+    loaded = json.loads(value)
+    if not isinstance(loaded, list):
+        raise ValueError("expected JSON list")
+    return [str(item) for item in loaded if str(item)]
+
+
+def _json_loads_mapping(value: str) -> dict[str, str]:
+    loaded = json.loads(value)
+    if not isinstance(loaded, dict):
+        raise ValueError("expected JSON object")
+    return {str(key): str(item) for key, item in loaded.items()}
+
+
+def _limited_sorted_union(
+    existing: Sequence[str],
+    incoming: Sequence[str],
+    *,
+    limit: int,
+) -> list[str]:
+    return sorted(set(existing) | set(incoming))[:limit]
+
+
+def _merge_values(old_values: Mapping[str, str], new_values: Mapping[str, str]) -> dict[str, str]:
+    values = dict(old_values)
+    for field, new_value in new_values.items():
+        old_value = values.get(field, "")
+        if not old_value:
+            values[field] = new_value
+        elif new_value and old_value != new_value:
+            merged = sorted(set(old_value.split("|")) | set(new_value.split("|")))
+            values[field] = "|".join(item for item in merged if item)
+    return values
 
 
 def _make_fact_row(
@@ -1175,6 +1490,42 @@ def _write_count_table_tsv(path: Path, rows: Sequence[CountRow]) -> None:
                     "rule_ids": "|".join(row.rule_ids),
                 },
             )
+
+
+def _write_count_table_tsv_from_iter(
+    path: Path,
+    *,
+    value_fields: Sequence[str],
+    rows: Iterable[CountRow],
+) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "count_key",
+        *value_fields,
+        "count",
+        "caption_count",
+        "example_caption_ids",
+        "raw_variants",
+        "rule_ids",
+    ]
+    count = 0
+    with atomic_text_writer(path, newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    "count_key": row.count_key,
+                    **{field: row.values.get(field, "") for field in value_fields},
+                    "count": row.count,
+                    "caption_count": row.caption_count,
+                    "example_caption_ids": "|".join(row.example_caption_ids),
+                    "raw_variants": "|".join(row.raw_variants),
+                    "rule_ids": "|".join(row.rule_ids),
+                },
+            )
+            count += 1
+    return count
 
 
 def _value_fields(rows: Sequence[CountRow]) -> list[str]:
