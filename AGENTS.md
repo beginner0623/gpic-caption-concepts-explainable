@@ -81,6 +81,23 @@ immediately. Do not continue the main pipeline until the wrong local artifact
 has been identified and either removed with an absolute-path safety check or
 explicitly quarantined.
 
+When a remote MLXP/Kubernetes background job is started from this conversation,
+the local background-job guard is not sufficient. Record the remote status JSON
+path and PID file in the conversation and in the user-facing update. Before
+sending a final answer or otherwise ending the turn while that remote job may
+still be active, check all of the following from inside the pod:
+
+- remote status JSON, including `status`, `phase`, elapsed time, and updated
+  timestamp
+- remote parent PID and current child PID with `ps`
+- expected output directory/file growth or a completed summary artifact
+
+If the remote job is still running, do not send a final answer that implies the
+work is finished. Continue polling it, or explicitly state that monitoring is
+being handed back to the user only if the user asked to stop active monitoring.
+Do not rely on `scripts\list_active_background_jobs.py` for remote jobs; it
+only sees local repository-managed jobs.
+
 ## Long-Running Process Guard
 
 Long-running pipeline jobs must not be launched with ad hoc PowerShell
