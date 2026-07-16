@@ -98,6 +98,19 @@ being handed back to the user only if the user asked to stop active monitoring.
 Do not rely on `scripts\list_active_background_jobs.py` for remote jobs; it
 only sees local repository-managed jobs.
 
+For MLXP/Kubernetes resource safety, do not treat `free -h` inside the pod as
+the pod's usable memory limit. It may show node-level memory. Before launching
+or approving a production-scale run, check the pod resource limit with
+Kubernetes evidence such as:
+
+- `kubectl -n <ns> get pod <pod> -o jsonpath="{.spec.containers[0].resources}"`
+- or the active cgroup memory limit when available
+
+Report memory safety against the pod/container `limits.memory`, not against
+node-level available memory. If a previous phase has approached the limit, do
+not rerun the same memory shape. Change the implementation to streaming,
+chunked, or disk-backed processing first.
+
 ## Long-Running Process Guard
 
 Long-running pipeline jobs must not be launched with ad hoc PowerShell

@@ -10,11 +10,12 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import csv
+import json
 from pathlib import Path
 from typing import Any
 
 from gpic_concepts_v1.atomic_io import atomic_text_writer
-from gpic_concepts_v1.io_jsonl import iter_jsonl, write_jsonl
+from gpic_concepts_v1.io_jsonl import iter_jsonl, open_text, to_jsonable, write_jsonl
 from gpic_concepts_v1.schema import (
     CanonicalEdge,
     CanonicalMention,
@@ -40,6 +41,124 @@ RAW_MENTION_RULE_BY_TYPE = {
 class CountExportResult:
     facts: list[FactRow]
     count_tables: dict[str, list[CountRow]]
+
+
+@dataclass(frozen=True, slots=True)
+class CountTableSpec:
+    file_name: str
+    fact_type: str
+    table_key_prefix: str
+    value_fields: tuple[str, ...]
+    extra_value_fields: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class CountAccumulator:
+    count_key: str
+    values: dict[str, str]
+    count: int = 0
+    caption_count: int = 0
+    last_caption_id: str | None = None
+    example_caption_ids: list[str] | None = None
+    raw_variants: set[str] | None = None
+    rule_ids: set[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.example_caption_ids is None:
+            self.example_caption_ids = []
+        if self.raw_variants is None:
+            self.raw_variants = set()
+        if self.rule_ids is None:
+            self.rule_ids = set()
+
+
+COUNT_TABLE_SPECS = (
+    CountTableSpec(
+        "object_counts.tsv",
+        "entity_exists",
+        "object",
+        ("object",),
+        ("parent_concepts", "parent_synset_ids"),
+    ),
+    CountTableSpec("attribute_counts.tsv", "attribute_exists", "attribute", ("attribute",)),
+    CountTableSpec("quantity_counts.tsv", "quantity_exists", "quantity", ("quantity",)),
+    CountTableSpec(
+        "object_parent_counts.tsv",
+        "object_parent",
+        "object_parent",
+        ("object", "parent"),
+        ("parent_synset_id",),
+    ),
+    CountTableSpec(
+        "object_attribute_pair_counts.tsv",
+        "has_attribute",
+        "object_attribute_pair",
+        ("object", "attribute"),
+        ("object_parent_concepts", "object_parent_synset_ids"),
+    ),
+    CountTableSpec(
+        "object_quantity_pair_counts.tsv",
+        "has_quantity",
+        "object_quantity_pair",
+        ("object", "quantity"),
+        ("object_parent_concepts", "object_parent_synset_ids"),
+    ),
+    CountTableSpec("action_counts.tsv", "action_event", "action", ("action",)),
+    CountTableSpec(
+        "agent_patient_pair_counts.tsv",
+        "event_role",
+        "event_role",
+        ("action", "role", "target"),
+        (
+            "target_parent_concepts",
+            "target_parent_synset_ids",
+            "raw_role",
+            "voice_normalization",
+        ),
+    ),
+    CountTableSpec(
+        "relation_triple_counts.tsv",
+        "relation",
+        "relation",
+        ("source", "relation", "target"),
+        (
+            "source_parent_concepts",
+            "source_parent_synset_ids",
+            "target_parent_concepts",
+            "target_parent_synset_ids",
+        ),
+    ),
+    CountTableSpec(
+        "relation_component_counts.tsv",
+        "relation_component",
+        "relation_component",
+        ("relation", "component_index", "component"),
+    ),
+    CountTableSpec(
+        "ambiguous_relation_candidate_counts.tsv",
+        "ambiguous_relation_candidate",
+        "ambiguous_relation_candidate",
+        ("source_status", "relation", "target_status"),
+        ("candidate_sources", "candidate_targets", "candidate_pair_count"),
+    ),
+    CountTableSpec(
+        "object_cooccurrence_pair_counts.tsv",
+        "object_pair_in_caption",
+        "object_pair_in_caption",
+        ("source_object", "target_object"),
+        (
+            "source_parent_concepts",
+            "source_parent_synset_ids",
+            "target_parent_concepts",
+            "target_parent_synset_ids",
+        ),
+    ),
+)
+
+COUNT_TABLE_SPEC_BY_FACT_TYPE = {
+    spec.fact_type: spec
+    for spec in COUNT_TABLE_SPECS
+}
 
 
 def export_count_facts(
@@ -176,42 +295,234 @@ def run_stage6_export_counts(
     output_dir: str | Path,
     summary_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Run Stage 6 and write facts plus TSV count tables."""
-    mentions = list(iter_jsonl(canonical_mentions_path))
-    edges = list(iter_jsonl(canonical_edges_path))
-    result = export_count_facts(mentions, edges)
+    """Run Stage 6 and write facts plus TSV count tables.
 
+    This path is deliberately streaming. The in-memory helper above is useful
+    for tests and small samples, but 1M-caption exports can create hundreds of
+    millions of fact rows and must not materialize them as Python objects.
+    """
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     facts_path = output_root / "facts.jsonl"
-    write_jsonl(facts_path, result.facts)
+
+    table_buckets = _new_count_table_buckets()
+    fact_type_counts: dict[str, int] = defaultdict(int)
+    fact_total = 0
+    mention_groups = _iter_caption_groups(canonical_mentions_path, _coerce_canonical_mention)
+    edge_groups = _CaptionGroupReader(canonical_edges_path, _coerce_canonical_edge)
+
+    with open_text(facts_path, "wt") as facts_handle:
+        for caption_id, mentions in mention_groups:
+            edges = edge_groups.take_if_caption(caption_id)
+            facts = _caption_facts(
+                mentions,
+                edges,
+                start_index=fact_total,
+            )
+            for fact in facts:
+                facts_handle.write(json.dumps(to_jsonable(fact), ensure_ascii=False, sort_keys=True))
+                facts_handle.write("\n")
+                _accumulate_count_fact(table_buckets, fact)
+                fact_type_counts[fact.fact_type] += 1
+                fact_total += 1
+
+        leftover_caption = edge_groups.peek_caption()
+        if leftover_caption is not None:
+            raise ValueError(
+                "canonical_edges contains a caption with no matching canonical_mentions "
+                f"group or the files are not in the same caption order: {leftover_caption!r}",
+            )
 
     table_paths: dict[str, str] = {}
-    for file_name, rows in result.count_tables.items():
-        path = output_root / file_name
+    table_row_counts: dict[str, int] = {}
+    for spec in COUNT_TABLE_SPECS:
+        rows = _count_rows_from_buckets(table_buckets[spec.file_name])
+        path = output_root / spec.file_name
         _write_count_table_tsv(path, rows)
-        table_paths[file_name] = str(path)
+        table_paths[spec.file_name] = str(path)
+        table_row_counts[spec.file_name] = len(rows)
 
-    fact_type_counts: dict[str, int] = defaultdict(int)
-    for fact in result.facts:
-        fact_type_counts[fact.fact_type] += 1
-    table_row_counts = {
-        file_name: len(rows)
-        for file_name, rows in sorted(result.count_tables.items())
-    }
     summary = {
         "canonical_mentions_path": str(canonical_mentions_path),
         "canonical_edges_path": str(canonical_edges_path),
         "output_dir": str(output_root),
         "facts_path": str(facts_path),
-        "fact_total": len(result.facts),
+        "fact_total": fact_total,
         "fact_type_counts": dict(sorted(fact_type_counts.items())),
         "table_paths": table_paths,
-        "table_row_counts": table_row_counts,
+        "table_row_counts": dict(sorted(table_row_counts.items())),
+        "export_mode": "streaming_count_accumulator",
     }
     if summary_path is not None:
         write_jsonl(summary_path, [summary])
     return summary
+
+
+def _caption_facts(
+    mentions: Sequence[CanonicalMention],
+    edges: Sequence[CanonicalEdge],
+    *,
+    start_index: int,
+) -> list[FactRow]:
+    mention_by_key = {
+        (mention.caption_id, mention.mention_id): mention
+        for mention in mentions
+    }
+    facts: list[FactRow] = []
+    facts.extend(_entity_exists_facts(mentions, start_index=start_index + len(facts)))
+    facts.extend(_attribute_exists_facts(mentions, start_index=start_index + len(facts)))
+    facts.extend(_quantity_exists_facts(mentions, start_index=start_index + len(facts)))
+    facts.extend(_object_parent_facts(mentions, start_index=start_index + len(facts)))
+    facts.extend(_action_event_facts(mentions, start_index=start_index + len(facts)))
+    facts.extend(_edge_facts(edges, mention_by_key, start_index=start_index + len(facts)))
+    facts.extend(
+        _ambiguous_relation_candidate_facts(
+            edges,
+            mention_by_key,
+            start_index=start_index + len(facts),
+        ),
+    )
+    facts.extend(_relation_component_facts(edges, start_index=start_index + len(facts)))
+    facts.extend(_object_pair_facts(mentions, start_index=start_index + len(facts)))
+    return facts
+
+
+def _iter_caption_groups(
+    path: str | Path,
+    coerce_record: Any,
+) -> Iterable[tuple[str, list[Any]]]:
+    current_caption_id: str | None = None
+    group: list[Any] = []
+    for record in iter_jsonl(path):
+        item = coerce_record(record)
+        caption_id = item.caption_id
+        if current_caption_id is None:
+            current_caption_id = caption_id
+        if caption_id != current_caption_id:
+            yield current_caption_id, group
+            current_caption_id = caption_id
+            group = []
+        group.append(item)
+    if current_caption_id is not None:
+        yield current_caption_id, group
+
+
+class _CaptionGroupReader:
+    def __init__(self, path: str | Path, coerce_record: Any) -> None:
+        self._groups = iter(_iter_caption_groups(path, coerce_record))
+        self._next: tuple[str, list[Any]] | None = None
+        self._advance()
+
+    def peek_caption(self) -> str | None:
+        if self._next is None:
+            return None
+        return self._next[0]
+
+    def take_if_caption(self, caption_id: str) -> list[Any]:
+        if self._next is None:
+            return []
+        next_caption_id, group = self._next
+        if next_caption_id != caption_id:
+            return []
+        self._advance()
+        return group
+
+    def _advance(self) -> None:
+        self._next = next(self._groups, None)
+
+
+def _new_count_table_buckets() -> dict[str, dict[tuple[str, ...], CountAccumulator]]:
+    return {
+        spec.file_name: {}
+        for spec in COUNT_TABLE_SPECS
+    }
+
+
+def _accumulate_count_fact(
+    table_buckets: dict[str, dict[tuple[str, ...], CountAccumulator]],
+    fact: FactRow,
+) -> None:
+    spec = COUNT_TABLE_SPEC_BY_FACT_TYPE.get(fact.fact_type)
+    if spec is None:
+        return
+    key_values = tuple(str(fact.values[field]) for field in spec.value_fields)
+    bucket = table_buckets[spec.file_name]
+    accumulator = bucket.get(key_values)
+    if accumulator is None:
+        values = {
+            field: value
+            for field, value in zip(spec.value_fields, key_values, strict=True)
+        }
+        for field in spec.extra_value_fields:
+            values[field] = ""
+        accumulator = CountAccumulator(
+            count_key=":".join((spec.table_key_prefix, *key_values)),
+            values=values,
+        )
+        bucket[key_values] = accumulator
+
+    accumulator.count += 1
+    if accumulator.last_caption_id != fact.caption_id:
+        accumulator.caption_count += 1
+        accumulator.last_caption_id = fact.caption_id
+        if accumulator.example_caption_ids is not None:
+            _accumulate_example_caption_id(accumulator.example_caption_ids, fact.caption_id)
+
+    if accumulator.raw_variants is not None:
+        value = fact.values.get("raw_variants")
+        if isinstance(value, list):
+            accumulator.raw_variants.update(str(item) for item in value if str(item))
+    if accumulator.rule_ids is not None:
+        accumulator.rule_ids.update(fact.rule_ids)
+        accumulator.rule_ids.add(COUNT_RULE_ID)
+    for field in spec.extra_value_fields:
+        _accumulate_extra_value(accumulator, field, fact.values.get(field))
+
+
+def _accumulate_extra_value(
+    accumulator: CountAccumulator,
+    field: str,
+    value: Any,
+) -> None:
+    existing = accumulator.values.get(field, "")
+    values = set(existing.split("|")) if existing else set()
+    if isinstance(value, list):
+        values.update(str(item) for item in value if str(item))
+    elif value is not None:
+        text = str(value)
+        if text:
+            values.add(text)
+    accumulator.values[field] = "|".join(sorted(values))
+
+
+def _accumulate_example_caption_id(
+    example_caption_ids: list[str],
+    caption_id: str,
+) -> None:
+    if caption_id in example_caption_ids:
+        return
+    example_caption_ids.append(caption_id)
+    example_caption_ids.sort()
+    del example_caption_ids[5:]
+
+
+def _count_rows_from_buckets(
+    bucket: Mapping[tuple[str, ...], CountAccumulator],
+) -> list[CountRow]:
+    rows = [
+        CountRow(
+            count_key=accumulator.count_key,
+            count=accumulator.count,
+            caption_count=accumulator.caption_count,
+            example_caption_ids=list(accumulator.example_caption_ids or []),
+            raw_variants=sorted(accumulator.raw_variants or set()),
+            rule_ids=sorted(accumulator.rule_ids or set()),
+            values=dict(accumulator.values),
+        )
+        for accumulator in bucket.values()
+    ]
+    rows.sort(key=lambda row: (-row.count, row.count_key))
+    return rows
 
 
 def _make_fact_row(
