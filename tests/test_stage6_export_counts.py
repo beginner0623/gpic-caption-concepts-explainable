@@ -394,6 +394,7 @@ class Stage6ExportCountsTest(unittest.TestCase):
                 canonical_edges_path,
                 output_dir=output_dir,
                 summary_path=summary_path,
+                max_rss_gib=1000,
             )
 
             self.assertTrue((output_dir / "facts.jsonl").exists())
@@ -402,6 +403,8 @@ class Stage6ExportCountsTest(unittest.TestCase):
             self.assertTrue((output_dir / "relation_triple_counts.tsv").exists())
             self.assertTrue((output_dir / "ambiguous_relation_candidate_counts.tsv").exists())
             self.assertEqual(summary["count_backend"], "sqlite")
+            self.assertEqual(summary["sqlite_cache_rows"], None)
+            self.assertIn("adaptive", summary["sqlite_cache_policy"])
             self.assertEqual(summary["fact_type_counts"]["relation"], 1)
             self.assertEqual(len(list(iter_jsonl(output_dir / "facts.jsonl"))), summary["fact_total"])
             self.assertEqual(list(iter_jsonl(summary_path))[0]["fact_total"], summary["fact_total"])

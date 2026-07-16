@@ -198,10 +198,12 @@ that keeps the shared memory/progress surface from drifting across stages.
 The implementation is partly disk-backed: Stage 4 still holds the raw graph
 until writing, Stage 5 keeps canonical mentions as the edge lookup table, and
 Stage 6 streams fact rows while using SQLite as the default count accumulator
-backend. Stage 6's in-memory backend is only for bounded diagnostics. If a
-formal production run trips the RSS guard, do not raise the limit and rerun
-blindly. Change that stage to a chunked, streaming, or disk-backed
-implementation first.
+backend. Stage 6's SQLite backend must flush adaptively from the active
+cgroup/explicit RSS safety limit by default; fixed row-count cache limits are
+diagnostic hard caps only, not the production policy. Stage 6's in-memory
+backend is only for bounded diagnostics. If a formal production run trips the
+RSS guard, do not raise the limit and rerun blindly. Change that stage to a
+chunked, streaming, or disk-backed implementation first.
 
 Do not wrap formal Stage 4/5/6 scripts in `run_script_with_timeout.py` for
 production-scale work. That wrapper uses a hard `os._exit` kill and Stage 4/5/6

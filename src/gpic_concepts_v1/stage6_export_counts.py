@@ -17,7 +17,7 @@ from typing import Any
 
 from gpic_concepts_v1.atomic_io import atomic_text_writer
 from gpic_concepts_v1.io_jsonl import iter_jsonl, open_text, to_jsonable, write_jsonl
-from gpic_concepts_v1.runtime_memory import MemorySafetyConfig, ProgressWriter
+from gpic_concepts_v1.runtime_memory import MemorySafetyConfig, ProgressWriter, current_rss_kib
 from gpic_concepts_v1.schema import (
     CanonicalEdge,
     CanonicalMention,
@@ -304,7 +304,7 @@ def run_stage6_export_counts(
     progress_path: str | Path | None = None,
     count_backend: str = "sqlite",
     sqlite_db_path: str | Path | None = None,
-    sqlite_cache_rows: int = 50_000,
+    sqlite_cache_rows: int | None = None,
 ) -> dict[str, Any]:
     """Run Stage 6 and write facts plus TSV count tables.
 
@@ -316,12 +316,6 @@ def run_stage6_export_counts(
     output_root.mkdir(parents=True, exist_ok=True)
     facts_path = output_root / "facts.jsonl"
 
-    count_store = _make_count_store(
-        backend=count_backend,
-        output_root=output_root,
-        sqlite_db_path=sqlite_db_path,
-        sqlite_cache_rows=sqlite_cache_rows,
-    )
     fact_type_counts: dict[str, int] = defaultdict(int)
     fact_total = 0
     caption_group_total = 0
@@ -330,6 +324,13 @@ def run_stage6_export_counts(
         memory_limit_gib=memory_limit_gib,
         rss_limit_fraction=rss_limit_fraction,
         rss_reserve_gib=rss_reserve_gib,
+    )
+    count_store = _make_count_store(
+        backend=count_backend,
+        output_root=output_root,
+        sqlite_db_path=sqlite_db_path,
+        sqlite_cache_rows=sqlite_cache_rows,
+        memory_config=memory_config,
     )
     progress = ProgressWriter(
         progress_path,
@@ -438,6 +439,8 @@ def run_stage6_export_counts(
         "count_backend": count_store.backend_name,
         "sqlite_db_path": count_store.db_path_for_summary,
         "sqlite_cache_rows": sqlite_cache_rows if count_store.backend_name == "sqlite" else None,
+        "sqlite_cache_policy": count_store.cache_policy_for_summary,
+        "sqlite_cache_flush_rss_gib": count_store.cache_flush_rss_gib_for_summary,
         "memory_limit_gib": memory_config.resolved_memory_limit_gib,
         "memory_limit_source": memory_config.memory_limit_source,
         "rss_limit_fraction": rss_limit_fraction,
@@ -537,6 +540,8 @@ class _CaptionGroupReader:
 class _MemoryCountStore:
     backend_name = "memory"
     db_path_for_summary: str | None = None
+    cache_policy_for_summary = "memory_unbounded"
+    cache_flush_rss_gib_for_summary: float | None = None
 
     def __init__(self) -> None:
         self._table_buckets = _new_count_table_buckets()
@@ -562,8 +567,14 @@ class _MemoryCountStore:
 class _SqliteCountStore:
     backend_name = "sqlite"
 
-    def __init__(self, db_path: str | Path, *, cache_rows: int) -> None:
-        if cache_rows < 1:
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        cache_rows: int | None,
+        memory_config: MemorySafetyConfig,
+    ) -> None:
+        if cache_rows is not None and cache_rows < 1:
             raise ValueError("--sqlite-cache-rows must be greater than zero")
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -575,6 +586,16 @@ class _SqliteCountStore:
             path.unlink(missing_ok=True)
         self.db_path_for_summary = str(self._db_path)
         self._cache_rows_limit = cache_rows
+        self._cache_flush_rss_gib = memory_config.effective_max_rss_gib
+        self.cache_flush_rss_gib_for_summary = self._cache_flush_rss_gib
+        if self._cache_flush_rss_gib is not None and cache_rows is not None:
+            self.cache_policy_for_summary = "rss_adaptive_with_row_hard_cap"
+        elif self._cache_flush_rss_gib is not None:
+            self.cache_policy_for_summary = "rss_adaptive"
+        elif cache_rows is not None:
+            self.cache_policy_for_summary = "row_hard_cap_only"
+        else:
+            self.cache_policy_for_summary = "unbounded_no_memory_limit_detected"
         self._cache = _new_count_table_buckets()
         self._cache_row_count = 0
         self._conn = sqlite3.connect(str(self._db_path))
@@ -610,8 +631,20 @@ class _SqliteCountStore:
         _accumulate_count_fact(self._cache, fact)
         if len(bucket) != before:
             self._cache_row_count += 1
-            if self._cache_row_count >= self._cache_rows_limit:
+            if self._should_flush_cache():
                 self.flush()
+
+    def _should_flush_cache(self) -> bool:
+        if self._cache_row_count == 0:
+            return False
+        if self._cache_rows_limit is not None and self._cache_row_count >= self._cache_rows_limit:
+            return True
+        if self._cache_flush_rss_gib is None:
+            return False
+        rss_kib = current_rss_kib()
+        if rss_kib is None:
+            return False
+        return rss_kib / 1024 / 1024 >= self._cache_flush_rss_gib
 
     def flush(self) -> None:
         if self._cache_row_count == 0:
@@ -780,7 +813,8 @@ def _make_count_store(
     backend: str,
     output_root: Path,
     sqlite_db_path: str | Path | None,
-    sqlite_cache_rows: int,
+    sqlite_cache_rows: int | None,
+    memory_config: MemorySafetyConfig,
 ) -> _MemoryCountStore | _SqliteCountStore:
     if backend == "memory":
         return _MemoryCountStore()
@@ -788,6 +822,7 @@ def _make_count_store(
         return _SqliteCountStore(
             sqlite_db_path or output_root / "stage6_count_accumulators.sqlite3",
             cache_rows=sqlite_cache_rows,
+            memory_config=memory_config,
         )
     raise ValueError("--count-backend must be one of: memory, sqlite")
 

@@ -42,8 +42,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sqlite-cache-rows",
         type=int,
-        default=50_000,
-        help="Maximum unique count keys buffered in RAM before flushing to SQLite.",
+        default=None,
+        help=(
+            "Optional hard cap on unique count keys buffered in RAM before "
+            "flushing to SQLite. By default Stage 6 flushes adaptively from "
+            "the cgroup/explicit RSS safety limit instead of a fixed row count."
+        ),
     )
     return parser.parse_args()
 
