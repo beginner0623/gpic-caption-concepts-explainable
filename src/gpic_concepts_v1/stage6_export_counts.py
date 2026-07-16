@@ -421,8 +421,10 @@ def run_stage6_export_counts(
 
     table_paths: dict[str, str] = {}
     table_row_counts: dict[str, int] = {}
+    count_integrity: dict[str, Any] = {}
     try:
         table_paths, table_row_counts = count_store.write_tables(output_root)
+        count_integrity = count_store.integrity_report(fact_type_counts, fact_total)
     finally:
         count_store.close()
 
@@ -435,6 +437,7 @@ def run_stage6_export_counts(
         "fact_type_counts": dict(sorted(fact_type_counts.items())),
         "table_paths": table_paths,
         "table_row_counts": dict(sorted(table_row_counts.items())),
+        "count_integrity": count_integrity,
         "export_mode": "streaming_count_accumulator",
         "count_backend": count_store.backend_name,
         "sqlite_db_path": count_store.db_path_for_summary,
@@ -560,6 +563,29 @@ class _MemoryCountStore:
             table_row_counts[spec.file_name] = len(rows)
         return table_paths, table_row_counts
 
+    def integrity_report(
+        self,
+        expected_fact_type_counts: Mapping[str, int],
+        fact_total: int,
+    ) -> dict[str, Any]:
+        table_count_sums = {
+            spec.file_name: sum(
+                accumulator.count
+                for accumulator in self._table_buckets[spec.file_name].values()
+            )
+            for spec in COUNT_TABLE_SPECS
+        }
+        table_row_counts = {
+            spec.file_name: len(self._table_buckets[spec.file_name])
+            for spec in COUNT_TABLE_SPECS
+        }
+        return _count_integrity_report(
+            expected_fact_type_counts=expected_fact_type_counts,
+            fact_total=fact_total,
+            table_count_sums=table_count_sums,
+            table_row_counts=table_row_counts,
+        )
+
     def close(self) -> None:
         return
 
@@ -670,6 +696,32 @@ class _SqliteCountStore:
             table_paths[spec.file_name] = str(path)
             table_row_counts[spec.file_name] = row_count
         return table_paths, table_row_counts
+
+    def integrity_report(
+        self,
+        expected_fact_type_counts: Mapping[str, int],
+        fact_total: int,
+    ) -> dict[str, Any]:
+        self.flush()
+        table_count_sums: dict[str, int] = {}
+        table_row_counts: dict[str, int] = {}
+        for spec in COUNT_TABLE_SPECS:
+            count_sum, row_count = self._conn.execute(
+                """
+                SELECT COALESCE(SUM(count), 0), COUNT(*)
+                FROM count_accumulators
+                WHERE table_name = ?
+                """,
+                (spec.file_name,),
+            ).fetchone()
+            table_count_sums[spec.file_name] = int(count_sum)
+            table_row_counts[spec.file_name] = int(row_count)
+        return _count_integrity_report(
+            expected_fact_type_counts=expected_fact_type_counts,
+            fact_total=fact_total,
+            table_count_sums=table_count_sums,
+            table_row_counts=table_row_counts,
+        )
 
     def close(self) -> None:
         self._conn.close()
@@ -825,6 +877,56 @@ def _make_count_store(
             memory_config=memory_config,
         )
     raise ValueError("--count-backend must be one of: memory, sqlite")
+
+
+def _count_integrity_report(
+    *,
+    expected_fact_type_counts: Mapping[str, int],
+    fact_total: int,
+    table_count_sums: Mapping[str, int],
+    table_row_counts: Mapping[str, int],
+) -> dict[str, Any]:
+    supported_fact_types = {spec.fact_type for spec in COUNT_TABLE_SPECS}
+    unexpected_fact_types = sorted(set(expected_fact_type_counts) - supported_fact_types)
+    if unexpected_fact_types:
+        raise ValueError(
+            "Stage 6 generated facts with no count table spec: "
+            + ", ".join(unexpected_fact_types),
+        )
+
+    actual_by_fact_type = {
+        spec.fact_type: int(table_count_sums.get(spec.file_name, 0))
+        for spec in COUNT_TABLE_SPECS
+    }
+    expected_by_fact_type = {
+        spec.fact_type: int(expected_fact_type_counts.get(spec.fact_type, 0))
+        for spec in COUNT_TABLE_SPECS
+    }
+    deltas = {
+        fact_type: actual_by_fact_type[fact_type] - expected_count
+        for fact_type, expected_count in expected_by_fact_type.items()
+        if actual_by_fact_type[fact_type] != expected_count
+    }
+    total_counted_facts = sum(actual_by_fact_type.values())
+    if total_counted_facts != fact_total:
+        deltas["__total__"] = total_counted_facts - fact_total
+
+    report = {
+        "status": "ok" if not deltas else "failed",
+        "expected_fact_type_counts": dict(sorted(expected_by_fact_type.items())),
+        "actual_fact_type_count_sums": dict(sorted(actual_by_fact_type.items())),
+        "table_count_sums": dict(sorted((str(key), int(value)) for key, value in table_count_sums.items())),
+        "table_row_counts": dict(sorted((str(key), int(value)) for key, value in table_row_counts.items())),
+        "fact_total": int(fact_total),
+        "total_counted_facts": int(total_counted_facts),
+        "deltas": dict(sorted(deltas.items())),
+    }
+    if deltas:
+        raise ValueError(
+            "Stage 6 count integrity check failed: "
+            + json.dumps(report, ensure_ascii=False, sort_keys=True),
+        )
+    return report
 
 
 def _new_count_table_buckets() -> dict[str, dict[tuple[str, ...], CountAccumulator]]:

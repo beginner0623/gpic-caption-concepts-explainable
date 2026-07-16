@@ -9,6 +9,7 @@ from gpic_concepts_v1.io_jsonl import iter_jsonl, write_jsonl
 from gpic_concepts_v1.schema import CanonicalEdge, CanonicalMention
 from gpic_concepts_v1.schema import MISSING_SOURCE_MENTION_ID
 from gpic_concepts_v1.stage6_export_counts import (
+    _count_integrity_report,
     export_count_facts,
     run_stage6_export_counts,
 )
@@ -405,7 +406,16 @@ class Stage6ExportCountsTest(unittest.TestCase):
             self.assertEqual(summary["count_backend"], "sqlite")
             self.assertEqual(summary["sqlite_cache_rows"], None)
             self.assertIn("adaptive", summary["sqlite_cache_policy"])
+            self.assertEqual(summary["count_integrity"]["status"], "ok")
+            self.assertEqual(
+                summary["count_integrity"]["total_counted_facts"],
+                summary["fact_total"],
+            )
             self.assertEqual(summary["fact_type_counts"]["relation"], 1)
+            self.assertEqual(
+                summary["count_integrity"]["actual_fact_type_count_sums"]["relation"],
+                1,
+            )
             self.assertEqual(len(list(iter_jsonl(output_dir / "facts.jsonl"))), summary["fact_total"])
             self.assertEqual(list(iter_jsonl(summary_path))[0]["fact_total"], summary["fact_total"])
 
@@ -475,6 +485,15 @@ class Stage6ExportCountsTest(unittest.TestCase):
                 elif path.is_dir():
                     path.rmdir()
             tmp_path.rmdir()
+
+    def test_count_integrity_report_rejects_dropped_or_duplicated_counts(self) -> None:
+        with self.assertRaisesRegex(ValueError, "count integrity check failed"):
+            _count_integrity_report(
+                expected_fact_type_counts={"entity_exists": 2},
+                fact_total=2,
+                table_count_sums={"object_counts.tsv": 1},
+                table_row_counts={"object_counts.tsv": 1},
+            )
 
 
 def _stage6_temp_base() -> Path:
