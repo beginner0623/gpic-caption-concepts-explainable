@@ -45,6 +45,42 @@ establish the active repo root:
 Do not treat "I will remember the new path" as sufficient. The path must be
 verified by command evidence when the result matters.
 
+## Remote Pod Command Guard
+
+Do not run MLXP/Kubernetes pod commands by embedding long command strings in
+nested local shells such as:
+
+- `wsl.exe bash -lc "kubectl ... -- bash -lc '...$(...)...; ...'"`
+- PowerShell strings that contain shell substitutions, semicolons, redirection,
+  heredocs, or quoting that should be interpreted only inside the pod
+
+This failure mode can silently execute part of the command on the local WSL or
+PowerShell side instead of inside the pod, which can create local artifacts or
+clone the repository in the wrong place.
+
+Preferred remote execution patterns:
+
+- use direct argv commands:
+  `kubectl -n <ns> exec <pod> -- git -C /root/work/repo status --short`
+- for multi-step remote work, create a checked script file with LF line endings
+  and no BOM, copy it to the pod, then execute that script explicitly
+- if stdin script execution is used, first verify no BOM/CRLF issue with a
+  bounded `pwd`, `whoami`, and `hostname` probe
+
+Before trusting a remote command result, verify the execution context with
+command evidence from inside the pod:
+
+- `pwd`
+- `hostname`
+- `whoami`
+- expected repo branch and commit, using `git -C <remote_repo>`
+
+If any command unexpectedly reports a Windows path, the conversation default
+workspace, or a local WSL path while the intended target was MLXP, stop
+immediately. Do not continue the main pipeline until the wrong local artifact
+has been identified and either removed with an absolute-path safety check or
+explicitly quarantined.
+
 ## Long-Running Process Guard
 
 Long-running pipeline jobs must not be launched with ad hoc PowerShell
