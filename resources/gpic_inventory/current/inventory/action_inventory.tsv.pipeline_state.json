@@ -1,0 +1,19 @@
+{
+  "action_inventory_preposition_mwe_aware": true,
+  "artifact_type": "gpic_observed_action_inventory",
+  "decision_status_counts": {
+    "chosen": 6593,
+    "raw_fallback": 2667
+  },
+  "input": "outputs\\front1000000_gpic_nano_20260715\\stage35_after_object_manual\\inventory\\gpic_observed_action_inventory_stage35_workflow.tsv",
+  "manual_decisions": "C:\\Users\\rlath\\Downloads\\gpic_observed_action_inventory_stage35_workflow_needs_manual_2_manual_resolved.tsv",
+  "manual_resolution_applied": true,
+  "needs_manual_output": "",
+  "needs_manual_rows": 0,
+  "output": "C:\\Users\\rlath\\Documents\\Codex\\gpic-caption-concepts-explainable\\resources\\gpic_inventory\\current\\inventory\\action_inventory.tsv",
+  "preposition_mwe_detection_before_action": true,
+  "preview_mode": false,
+  "schema_version": 1,
+  "stage": "3.5",
+  "status": "resolved"
+}

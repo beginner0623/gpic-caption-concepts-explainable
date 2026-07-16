@@ -5,6 +5,7 @@ from collections import Counter
 import csv
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Mapping
 
@@ -14,6 +15,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from gpic_concepts_v1.atomic_io import atomic_text_writer
+from gpic_concepts_v1.pipeline_state import artifact_state_path, write_pipeline_state
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,7 +101,7 @@ def apply_action_manual_resolution(
     if resolved_output_path is not None:
         _write_tsv(resolved_output_path, resolved_rows, fieldnames)
 
-    return {
+    summary = {
         "full_inventory": str(full_inventory_path),
         "manual_decisions": str(manual_decisions_path),
         "output": str(output_path),
@@ -110,13 +112,46 @@ def apply_action_manual_resolution(
         "original_decision_status_counts": _count_by(full_rows, "decision_status"),
         "merged_decision_status_counts": _count_by(merged_rows, "decision_status"),
     }
+    _write_action_inventory_state(output_path, summary)
+    return summary
+
+
+def _write_action_inventory_state(
+    output_path: Path,
+    summary: Mapping[str, object],
+) -> None:
+    merged_counts = summary.get("merged_decision_status_counts")
+    if not isinstance(merged_counts, Mapping):
+        merged_counts = {}
+    needs_manual_rows = int(merged_counts.get("needs_manual", 0) or 0)
+    write_pipeline_state(
+        artifact_state_path(output_path),
+        {
+            "artifact_type": "gpic_observed_action_inventory",
+            "stage": "3.5",
+            "status": "needs_manual" if needs_manual_rows else "resolved",
+            "preview_mode": False,
+            "input": str(summary.get("full_inventory", "")),
+            "output": str(output_path),
+            "needs_manual_output": "",
+            "manual_decisions": str(summary.get("manual_decisions", "")),
+            "manual_resolution_applied": True,
+            "action_inventory_preposition_mwe_aware": True,
+            "preposition_mwe_detection_before_action": True,
+            "decision_status_counts": dict(merged_counts),
+            "needs_manual_rows": needs_manual_rows,
+        },
+    )
 
 
 def _resolved_action_row(
     row: Mapping[str, str],
     manual: Mapping[str, str],
 ) -> dict[str, str]:
-    selected_synset_id = manual.get("selected_oewn_synset", "").strip()
+    selected_synset_id = (
+        manual.get("selected_oewn_synset", "").strip()
+        or manual.get("resolved_selected_oewn_synset", "").strip()
+    )
     if not selected_synset_id:
         raise ValueError(f"manual action decision missing selected_oewn_synset: {manual}")
     all_synsets = _split_pipe(row.get("all_oewn_synsets", ""))
@@ -125,7 +160,16 @@ def _resolved_action_row(
             "manual action decision references synset outside current candidates: "
             f"{row.get('span_key', '')} -> {selected_synset_id}"
         )
-    selected_query = manual.get("selected_query", "").strip() or row.get("selected_query", "")
+    selected_query = (
+        manual.get("selected_query", "").strip()
+        or manual.get("resolved_selected_query", "").strip()
+        or row.get("selected_query", "")
+    )
+    selected_query = _singular_selected_query(
+        row,
+        selected_query=selected_query,
+        selected_synset_id=selected_synset_id,
+    )
     if "|" in selected_query:
         raise ValueError(
             f"manual action selected_query must be singular: {row.get('span_key', '')}"
@@ -139,13 +183,79 @@ def _resolved_action_row(
     replacement["selected_oewn_lexfile"] = selected_lexfile
     replacement["synset_selection_tag"] = "manual_select"
     replacement["decision_basis"] = "gpic_observed_action_inventory_manual_resolution"
-    note = manual.get("manual_decision_note", "").strip()
+    note = (
+        manual.get("manual_decision_note", "").strip()
+        or manual.get("manual_note", "").strip()
+    )
     if note:
         replacement["wn30_lemma_counts"] = _append_note(
             row.get("wn30_lemma_counts", ""),
             f"manual_note={note}",
         )
     return replacement
+
+
+def _singular_selected_query(
+    row: Mapping[str, str],
+    *,
+    selected_query: str,
+    selected_synset_id: str,
+) -> str:
+    candidates = _split_pipe(selected_query)
+    if len(candidates) <= 1:
+        return selected_query
+
+    query_scores = _selected_synset_query_scores(
+        row.get("wn30_lemma_counts", ""),
+        selected_synset_id=selected_synset_id,
+    )
+    candidate_scores = {
+        query: query_scores[query]
+        for query in candidates
+        if query in query_scores
+    }
+    if candidate_scores:
+        max_score = max(candidate_scores.values())
+        winners = [
+            query
+            for query, score in candidate_scores.items()
+            if score == max_score
+        ]
+        if len(winners) == 1:
+            return winners[0]
+
+    synset_lemmas = set(_split_pipe(row.get("synset_lemmas", "")))
+    lemma_matches = [query for query in candidates if query in synset_lemmas]
+    if len(lemma_matches) == 1:
+        return lemma_matches[0]
+
+    return selected_query
+
+
+def _selected_synset_query_scores(
+    wn30_lemma_counts: str,
+    *,
+    selected_synset_id: str,
+) -> dict[str, int]:
+    scores: dict[str, int] = {}
+    for chunk in (part for part in wn30_lemma_counts.split("||") if part):
+        query, sep, remainder = chunk.partition(":")
+        if not sep or not query:
+            continue
+        _tag, sep, entries = remainder.partition(":")
+        if not sep:
+            continue
+        best_score: int | None = None
+        for entry in entries.split("|"):
+            if not entry.startswith(f"{selected_synset_id}:"):
+                continue
+            match = re.search(r":(\d+)$", entry)
+            score = int(match.group(1)) if match else 0
+            if best_score is None or score > best_score:
+                best_score = score
+        if best_score is not None:
+            scores[query] = best_score
+    return scores
 
 
 def _lexfile_for_synset(row: Mapping[str, str], selected_synset_id: str) -> str:

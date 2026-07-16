@@ -4,11 +4,13 @@ import argparse
 import csv
 import json
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
-from typing import Any
+from time import perf_counter
+from typing import Any, Protocol
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -24,6 +26,7 @@ from gpic_concepts_v1.stage4_extract_raw import (
     WN_DATA_DIR,
     _chunk_tokens,
     _is_allowed_token_record_span_start,
+    _is_plural_common_noun_token,
     _normalize_query,
     _object_core_token_indices_from_token_records,
     _probe_object_surface,
@@ -142,6 +145,7 @@ class AttributeLookupResult:
     attribute_gate: str
     decision_status: str
     decision_reason: str
+    source_row: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,10 +170,89 @@ class AttributeAccumulator:
     lookup: AttributeLookupResult | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class AttributeInventoryCheckpointState:
+    caption_total: int
+    noun_chunk_total: int
+    attribute_candidate_total: int
+    inventory: dict[str, AttributeAccumulator]
+
+
+@dataclass(slots=True)
+class AttributeInventoryCheckpointWriter:
+    path: Path
+    metadata: Mapping[str, str]
+    interval_records: int = 10000
+    _last_caption_total: int = 0
+
+    def __post_init__(self) -> None:
+        if self.interval_records < 1:
+            raise ValueError("checkpoint_interval_records must be greater than zero")
+
+    def maybe_write(
+        self,
+        *,
+        caption_total: int,
+        noun_chunk_total: int,
+        attribute_candidate_total: int,
+        inventory: Mapping[str, AttributeAccumulator],
+    ) -> None:
+        if caption_total - self._last_caption_total < self.interval_records:
+            return
+        self._last_caption_total = caption_total
+        self.write(
+            status="running",
+            caption_total=caption_total,
+            noun_chunk_total=noun_chunk_total,
+            attribute_candidate_total=attribute_candidate_total,
+            inventory=inventory,
+        )
+
+    def write_completed(self, *, summary: Mapping[str, Any]) -> None:
+        self.write(
+            status="completed",
+            caption_total=int(summary.get("caption_total") or 0),
+            noun_chunk_total=int(summary.get("noun_chunk_total") or 0),
+            attribute_candidate_total=int(summary.get("attribute_candidate_total") or 0),
+            inventory={},
+            summary=summary,
+        )
+
+    def write(
+        self,
+        *,
+        status: str,
+        caption_total: int,
+        noun_chunk_total: int,
+        attribute_candidate_total: int,
+        inventory: Mapping[str, AttributeAccumulator],
+        summary: Mapping[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "schema_version": 1,
+            "artifact_type": "gpic_observed_attribute_inventory_checkpoint",
+            "status": status,
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "metadata": dict(self.metadata),
+            "caption_total": caption_total,
+            "noun_chunk_total": noun_chunk_total,
+            "attribute_candidate_total": attribute_candidate_total,
+            "inventory": [_accumulator_checkpoint_row(acc) for acc in inventory.values()],
+        }
+        if summary is not None:
+            payload["summary"] = dict(summary)
+        with atomic_text_writer(self.path) as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            handle.write("\n")
+
+
 class GpicAttributeInventoryLookup:
     """Lookup prior attribute inventory rows by normalized observed surface."""
 
-    def __init__(self, rows_by_key: Mapping[str, Mapping[str, str]]) -> None:
+    def __init__(
+        self,
+        rows_by_key: Mapping[str, Mapping[str, str]],
+    ) -> None:
         self._rows_by_key = dict(rows_by_key)
 
     @classmethod
@@ -178,52 +261,76 @@ class GpicAttributeInventoryLookup:
         with Path(path).open(encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle, delimiter="\t")
             for row in reader:
+                row_dict = dict(row)
+                if _is_automatic_surface_changed_prior_row(row_dict):
+                    continue
                 span_key = row.get("span_key", "") or _normalize_query(
                     row.get("observed_surface", "")
                 )
                 if span_key and span_key not in rows_by_key:
-                    rows_by_key[span_key] = dict(row)
+                    rows_by_key[span_key] = row_dict
         return cls(rows_by_key)
 
-    def __call__(self, surface: str) -> AttributeLookupResult | None:
+    def __call__(
+        self,
+        surface: str,
+        *,
+        require_surface_query_conflict_check: bool = False,
+    ) -> AttributeLookupResult | None:
         row = self._rows_by_key.get(_normalize_query(surface))
         if row is None:
             return None
-        synsets = _inventory_synsets(row)
-        selected = _inventory_selected_synset(row, synsets)
-        attribute_gate = row.get("attribute_gate", "")
-        if selected is not None and not attribute_gate:
-            attribute_gate = _attribute_gate_for_lexfile(selected.lexfile())
-        decision_status = row.get("decision_status", "")
-        if decision_status == "no_synset":
-            decision_status = "chosen"
-        if not decision_status:
-            decision_status = _attribute_decision_status(
-                selected_synset=selected,
-                synsets=synsets,
-                attribute_gate=attribute_gate,
-            )
-        decision_reason = row.get("decision_reason", "")
-        if not decision_reason:
-            decision_reason = _attribute_decision_reason(
-                selected_synset=selected,
-                synsets=synsets,
-                attribute_gate=attribute_gate,
-            )
-        return AttributeLookupResult(
-            row.get("selected_lookup_case", "inventory"),
-            row.get("selected_query", surface),
-            tuple(synsets),
-            selected,
-            row.get("synset_selection_tag", "inventory_selected_synset"),
-            row.get("wn30_lemma_counts", ""),
-            attribute_gate,
-            decision_status,
-            decision_reason,
+        return _attribute_lookup_result_from_inventory_row(row, surface)
+
+def _attribute_lookup_result_from_inventory_row(
+    row: Mapping[str, str],
+    surface: str,
+    *,
+    preserve_source_row: bool = True,
+) -> AttributeLookupResult:
+    synsets = _inventory_synsets(row)
+    selected = _inventory_selected_synset(row, synsets)
+    attribute_gate = row.get("attribute_gate", "")
+    if selected is not None and not attribute_gate:
+        attribute_gate = _attribute_gate_for_lexfile(selected.lexfile())
+    decision_status = row.get("decision_status", "")
+    if decision_status == "no_synset":
+        decision_status = "chosen"
+    if not decision_status:
+        decision_status = _attribute_decision_status(
+            selected_synset=selected,
+            synsets=synsets,
+            attribute_gate=attribute_gate,
         )
+    decision_reason = row.get("decision_reason", "")
+    if not decision_reason:
+        decision_reason = _attribute_decision_reason(
+            selected_synset=selected,
+            synsets=synsets,
+            attribute_gate=attribute_gate,
+        )
+    return AttributeLookupResult(
+        row.get("selected_lookup_case", "inventory"),
+        row.get("selected_query", surface),
+        tuple(synsets),
+        selected,
+        row.get("synset_selection_tag", "inventory_selected_synset"),
+        row.get("wn30_lemma_counts", ""),
+        attribute_gate,
+        decision_status,
+        decision_reason,
+        dict(row) if preserve_source_row else None,
+    )
 
 
-AttributeLookup = Callable[[str], AttributeLookupResult | None]
+class AttributeLookup(Protocol):
+    def __call__(
+        self,
+        surface: str,
+        *,
+        require_surface_query_conflict_check: bool = False,
+    ) -> AttributeLookupResult | None:
+        ...
 
 
 def parse_args() -> argparse.Namespace:
@@ -243,6 +350,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, help="Output observed attribute inventory TSV")
     parser.add_argument("--summary", help="Optional summary JSON path")
     parser.add_argument("--limit", type=int, help="Optional maximum Stage 3 records to scan")
+    parser.add_argument(
+        "--progress-output",
+        help="Optional progress JSON path updated while scanning Stage 3 records.",
+    )
+    parser.add_argument(
+        "--progress-interval-records",
+        type=int,
+        default=10000,
+        help="Caption interval for progress JSON updates. Default: 10000.",
+    )
+    parser.add_argument(
+        "--checkpoint-output",
+        help=(
+            "Optional JSON checkpoint written during long scans. If used with "
+            "--resume-checkpoint, an interrupted run resumes from this file."
+        ),
+    )
+    parser.add_argument(
+        "--resume-checkpoint",
+        action="store_true",
+        help="Resume from --checkpoint-output when it exists and metadata matches.",
+    )
+    parser.add_argument(
+        "--checkpoint-interval-records",
+        type=int,
+        default=10000,
+        help="Caption interval for checkpoint JSON updates. Default: 10000.",
+    )
     return parser.parse_args()
 
 
@@ -250,12 +385,41 @@ def main() -> None:
     args = parse_args()
     object_lookup = load_gpic_object_inventory(args.object_inventory)
     attribute_lookup = _build_attribute_lookup(args.attribute_inventory)
+    checkpoint_metadata = _checkpoint_metadata(args)
+    checkpoint_state = (
+        _load_checkpoint(Path(args.checkpoint_output), checkpoint_metadata)
+        if args.resume_checkpoint and args.checkpoint_output
+        else None
+    )
+    checkpoint_writer = (
+        AttributeInventoryCheckpointWriter(
+            Path(args.checkpoint_output),
+            metadata=checkpoint_metadata,
+            interval_records=args.checkpoint_interval_records,
+        )
+        if args.checkpoint_output
+        else None
+    )
+    resume_caption_total = checkpoint_state.caption_total if checkpoint_state else 0
 
-    records = _limited_records(iter_jsonl(args.input), args.limit)
+    records = _resume_records(
+        iter_jsonl(args.input),
+        resume_caption_total=resume_caption_total,
+        limit=args.limit,
+    )
     rows, summary = build_attribute_inventory_rows(
         records,
         object_lookup=object_lookup,
         attribute_lookup=attribute_lookup,
+        progress_output=Path(args.progress_output) if args.progress_output else None,
+        progress_interval_records=args.progress_interval_records,
+        checkpoint_writer=checkpoint_writer,
+        initial_inventory=checkpoint_state.inventory if checkpoint_state else None,
+        initial_caption_total=resume_caption_total,
+        initial_noun_chunk_total=checkpoint_state.noun_chunk_total if checkpoint_state else 0,
+        initial_attribute_candidate_total=checkpoint_state.attribute_candidate_total
+        if checkpoint_state
+        else 0,
     )
     _write_tsv(Path(args.output), rows)
     summary.update({"input": args.input, "output": args.output})
@@ -263,6 +427,8 @@ def main() -> None:
         with atomic_text_writer(Path(args.summary)) as handle:
             handle.write(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
             handle.write("\n")
+    if checkpoint_writer is not None:
+        checkpoint_writer.write_completed(summary=summary)
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
 
 
@@ -271,11 +437,31 @@ def build_attribute_inventory_rows(
     *,
     object_lookup: Any,
     attribute_lookup: AttributeLookup,
+    progress_output: Path | None = None,
+    progress_interval_records: int = 10000,
+    checkpoint_writer: AttributeInventoryCheckpointWriter | None = None,
+    initial_inventory: Mapping[str, AttributeAccumulator] | None = None,
+    initial_caption_total: int = 0,
+    initial_noun_chunk_total: int = 0,
+    initial_attribute_candidate_total: int = 0,
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-    inventory: dict[str, AttributeAccumulator] = {}
-    caption_total = 0
-    noun_chunk_total = 0
-    attribute_candidate_total = 0
+    if progress_interval_records < 1:
+        raise ValueError("progress_interval_records must be greater than zero")
+    inventory: dict[str, AttributeAccumulator] = dict(initial_inventory or {})
+    caption_total = initial_caption_total
+    noun_chunk_total = initial_noun_chunk_total
+    attribute_candidate_total = initial_attribute_candidate_total
+    started = perf_counter()
+    _write_progress(
+        progress_output,
+        status="running",
+        phase="scan_stage3_records",
+        caption_total=caption_total,
+        noun_chunk_total=noun_chunk_total,
+        attribute_candidate_total=attribute_candidate_total,
+        inventory_rows=len(inventory),
+        elapsed_seconds=round(perf_counter() - started, 3),
+    )
 
     for record in records:
         caption_total += 1
@@ -302,9 +488,32 @@ def build_attribute_inventory_rows(
                 if caption_id:
                     acc.caption_ids.add(caption_id)
                 acc.surfaces[surface] += 1
-                lookup = attribute_lookup(surface)
+                lookup = attribute_lookup(
+                    surface,
+                    require_surface_query_conflict_check=_is_plural_common_noun_token(
+                        token
+                    ),
+                )
                 if acc.lookup is None or _lookup_rank(lookup) > _lookup_rank(acc.lookup):
                     acc.lookup = lookup
+        if caption_total == 1 or caption_total % progress_interval_records == 0:
+            _write_progress(
+                progress_output,
+                status="running",
+                phase="scan_stage3_records",
+                caption_total=caption_total,
+                noun_chunk_total=noun_chunk_total,
+                attribute_candidate_total=attribute_candidate_total,
+                inventory_rows=len(inventory),
+                elapsed_seconds=round(perf_counter() - started, 3),
+            )
+        if checkpoint_writer is not None:
+            checkpoint_writer.maybe_write(
+                caption_total=caption_total,
+                noun_chunk_total=noun_chunk_total,
+                attribute_candidate_total=attribute_candidate_total,
+                inventory=inventory,
+            )
 
     rows = [_inventory_row(acc) for acc in inventory.values()]
     rows.sort(key=lambda row: (-int(row["count"]), row["span_key"]))
@@ -316,8 +525,127 @@ def build_attribute_inventory_rows(
         "decision_status_counts": dict(Counter(row["decision_status"] for row in rows)),
         "decision_reason_counts": dict(Counter(row["decision_reason"] for row in rows)),
         "attribute_gate_counts": dict(Counter(row["attribute_gate"] for row in rows)),
+        "prior_reused_rows": sum(
+            1
+            for acc in inventory.values()
+            if acc.lookup is not None and acc.lookup.source_row is not None
+        ),
+        "prior_selected_synset_reused_rows": sum(
+            1
+            for acc in inventory.values()
+            if acc.lookup is not None
+            and acc.lookup.source_row is not None
+            and acc.lookup.selected_synset is not None
+        ),
+        "prior_selected_query_reused_rows": 0,
+        "prior_canonical_reused_rows": sum(
+            1
+            for acc in inventory.values()
+            if acc.lookup is not None
+            and _preserved_prior_value(acc.lookup, "canonical_surface")
+        ),
     }
+    _write_progress(
+        progress_output,
+        status="complete",
+        phase="complete",
+        caption_total=caption_total,
+        noun_chunk_total=noun_chunk_total,
+        attribute_candidate_total=attribute_candidate_total,
+        inventory_rows=len(rows),
+        decision_status_counts=summary["decision_status_counts"],
+        decision_reason_counts=summary["decision_reason_counts"],
+        attribute_gate_counts=summary["attribute_gate_counts"],
+        elapsed_seconds=round(perf_counter() - started, 3),
+    )
     return rows, summary
+
+
+def _checkpoint_metadata(args: argparse.Namespace) -> dict[str, str]:
+    return {
+        "input": str(Path(args.input)),
+        "output": str(Path(args.output)),
+        "limit": "" if args.limit is None else str(args.limit),
+        "object_inventory": str(Path(args.object_inventory)),
+        "attribute_inventory": args.attribute_inventory or "",
+    }
+
+
+def _load_checkpoint(
+    path: Path,
+    expected_metadata: Mapping[str, str],
+) -> AttributeInventoryCheckpointState | None:
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("artifact_type") != "gpic_observed_attribute_inventory_checkpoint":
+        raise SystemExit(f"invalid attribute inventory checkpoint: {path}")
+    metadata = payload.get("metadata") or {}
+    if dict(metadata) != dict(expected_metadata):
+        raise SystemExit(
+            "attribute inventory checkpoint metadata mismatch; remove the stale "
+            f"checkpoint or use a matching command: {path}"
+        )
+    if payload.get("status") == "completed":
+        return None
+    return AttributeInventoryCheckpointState(
+        caption_total=int(payload.get("caption_total") or 0),
+        noun_chunk_total=int(payload.get("noun_chunk_total") or 0),
+        attribute_candidate_total=int(payload.get("attribute_candidate_total") or 0),
+        inventory={
+            acc.span_key: acc
+            for acc in (
+                _accumulator_from_checkpoint_row(row)
+                for row in payload.get("inventory", [])
+            )
+        },
+    )
+
+
+def _accumulator_checkpoint_row(acc: AttributeAccumulator) -> dict[str, Any]:
+    return {
+        "span_key": acc.span_key,
+        "count": acc.count,
+        "caption_ids": sorted(acc.caption_ids),
+        "surfaces": dict(acc.surfaces),
+        "lookup_has_source_row": bool(acc.lookup is not None and acc.lookup.source_row is not None),
+        "lookup_row": _inventory_row(acc),
+    }
+
+
+def _accumulator_from_checkpoint_row(row: Mapping[str, Any]) -> AttributeAccumulator:
+    lookup_row = {
+        field: str((row.get("lookup_row") or {}).get(field, ""))
+        for field in FIELDNAMES
+    }
+    lookup = _attribute_lookup_result_from_inventory_row(
+        lookup_row,
+        lookup_row.get("observed_surface", "") or lookup_row.get("span_key", ""),
+        preserve_source_row=bool(row.get("lookup_has_source_row")),
+    )
+    return AttributeAccumulator(
+        span_key=str(row.get("span_key", "")),
+        count=int(row.get("count") or 0),
+        caption_ids=set(str(item) for item in row.get("caption_ids", [])),
+        surfaces=Counter({str(key): int(value) for key, value in row.get("surfaces", {}).items()}),
+        lookup=lookup,
+    )
+
+
+def _write_progress(path: Path | None, *, status: str, phase: str, **payload: Any) -> None:
+    if path is None:
+        return
+    progress = {
+        "schema_version": 1,
+        "artifact_type": "gpic_observed_attribute_inventory_progress",
+        "status": status,
+        "phase": phase,
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        **payload,
+    }
+    with atomic_text_writer(path) as handle:
+        handle.write(json.dumps(progress, ensure_ascii=False, indent=2, sort_keys=True))
+        handle.write("\n")
 
 
 def _selected_object_token_indices(
@@ -342,6 +670,9 @@ def _selected_object_token_indices(
         lookup = _probe_object_surface(
             _token_record_span_lookup_surfaces(span_tokens),
             object_lookup,
+            require_manual_on_any_surface_changed_hit=_is_plural_common_noun_token(
+                span_tokens[-1]
+            ),
         )
         if lookup is not None:
             return set(_object_core_token_indices_from_token_records(span_tokens, lookup))
@@ -356,11 +687,19 @@ def _build_attribute_lookup(attribute_inventory_path: str | None) -> AttributeLo
     )
     runtime_lookup = _load_attribute_lookup_runtime()
 
-    def lookup(surface: str) -> AttributeLookupResult | None:
+    def lookup(
+        surface: str,
+        *,
+        require_surface_query_conflict_check: bool = False,
+    ) -> AttributeLookupResult | None:
         existing = existing_lookup(surface) if existing_lookup is not None else None
-        if existing is not None and existing.selected_synset is not None:
+        if existing is not None and existing.decision_status in {"chosen", "excluded"}:
             return existing
-        return runtime_lookup(surface)
+        runtime = runtime_lookup(
+            surface,
+            require_surface_query_conflict_check=require_surface_query_conflict_check,
+        )
+        return runtime
 
     return lookup
 
@@ -374,22 +713,48 @@ def _load_attribute_lookup_runtime() -> AttributeLookup:
     oewn = wn.Wordnet(OEWN_SPEC, expand="")
     morphy = Morphy(oewn)
 
-    def lookup(surface: str) -> AttributeLookupResult | None:
-        return _lookup_attribute_surface(surface, oewn=oewn, morphy=morphy)
+    def lookup(
+        surface: str,
+        *,
+        require_surface_query_conflict_check: bool = False,
+    ) -> AttributeLookupResult | None:
+        return _lookup_attribute_surface(
+            surface,
+            oewn=oewn,
+            morphy=morphy,
+            require_surface_query_conflict_check=require_surface_query_conflict_check,
+        )
 
     return lookup
 
 
-def _lookup_attribute_surface(surface: str, *, oewn: Any, morphy: Any) -> AttributeLookupResult:
+def _lookup_attribute_surface(
+    surface: str,
+    *,
+    oewn: Any,
+    morphy: Any,
+    require_surface_query_conflict_check: bool = False,
+) -> AttributeLookupResult:
     exact = _normalize_query(surface)
+    exact_result: AttributeLookupResult | None = None
     if exact:
         synsets = tuple(oewn.synsets(exact))
         if synsets:
-            return _with_selected_attribute_synset("exact", exact, synsets)
-    for case, query in _morphy_attribute_queries(exact, morphy):
-        synsets = tuple(oewn.synsets(query))
-        if synsets:
-            return _with_selected_attribute_synset(case, query, synsets)
+            exact_result = _with_selected_attribute_synset("exact", exact, synsets)
+    morphy_hits: list[AttributeLookupResult] = []
+    if exact_result is None or require_surface_query_conflict_check:
+        for case, query in _morphy_attribute_queries(exact, morphy):
+            synsets = tuple(oewn.synsets(query))
+            if synsets:
+                morphy_hits.append(_with_selected_attribute_synset(case, query, synsets))
+    if exact_result is not None:
+        if require_surface_query_conflict_check:
+            conflict = _attribute_surface_query_conflict_result(exact_result, morphy_hits)
+            if conflict is not None:
+                return conflict
+        return exact_result
+    if morphy_hits:
+        return morphy_hits[0]
     return AttributeLookupResult(
         "unresolved",
         exact,
@@ -401,6 +766,51 @@ def _lookup_attribute_surface(surface: str, *, oewn: Any, morphy: Any) -> Attrib
         "chosen",
         "no_oewn_attribute_synset",
     )
+
+def _attribute_surface_query_conflict_result(
+    exact_result: AttributeLookupResult,
+    fallback_hits: Sequence[AttributeLookupResult],
+) -> AttributeLookupResult | None:
+    exact_id = _attribute_selected_synset_id(exact_result)
+    if not exact_id:
+        return None
+    conflicting = [
+        hit
+        for hit in fallback_hits
+        if _attribute_selected_synset_id(hit)
+        and _attribute_selected_synset_id(hit) != exact_id
+    ]
+    if not conflicting:
+        return None
+    synsets: list[Any] = []
+    seen_synset_ids: set[str] = set()
+    for hit in (exact_result, *conflicting):
+        for synset in hit.synsets:
+            synset_id = str(synset.id)
+            if synset_id in seen_synset_ids:
+                continue
+            synsets.append(synset)
+            seen_synset_ids.add(synset_id)
+    queries = _unique_nonempty(hit.query for hit in (exact_result, *conflicting))
+    details = _unique_nonempty(
+        f"{hit.query}:{hit.lookup_case}:{_attribute_selected_synset_id(hit)}"
+        for hit in (exact_result, *conflicting)
+    )
+    return AttributeLookupResult(
+        "surface_query_conflict",
+        "|".join(queries),
+        tuple(synsets),
+        None,
+        "ambiguous_observed_vs_surface_changed_query",
+        "||".join(details),
+        "",
+        "needs_manual",
+        "manual_surface_query_conflict_required",
+    )
+
+
+def _attribute_selected_synset_id(lookup: AttributeLookupResult) -> str:
+    return str(lookup.selected_synset.id) if lookup.selected_synset is not None else ""
 
 
 def _morphy_attribute_queries(query: str, morphy: Any) -> list[tuple[str, str]]:
@@ -566,15 +976,27 @@ def _inventory_row(acc: AttributeAccumulator) -> dict[str, str]:
         "selected_oewn_lexfile": selected.lexfile() if selected is not None else "",
         "attribute_gate": lookup.attribute_gate if lookup is not None else "",
         "synset_lemmas": "|".join(selected.lemmas()) if selected is not None else "",
-        "canonical_surface": "",
-        "canonical_label_key": "",
-        "canonical_selection_tag": "",
-        "canonical_candidate_lemmas": "",
-        "canonical_candidate_lemma_counts": "",
-        "google_ngram_candidate_surfaces": "",
-        "google_ngram_candidate_mean_frequencies": "",
-        "attribute_parent": "",
-        "attribute_parent_selection_tag": "",
+        "canonical_surface": _preserved_prior_value(lookup, "canonical_surface"),
+        "canonical_label_key": _preserved_prior_value(lookup, "canonical_label_key"),
+        "canonical_selection_tag": _preserved_prior_value(lookup, "canonical_selection_tag"),
+        "canonical_candidate_lemmas": _preserved_prior_value(lookup, "canonical_candidate_lemmas"),
+        "canonical_candidate_lemma_counts": _preserved_prior_value(
+            lookup,
+            "canonical_candidate_lemma_counts",
+        ),
+        "google_ngram_candidate_surfaces": _preserved_prior_value(
+            lookup,
+            "google_ngram_candidate_surfaces",
+        ),
+        "google_ngram_candidate_mean_frequencies": _preserved_prior_value(
+            lookup,
+            "google_ngram_candidate_mean_frequencies",
+        ),
+        "attribute_parent": _preserved_prior_value(lookup, "attribute_parent"),
+        "attribute_parent_selection_tag": _preserved_prior_value(
+            lookup,
+            "attribute_parent_selection_tag",
+        ),
         "all_oewn_synsets": "|".join(s.id for s in lookup.synsets) if lookup is not None else "",
         "all_oewn_lexfiles": "|".join(s.lexfile() for s in lookup.synsets) if lookup is not None else "",
         "synset_selection_tag": lookup.synset_selection_tag
@@ -585,9 +1007,20 @@ def _inventory_row(acc: AttributeAccumulator) -> dict[str, str]:
     }
 
 
+def _preserved_prior_value(lookup: AttributeLookupResult | None, field: str) -> str:
+    if lookup is None or lookup.source_row is None:
+        return ""
+    canonical_tag = lookup.source_row.get("canonical_selection_tag", "")
+    if canonical_tag.startswith("manual_"):
+        return ""
+    return lookup.source_row.get(field, "")
+
+
 def _lookup_rank(lookup: AttributeLookupResult | None) -> int:
     if lookup is None:
         return 0
+    if lookup.decision_status == "needs_manual":
+        return 4
     if lookup.selected_synset is not None:
         return 3
     if lookup.synsets:
@@ -602,8 +1035,52 @@ def _limited_records(records: Iterable[Mapping[str, Any]], limit: int | None) ->
         yield record
 
 
+def _resume_records(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    resume_caption_total: int,
+    limit: int | None,
+) -> Iterable[Mapping[str, Any]]:
+    for index, record in enumerate(records):
+        if index < resume_caption_total:
+            continue
+        if limit is not None and index >= limit:
+            break
+        yield record
+
+
 def _split_pipe(value: str) -> list[str]:
     return [part for part in value.split("|") if part]
+
+
+def _unique_nonempty(values: Iterable[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value or value in seen:
+            continue
+        result.append(value)
+        seen.add(value)
+    return result
+
+
+def _is_automatic_surface_changed_prior_row(row: Mapping[str, str]) -> bool:
+    span_key = _normalize_query(row.get("span_key", "") or row.get("observed_surface", ""))
+    selected_query = _normalize_query(row.get("selected_query", ""))
+    if not span_key or not selected_query or span_key == selected_query:
+        return False
+    return not _has_manual_decision_evidence(row)
+
+
+def _has_manual_decision_evidence(row: Mapping[str, str]) -> bool:
+    evidence_fields = (
+        "decision_basis",
+        "synset_selection_tag",
+        "decision_reason",
+        "manual_resolution_type",
+        "source_detail",
+    )
+    return any("manual" in row.get(field, "").lower() for field in evidence_fields)
 
 
 def _write_tsv(path: Path, rows: list[dict[str, str]]) -> None:

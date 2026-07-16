@@ -20,6 +20,133 @@ This project has the explainable v1 pipeline implemented through Stage 6.
 
 Future work must still follow the Rule Gate before adding or changing rules.
 
+## Active Workspace Guard
+
+The active local project root after the OneDrive/junction migration is:
+
+`C:\Users\rlath\Documents\Codex\gpic-caption-concepts-explainable`
+
+This Codex conversation may still have a different default workspace. Before
+running repository commands from a long-lived or migrated conversation, first
+establish the active repo root:
+
+- use the absolute `workdir` above for shell commands
+- do not rely on the conversation default cwd
+- if the current cwd is not the active root above, switch immediately to the
+  active root for repo inspection and command execution
+- if a command says `src`, `docs`, or expected pipeline files are missing, do
+  not infer repo state from that cwd; treat it as the wrong workspace and retry
+  from the active root above
+- run `scripts\assert_active_workspace.ps1` before long-running scripts,
+  generated-artifact commands, benchmarks, or tests whose result will guide the
+  next decision
+- if the guard fails, stop and fix the working directory before continuing
+
+Do not treat "I will remember the new path" as sufficient. The path must be
+verified by command evidence when the result matters.
+
+## Long-Running Process Guard
+
+Long-running pipeline jobs must not be launched with ad hoc PowerShell
+`Start-Process`, `cmd.exe /c start`, `start /b`, visible helper windows, or
+hand-built shell backgrounding. Those launch modes have caused stale launcher
+processes and hidden non-started jobs.
+
+Use only these supported paths:
+
+- foreground bounded execution:
+  `scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds N <script> ...`
+- detached/background execution:
+  `scripts\run_python.ps1 scripts\run_background_job.py start --pid-file <json> --stdout <log> --stderr <log> --cwd <repo> -- <command> ...`
+- detached/background adoption for an already-running valid job:
+  `scripts\run_python.ps1 scripts\run_background_job.py adopt --pid <pid> --pid-file <json> --cwd <repo> ...`
+- detached/background status:
+  `scripts\run_python.ps1 scripts\run_background_job.py status --pid-file <json> --progress-output <progress.json>`
+- detached/background bounded watch:
+  `scripts\run_python.ps1 scripts\run_background_job.py watch --pid-file <json> --progress-output <progress.json> --expect-output <path> --max-seconds N`
+
+When a background job is started, immediately verify all of the following:
+
+- the pid file exists and reports `running: true`
+- the expected child process is visible, not just a launcher process
+- stdout/stderr log files are being written or intentionally empty
+- the expected output artifact is either absent because the job is still in
+  progress, or present with a fresh timestamp after completion
+- long inventory builders that support progress artifacts are writing a fresh
+  `*_progress.json` file with `status`, `phase`, processed counts, and
+  `updated_at_utc`
+- large Stage 3.5 inventory scans must be launched through
+  `run_stage35_inventory_workflow.py` or with the relevant object/attribute/action
+  inventory builder plus `--checkpoint-output <json> --resume-checkpoint`; this
+  is one checkpoint JSON file per builder that is updated by atomic replace, not
+  a pile of per-interval files. A progress JSON alone is not enough because it
+  cannot resume after power loss, network loss, or a manually requested stop.
+
+While a long job is running in the current Codex turn, do not merely say that a
+progress file exists. Actively poll the available progress artifact or bounded
+watch output and report concise user-facing updates at least every 30-60
+seconds. Each update should include the current `status`, `phase`, key processed
+counts such as `caption_total` or `inventory_rows_so_far`, and whether a manual
+blocker/output artifact has appeared. If the progress artifact is missing,
+stale, unreadable, or no longer changing while the process is still running,
+inspect the process state before continuing.
+
+Before sending a final answer or otherwise ending a turn after any background
+job was started, adopted, or may still be active, run:
+
+`scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 60 -- scripts\list_active_background_jobs.py --root outputs --fail-if-running`
+
+If this command reports an active job, do not send a final answer. Continue
+polling the job, or explicitly stop/quarantine the job only when it is stale or
+wrong. This check is the durable pre-final guard; do not rely on memory that a
+job was "probably done."
+
+If a background launcher is visible but no expected child process exists, stop
+the launcher and treat the job as not started.
+
+For million-scale Stage 3.5 runs, do not use wall-clock timeout as a progress
+health check. A healthy progress-producing scan must not be killed only because
+it crossed an arbitrary elapsed-time boundary. Use progress heartbeat monitoring
+and checkpoint/resume; set child-script wall-clock timeout to `0` unless a
+specific short diagnostic command needs a bounded timeout.
+
+The current formal Stage 4/5/6 implementation is monolithic: Stage 4 writes
+after collecting raw mentions/edges, Stage 5 reads raw mentions/edges into
+memory, and Stage 6 reads canonical mentions/edges and builds facts/count
+tables in memory. It has been usable for smaller report runs, but it is not the
+safe path for million-scale caption export. Do not run 1M+ captions through the
+monolithic mixed pipeline unless a chunked/streaming Stage 4/5/6 runner has been
+implemented and verified. `run_mixed_caption_pipeline.py` has a fail-fast guard
+for this; do not disable it except for a deliberately bounded diagnostic on a
+machine sized for the run.
+
+Do not wrap formal Stage 4/5/6 scripts in `run_script_with_timeout.py` for
+production-scale work. That wrapper uses a hard `os._exit` kill and Stage 4/5/6
+currently do not have checkpoint/resume. The wrapper refuses
+`run_mixed_caption_pipeline.py`, `run_stage4_extract_raw.py`,
+`run_stage5_canonicalize.py`, and `run_stage6_export_counts.py` by default; use
+`--allow-stage456-timeout` only for a deliberately bounded smoke diagnostic.
+
+## Incident Response Guard
+
+When the user points out a repeated mistake, a violated project rule, a stuck
+process, a missing timeout, a wrong workspace, or an untracked background job,
+do not resume the main pipeline first.
+
+Follow this order:
+
+1. Inspect the current external state with command evidence.
+2. Stop or quarantine only the stale/incorrect process or artifact if one exists.
+3. Identify the concrete failure path, not just the symptom.
+4. Add or update a durable guard in code, wrapper scripts, or AGENTS.md so the
+   same failure path is harder to repeat.
+5. Verify the guard with a bounded command.
+6. Only then resume the main pipeline step.
+
+Do not answer with only an apology, plan, or explanation when a durable guard is
+possible. If no durable guard is possible, say exactly why and record the manual
+check that must happen before resuming.
+
 ## Scope Boundary
 
 Only the pipeline in `docs/rules_v1.md` is allowed:
@@ -118,6 +245,12 @@ explicitly approves a manual decision.
 Manual decisions may select or reject a synset only after explicit user
 approval. They must not silently change the lookup query used to justify the
 row.
+
+Once the user provides an explicit manual decision TSV or exact row decision,
+that decision is authoritative for the pipeline even if a later semantic audit
+would have preferred another synset. Treat semantic audit findings as advisory
+notes only. Do not reopen, override, or block a user-approved manual decision
+unless the user explicitly asks to revise that row.
 
 ## Allowed In V1
 
@@ -324,6 +457,10 @@ only locates the project Python and executes the arguments; it is not the
 repository's test timeout boundary. Use `scripts\run_tests.ps1` or the bounded
 Python test wrappers instead.
 
+`scripts\run_python.ps1` enforces this rule: it rejects direct interactive
+Python, `-m unittest`, `-m pytest`, and direct `.py` script execution except for
+the bounded wrapper scripts. Do not bypass that guard.
+
 After any interrupted, hung, or user-aborted test command, do not immediately
 rerun a test. First inspect for stale project `python.exe` or PowerShell
 processes, stop only the stale processes that belong to the interrupted command,
@@ -412,6 +549,49 @@ For source-label candidate reports:
 
 When updating only the explanatory Markdown around a generated artifact, use
 `apply_patch`. Do not edit large generated TSV/CSV artifacts by hand.
+
+### Formal Pipeline And Inventory Reuse
+
+Do not treat preview/debug outputs as normal pipeline outputs.
+
+Stage 5/6 outputs are formal caption-to-concept results only when all required
+inventory gates for that run have passed. If a command uses a preview or debug
+escape hatch, such as `--allow-unresolved-attribute-preview`, the output path,
+summary, report, and user-facing answer must call it preview/debug output. Do
+not continue from that output as if it were a formal pipeline artifact.
+
+Do not rebuild a GPIC observed inventory in isolation when a resolved prior
+inventory for the same concept family exists. The stable prior is
+`resources/gpic_inventory/current/inventory_bundle.json`, not an ad hoc
+`outputs/...` snapshot.
+
+For production Stage 3.5 inventory expansion:
+
+- always load inventory inputs from the current bundle
+- run `scripts/run_stage35_inventory_workflow.py` with `--use-current-inventory`
+- do not manually combine `--object-inventory`, `--attribute-prior-inventory`,
+  `--action-prior-inventory`, or `--base-lexicon-dir`
+- if a completed component must be promoted before the full workflow is
+  complete, use `scripts/publish_current_inventory_component.py` so
+  `resources/gpic_inventory/current` is updated component-wise
+- never call an `outputs/...` TSV "current" unless it has been published into
+  `resources/gpic_inventory/current`
+- after generation, report how many rows were reused versus newly queued when
+  the script exposes those counts
+
+This applies across caption shapes. A tag-list inventory is not a separate
+semantic namespace from sentence inventory; the same `span_key`/surface policy
+must reuse the same resolved evidence unless the rule document explicitly says
+otherwise.
+
+Do not infer that a previous object-inventory workflow automatically carried
+over to attributes or actions. Check the actual command arguments before
+running the build.
+
+Keep inventory gates phase-specific. If the current phase is synset/manual
+resolution, report only unresolved manual/synset rows as blockers. Do not mix
+canonical-surface blockers into that report. Run and report the canonical gate
+only after the synset/manual gate is clear.
 
 ### Encoding Hygiene
 

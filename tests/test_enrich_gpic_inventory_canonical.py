@@ -18,9 +18,69 @@ def _load_canonical_script():
 canonical_script = _load_canonical_script()
 
 
+class _FakeSense:
+    id = ""
+
+
+class _FakeSynset:
+    def __init__(self, lemmas):
+        self._lemmas = lemmas
+
+    def lemmas(self):
+        return self._lemmas
+
+    def senses(self):
+        return [_FakeSense()]
+
+
+class _FakeMorphy:
+    def __init__(self, results=None):
+        self._results = results or {}
+
+    def __call__(self, key, pos):
+        return {pos: self._results.get((key, pos), set())}
+
+
 class EnrichGpicInventoryCanonicalTest(unittest.TestCase):
     def test_surface_key_folds_diacritics_for_canonical_matching(self) -> None:
         self.assertEqual(canonical_script._surface_key("café"), "cafe")
+
+    def test_selected_query_is_not_observed_exact_surface(self) -> None:
+        decision = canonical_script._decide_canonical(
+            {
+                "observed_surface": "E",
+                "selected_query": "e",
+                "selected_oewn_synset": "fake-letter-e-n",
+            },
+            synset=_FakeSynset(["E", "e"]),
+            morphy=_FakeMorphy(),
+            ngram_evidence={},
+        )
+
+        self.assertEqual(decision["canonical_surface"], "E")
+        self.assertEqual(
+            decision["canonical_selection_tag"],
+            "selected_by_unique_observed_span_surface",
+        )
+
+    def test_diacritic_folded_raw_surface_can_break_morphy_tie(self) -> None:
+        decision = canonical_script._decide_canonical(
+            {
+                "observed_surface": "sautéed",
+                "selected_query": "sautéed",
+                "selected_oewn_synset": "fake-sauteed-a",
+            },
+            synset=_FakeSynset(["saute", "sauteed"]),
+            morphy=_FakeMorphy({("sauteed", "v"): {"saute"}}),
+            ngram_evidence={},
+            morphy_pos=("a", "n", "v", "r"),
+        )
+
+        self.assertEqual(decision["canonical_surface"], "sauteed")
+        self.assertEqual(
+            decision["canonical_selection_tag"],
+            "selected_by_unique_observed_span_surface_key",
+        )
 
     def test_main_exits_before_canonical_when_needs_manual_rows_remain(self) -> None:
         args = argparse.Namespace(
@@ -93,6 +153,50 @@ class EnrichGpicInventoryCanonicalTest(unittest.TestCase):
 
         self.assertIn("blocked_rows=1", str(caught.exception))
         wordnet.assert_not_called()
+
+    def test_manual_no_synset_head_fallback_keeps_canonical_surface(self) -> None:
+        args = argparse.Namespace(
+            input="input.tsv",
+            output="output.tsv",
+            ngram_evidence=None,
+            ambiguous_output="ambiguous.tsv",
+            summary=None,
+        )
+        rows = [
+            {
+                "observed_surface": "black top",
+                "span_key": "black top",
+                "decision_status": "chosen",
+                "decision_reason": "manual_accept_canonical_head_modifier_removed",
+                "selected_query": "top",
+                "selected_oewn_synset": "",
+                "canonical_surface": "top",
+                "canonical_selection_tag": "manual_no_synset_head_canonical",
+                "manual_resolution_type": "canonical_head_no_selected_synset",
+            }
+        ]
+
+        with (
+            patch.object(canonical_script, "parse_args", return_value=args),
+            patch.object(
+                canonical_script,
+                "_read_tsv",
+                return_value=(rows, ["canonical_surface", "canonical_selection_tag"]),
+            ),
+            patch.object(canonical_script, "_write_tsv") as write_tsv,
+            patch.object(canonical_script.wn, "Wordnet", return_value=Mock()),
+            patch.object(canonical_script, "Morphy", return_value=object()),
+            patch("builtins.print"),
+        ):
+            canonical_script.main()
+
+        self.assertEqual(rows[0]["canonical_surface"], "top")
+        self.assertEqual(rows[0]["canonical_label_key"], "top")
+        self.assertEqual(
+            rows[0]["canonical_selection_tag"],
+            "manual_no_synset_head_canonical",
+        )
+        self.assertEqual(write_tsv.call_count, 2)
 
     def test_main_exits_nonzero_when_canonical_ambiguity_remains(self) -> None:
         args = argparse.Namespace(

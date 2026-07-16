@@ -47,13 +47,22 @@ ATTRIBUTE_RULE_ID = "R13"
 QUANTITY_RULE_ID = "R14"
 ACTION_RULE_ID = "R15"
 AGENT_RULE_ID = "R16"
+AGENT_INHERIT_RULE_ID = "R16.1"
+PASSIVE_AGENT_RULE_ID = "R16.2"
+ACL_AGENT_RULE_ID = "R16.3"
 PATIENT_RULE_ID = "R17"
+PASSIVE_PATIENT_RULE_ID = "R17.1"
 RELATION_RULE_ID = "R18"
 RELATION_MWE_RULE_ID = "R18.1"
 
 ATTRIBUTE_MODIFIER_DEPS = frozenset(("amod", "compound", "nmod"))
 QUANTITY_MODIFIER_DEPS = frozenset(("nummod",))
 PATIENT_DEPS = frozenset(("obj", "dobj"))
+PASSIVE_SUBJECT_DEPS = frozenset(("nsubjpass", "csubjpass"))
+PASSIVE_BY_DEPS = frozenset(("agent", "prep"))
+PASSIVE_BY_OBJECT_DEPS = frozenset(("pobj",))
+PASSIVE_LIKE_ACTION_CHILD_DEPS = frozenset(("nsubjpass", "auxpass", "agent"))
+ACL_AGENT_ALLOWED_TAGS = frozenset(("VBG",))
 RELATION_MWE_SOURCE_HEAD_POS = frozenset(("VERB", "AUX"))
 OEWN_SPEC = "oewn:2025+"
 ROOT = Path(os.environ.get("GPIC_RUNTIME_ROOT", Path.cwd()))
@@ -224,38 +233,98 @@ class GpicObjectInventoryLookup:
 class GpicActionInventoryLookup:
     """Lookup resolved action span decisions from a GPIC-observed action inventory TSV."""
 
-    def __init__(self, rows_by_key: Mapping[str, Mapping[str, str]]) -> None:
+    def __init__(
+        self,
+        rows_by_key: Mapping[str, Mapping[str, str]],
+        rows_by_selected_query: Mapping[str, Mapping[str, str]] | None = None,
+    ) -> None:
         self._rows_by_key = dict(rows_by_key)
+        self._rows_by_selected_query = dict(rows_by_selected_query or {})
 
     @classmethod
     def from_tsv(cls, path: str | Path) -> "GpicActionInventoryLookup":
         rows_by_key: dict[str, Mapping[str, str]] = {}
+        rows: list[Mapping[str, str]] = []
         with Path(path).open(encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle, delimiter="\t")
             for row in reader:
+                row_dict = dict(row)
+                rows.append(row_dict)
                 span_key = row.get("span_key", "")
                 if not span_key:
                     span_key = _normalize_query(row.get("observed_surface", ""))
                 if span_key and span_key not in rows_by_key:
-                    rows_by_key[span_key] = dict(row)
-        return cls(rows_by_key)
+                    rows_by_key[span_key] = row_dict
+        return cls(rows_by_key, _unique_action_rows_by_selected_query(rows))
 
     def __call__(self, surface: str) -> _ActionLookupResult | None:
         row = self._rows_by_key.get(_normalize_query(surface))
         if row is None:
             return None
-        synsets = _inventory_synsets(row)
-        selected = _inventory_selected_synset(row, synsets)
-        return _ActionLookupResult(
-            lookup_case=row.get("selected_lookup_case", "gpic_action_inventory"),
-            query=row.get("selected_query", "") or row.get("span_key", ""),
-            synsets=synsets,
-            selected_synset=selected,
-            synset_selection_tag=row.get("synset_selection_tag", "gpic_action_inventory"),
-            wn30_lemma_counts=row.get("wn30_lemma_counts", ""),
-            decision_status=_inventory_decision_status(row),
-            decision_reason=row.get("decision_reason", ""),
+        return _action_lookup_result_from_inventory_row(row)
+
+    def lookup_selected_query(self, query: str) -> _ActionLookupResult | None:
+        row = self._rows_by_selected_query.get(_normalize_query(query))
+        if row is None:
+            return None
+        return _action_lookup_result_from_inventory_row(
+            row,
+            lookup_case="gpic_action_inventory_selected_query",
         )
+
+
+def _unique_action_rows_by_selected_query(
+    rows: Sequence[Mapping[str, str]],
+) -> dict[str, Mapping[str, str]]:
+    grouped: dict[str, list[Mapping[str, str]]] = {}
+    for row in rows:
+        decision_key = _action_reuse_decision_key(row)
+        if decision_key is None:
+            continue
+        selected_query = _normalize_query(row.get("selected_query", ""))
+        if not selected_query:
+            continue
+        grouped.setdefault(selected_query, []).append(row)
+
+    unique_rows: dict[str, Mapping[str, str]] = {}
+    for selected_query, group in grouped.items():
+        decision_keys = {
+            key
+            for row in group
+            if (key := _action_reuse_decision_key(row)) is not None
+        }
+        if len(decision_keys) == 1:
+            unique_rows[selected_query] = group[0]
+    return unique_rows
+
+
+def _action_reuse_decision_key(row: Mapping[str, str]) -> tuple[str, str] | None:
+    decision_status = _inventory_decision_status(row)
+    selected_synset = row.get("selected_oewn_synset", "").strip()
+    if decision_status == "chosen" and selected_synset:
+        return ("chosen", selected_synset)
+    if decision_status == "raw_fallback" and not selected_synset:
+        return ("raw_fallback", "")
+    return None
+
+
+def _action_lookup_result_from_inventory_row(
+    row: Mapping[str, str],
+    *,
+    lookup_case: str | None = None,
+) -> _ActionLookupResult:
+    synsets = _inventory_synsets(row)
+    selected = _inventory_selected_synset(row, synsets)
+    return _ActionLookupResult(
+        lookup_case=lookup_case or row.get("selected_lookup_case", "gpic_action_inventory"),
+        query=row.get("selected_query", "") or row.get("span_key", ""),
+        synsets=synsets,
+        selected_synset=selected,
+        synset_selection_tag=row.get("synset_selection_tag", "gpic_action_inventory"),
+        wn30_lemma_counts=row.get("wn30_lemma_counts", ""),
+        decision_status=_inventory_decision_status(row),
+        decision_reason=row.get("decision_reason", ""),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +403,9 @@ class _RelationTargetCandidate:
     target_mention_id: str
     target_text: str
     target_dep: str
+    target_resolution: str
+    target_base_i: int
+    conj_head_i: int | None = None
 
 
 class _RawBuilder:
@@ -428,6 +500,20 @@ def extract_raw_concepts_from_stage3_record(
         object_lookup = _load_object_lookup_runtime()
     if action_lookup is None and isinstance(object_lookup, dict):
         action_lookup = object_lookup
+    if _is_tag_list_stage3_record(stage3_record):
+        try:
+            _extract_tag_list_objects_and_modifiers(
+                builder,
+                stage3_record=stage3_record,
+                object_lookup=object_lookup,
+                children_by_head=children_by_head,
+            )
+        except Stage4SynsetAmbiguityError as exc:
+            raise Stage4SynsetAmbiguityError(f"caption_id={caption_id}: {exc}") from exc
+        return RawExtractionResult(
+            raw_mentions=builder.raw_mentions,
+            raw_edges=builder.raw_edges,
+        )
     if preposition_mwe_lookup is None:
         preposition_mwe_lookup = _load_preposition_mwe_lookup_runtime()
     builder.relation_mwe_matches = _find_preposition_mwe_matches_in_token_records(
@@ -446,6 +532,7 @@ def extract_raw_concepts_from_stage3_record(
             noun_chunks=noun_chunks,
             token_by_i=token_by_i,
             object_lookup=object_lookup,
+            children_by_head=children_by_head,
         )
     except Stage4SynsetAmbiguityError as exc:
         raise Stage4SynsetAmbiguityError(f"caption_id={caption_id}: {exc}") from exc
@@ -466,6 +553,16 @@ def extract_raw_concepts_from_stage3_record(
         tokens=tokens,
         children_by_head=children_by_head,
     )
+    _inherit_acl_action_head_agents(
+        builder,
+        tokens=tokens,
+        children_by_head=children_by_head,
+    )
+    _inherit_conjunct_action_agents(
+        builder,
+        tokens=tokens,
+        children_by_head=children_by_head,
+    )
     _extract_relations(
         builder,
         tokens=tokens,
@@ -476,6 +573,15 @@ def extract_raw_concepts_from_stage3_record(
         raw_mentions=builder.raw_mentions,
         raw_edges=builder.raw_edges,
     )
+
+
+def _is_tag_list_stage3_record(stage3_record: Mapping[str, Any]) -> bool:
+    meta = stage3_record.get("meta")
+    if isinstance(meta, Mapping) and meta.get("caption_shape") == "tag_list":
+        return True
+    if _optional_text(stage3_record, "caption_shape") == "tag_list":
+        return True
+    return bool(stage3_record.get("tag_segments"))
 
 
 def extract_raw_concepts_from_doc(
@@ -510,6 +616,7 @@ def extract_raw_concepts_from_doc(
             builder,
             doc=doc,
             object_lookup=object_lookup,
+            children_by_head=children_by_head,
         )
     except Stage4SynsetAmbiguityError as exc:
         raise Stage4SynsetAmbiguityError(f"caption_id={caption_id}: {exc}") from exc
@@ -525,6 +632,16 @@ def extract_raw_concepts_from_doc(
         action_lookup=action_lookup,
     )
     _extract_doc_event_roles(
+        builder,
+        doc=doc,
+        children_by_head=children_by_head,
+    )
+    _inherit_doc_acl_action_head_agents(
+        builder,
+        doc=doc,
+        children_by_head=children_by_head,
+    )
+    _inherit_doc_conjunct_action_agents(
         builder,
         doc=doc,
         children_by_head=children_by_head,
@@ -598,11 +715,118 @@ def run_stage4_extract_raw(
     return summary
 
 
+def _extract_tag_list_objects_and_modifiers(
+    builder: _RawBuilder,
+    *,
+    stage3_record: Mapping[str, Any],
+    object_lookup: Any | None,
+    children_by_head: Mapping[int, Sequence[Mapping[str, Any]]],
+) -> None:
+    for segment in _require_list(stage3_record, "tag_segments"):
+        segment_id = _optional_text(segment, "segment_id") or ""
+        segment_text = _optional_text(segment, "text") or ""
+        segment_tokens = _require_list(segment, "tokens")
+        segment_chunks = _require_list(segment, "noun_chunks")
+        token_by_i = {_require_int(token, "i"): token for token in segment_tokens}
+        mention_start = len(builder.raw_mentions)
+        edge_start = len(builder.raw_edges)
+        _extract_objects_and_chunk_modifiers(
+            builder,
+            noun_chunks=segment_chunks,
+            token_by_i=token_by_i,
+            object_lookup=object_lookup,
+            children_by_head=children_by_head,
+        )
+        _mark_tag_list_outputs(
+            builder,
+            mention_start=mention_start,
+            edge_start=edge_start,
+            segment_id=segment_id,
+            segment_text=segment_text,
+        )
+        object_added = any(
+            mention.mention_type == "object"
+            for mention in builder.raw_mentions[mention_start:]
+        )
+        if not object_added:
+            _extract_tag_list_floating_attribute(
+                builder,
+                segment_tokens=segment_tokens,
+                segment_id=segment_id,
+                segment_text=segment_text,
+            )
+
+
+def _mark_tag_list_outputs(
+    builder: _RawBuilder,
+    *,
+    mention_start: int,
+    edge_start: int,
+    segment_id: str,
+    segment_text: str,
+) -> None:
+    detail = {
+        "caption_shape": "tag_list",
+        "tag_segment_id": segment_id,
+        "tag_segment_text": segment_text,
+    }
+    for mention in builder.raw_mentions[mention_start:]:
+        mention.source_detail.update(detail)
+    for edge in builder.raw_edges[edge_start:]:
+        edge.source_detail.update(detail)
+
+
+def _extract_tag_list_floating_attribute(
+    builder: _RawBuilder,
+    *,
+    segment_tokens: Sequence[Mapping[str, Any]],
+    segment_id: str,
+    segment_text: str,
+) -> None:
+    content_tokens = [
+        token
+        for token in segment_tokens
+        if _optional_text(token, "pos") not in {"PUNCT", "SPACE"}
+    ]
+    if len(content_tokens) != 1:
+        return
+    token = content_tokens[0]
+    if not _is_tag_list_floating_attribute_token(token):
+        return
+    token_i = _require_int(token, "i")
+    builder.add_mention(
+        mention_type="attribute",
+        text=_token_text(token),
+        lemma=_token_lemma(token),
+        rule_id=ATTRIBUTE_RULE_ID,
+        char_start=_optional_int(token, "char_start"),
+        char_end=_optional_int(token, "char_end"),
+        token_start=token_i,
+        token_end=token_i + 1,
+        source_text=segment_text,
+        source_detail={
+            "caption_shape": "tag_list",
+            "tag_segment_id": segment_id,
+            "tag_segment_text": segment_text,
+            "modifier_source": "tag_list_unattached_attribute",
+        },
+    )
+
+
+def _is_tag_list_floating_attribute_token(token: Mapping[str, Any]) -> bool:
+    pos = _optional_text(token, "pos")
+    tag = _optional_text(token, "tag")
+    if pos in {"ADJ", "ADV"}:
+        return True
+    return tag in {"JJ", "JJR", "JJS", "VBG", "VBN"}
+
+
 def _extract_doc_objects_and_chunk_modifiers(
     builder: _RawBuilder,
     *,
     doc: Doc,
     object_lookup: Any | None,
+    children_by_head: Mapping[int, Sequence[Token]],
 ) -> None:
     for chunk in doc.noun_chunks:
         selection = _select_doc_chunk_object_span(chunk, object_lookup=object_lookup)
@@ -627,6 +851,53 @@ def _extract_doc_objects_and_chunk_modifiers(
         )
         for token_i in selection.token_indices:
             builder.object_by_token[token_i] = object_id
+
+        chunk_token_indices = {token.i for token in chunk}
+        excluded_modifier_tokens = set(selection.token_indices) | builder.relation_mwe_consumed_tokens
+        emitted_attribute_tokens: set[int] = set()
+
+        def add_attribute_modifier(token: Token, *, conj_head: Token | None = None) -> None:
+            token_i = token.i
+            if token_i in emitted_attribute_tokens:
+                return
+            emitted_attribute_tokens.add(token_i)
+            source_detail = _doc_modifier_detail(token, chunk.root.i)
+            edge_detail: JsonObject = {"root_i": chunk.root.i, "modifier_i": token_i}
+            if conj_head is not None:
+                source_detail.update(
+                    {
+                        "modifier_source": "conj_of_attribute_modifier",
+                        "conj_head_i": conj_head.i,
+                        "conj_head_text": conj_head.text,
+                    }
+                )
+                edge_detail.update(
+                    {
+                        "modifier_source": "conj_of_attribute_modifier",
+                        "conj_head_i": conj_head.i,
+                    }
+                )
+            attribute_id = builder.add_mention(
+                mention_type="attribute",
+                text=token.text,
+                lemma=_doc_token_lemma(token),
+                rule_id=ATTRIBUTE_RULE_ID,
+                char_start=token.idx,
+                char_end=token.idx + len(token.text),
+                token_start=token_i,
+                token_end=token_i + 1,
+                source_text=chunk.text,
+                source_detail=source_detail,
+            )
+            builder.add_edge(
+                edge_type="has_attribute",
+                source_mention_id=object_id,
+                target_mention_id=attribute_id,
+                label="has_attribute",
+                rule_id=ATTRIBUTE_RULE_ID,
+                evidence_text=chunk.text,
+                source_detail=edge_detail,
+            )
 
         for token in chunk:
             token_i = token.i
@@ -657,27 +928,14 @@ def _extract_doc_objects_and_chunk_modifiers(
                     source_detail={"root_i": chunk.root.i, "modifier_i": token_i},
                 )
             elif _is_doc_attribute_modifier(token):
-                attribute_id = builder.add_mention(
-                    mention_type="attribute",
-                    text=token.text,
-                    lemma=_doc_token_lemma(token),
-                    rule_id=ATTRIBUTE_RULE_ID,
-                    char_start=token.idx,
-                    char_end=token.idx + len(token.text),
-                    token_start=token_i,
-                    token_end=token_i + 1,
-                    source_text=chunk.text,
-                    source_detail=_doc_modifier_detail(token, chunk.root.i),
-                )
-                builder.add_edge(
-                    edge_type="has_attribute",
-                    source_mention_id=object_id,
-                    target_mention_id=attribute_id,
-                    label="has_attribute",
-                    rule_id=ATTRIBUTE_RULE_ID,
-                    evidence_text=chunk.text,
-                    source_detail={"root_i": chunk.root.i, "modifier_i": token_i},
-                )
+                add_attribute_modifier(token)
+                for conj_token, conj_head in _doc_conjunct_attribute_modifiers(
+                    token,
+                    children_by_head=children_by_head,
+                    chunk_token_indices=chunk_token_indices,
+                    excluded_token_indices=excluded_modifier_tokens,
+                ):
+                    add_attribute_modifier(conj_token, conj_head=conj_head)
 
 
 def _extract_doc_actions(
@@ -729,6 +987,7 @@ def _extract_doc_event_roles(
         action_id = builder.action_by_token.get(token.i)
         if action_id is None or token.i not in builder.action_head_tokens:
             continue
+        passive_subject_added = False
         for child in children_by_head.get(token.i, ()):
             target_id = builder.object_by_token.get(child.i)
             if target_id is None:
@@ -743,6 +1002,24 @@ def _extract_doc_event_roles(
                     evidence_text=f"{child.text} -> {token.text}",
                     source_detail={"dep": child.dep_, "action_i": token.i, "target_i": child.i},
                 )
+            elif child.dep_ in PASSIVE_SUBJECT_DEPS:
+                builder.add_edge(
+                    edge_type="event_role",
+                    source_mention_id=action_id,
+                    target_mention_id=target_id,
+                    label="patient",
+                    rule_id=PASSIVE_PATIENT_RULE_ID,
+                    evidence_text=f"{child.text} -> {token.text}",
+                    source_detail={
+                        "dep": child.dep_,
+                        "action_i": token.i,
+                        "target_i": child.i,
+                        "raw_role": "theme",
+                        "voice_normalization": "passive_to_active",
+                        "role_source": "passive_subject",
+                    },
+                )
+                passive_subject_added = True
             elif child.dep_ in PATIENT_DEPS:
                 builder.add_edge(
                     edge_type="event_role",
@@ -753,6 +1030,13 @@ def _extract_doc_event_roles(
                     evidence_text=f"{token.text} -> {child.text}",
                     source_detail={"dep": child.dep_, "action_i": token.i, "target_i": child.i},
                 )
+        if passive_subject_added:
+            _extract_doc_passive_by_agent_edges(
+                builder,
+                action_id=action_id,
+                action_i=token.i,
+                children_by_head=children_by_head,
+            )
     for prep_i in sorted(builder.consumed_action_adp_tokens):
         action_id = builder.action_by_token.get(prep_i)
         if action_id is None:
@@ -801,23 +1085,32 @@ def _extract_doc_relations(
         for child in children_by_head.get(token.i, ()):
             if child.dep_ != "pobj":
                 continue
-            target_id = builder.object_by_token.get(child.i)
-            if target_id is None:
-                continue
-            builder.add_edge(
-                edge_type="relation",
-                source_mention_id=source_id,
-                target_mention_id=target_id,
-                label=_doc_token_lemma(token),
-                rule_id=RELATION_RULE_ID,
-                evidence_text=f"{token.text} -> {child.text}",
-                source_detail={
+            for target_candidate in _doc_relation_target_candidates_from_base(
+                builder,
+                base_target=child,
+                children_by_head=children_by_head,
+                direct_resolution="direct_pobj",
+                conj_resolution="conj_of_pobj",
+            ):
+                source_detail: JsonObject = {
                     "prep_i": token.i,
                     "source_i": token.head.i,
-                    "target_i": child.i,
-                    "target_dep": "pobj",
-                },
-            )
+                    "target_i": target_candidate.target_i,
+                    "target_dep": target_candidate.target_dep,
+                    "target_resolution": target_candidate.target_resolution,
+                    "target_base_i": target_candidate.target_base_i,
+                }
+                if target_candidate.conj_head_i is not None:
+                    source_detail["conj_head_i"] = target_candidate.conj_head_i
+                builder.add_edge(
+                    edge_type="relation",
+                    source_mention_id=source_id,
+                    target_mention_id=target_candidate.target_mention_id,
+                    label=_doc_token_lemma(token),
+                    rule_id=RELATION_RULE_ID,
+                    evidence_text=f"{token.text} -> {target_candidate.target_text}",
+                    source_detail=source_detail,
+                )
 
 
 def _extract_doc_relation_mwe_edges(
@@ -851,15 +1144,13 @@ def _extract_doc_relation_mwe_edges(
         for child in children_by_head.get(final_adp_i, ()):
             if child.dep_ != "pobj":
                 continue
-            target_id = builder.object_by_token.get(child.i)
-            if target_id is None:
-                continue
-            target_candidates.append(
-                _RelationTargetCandidate(
-                    target_i=child.i,
-                    target_mention_id=target_id,
-                    target_text=child.text,
-                    target_dep="pobj",
+            target_candidates.extend(
+                _doc_relation_target_candidates_from_base(
+                    builder,
+                    base_target=child,
+                    children_by_head=children_by_head,
+                    direct_resolution="direct_final_pobj",
+                    conj_resolution="conj_of_final_pobj",
                 ),
             )
         if not target_candidates:
@@ -880,6 +1171,7 @@ def _extract_objects_and_chunk_modifiers(
     noun_chunks: Sequence[Mapping[str, Any]],
     token_by_i: Mapping[int, Mapping[str, Any]],
     object_lookup: Any | None,
+    children_by_head: Mapping[int, Sequence[Mapping[str, Any]]],
 ) -> None:
     for chunk in noun_chunks:
         selection = _select_chunk_object_span(
@@ -909,7 +1201,61 @@ def _extract_objects_and_chunk_modifiers(
         for token_i in selection.token_indices:
             builder.object_by_token[token_i] = object_id
 
-        for token in _chunk_tokens(chunk, token_by_i):
+        chunk_tokens = list(_chunk_tokens(chunk, token_by_i))
+        chunk_token_indices = {_require_int(token, "i") for token in chunk_tokens}
+        excluded_modifier_tokens = set(selection.token_indices) | builder.relation_mwe_consumed_tokens
+        emitted_attribute_tokens: set[int] = set()
+        root_i = _require_int(chunk, "root_i")
+        chunk_text = _optional_text(chunk, "text")
+
+        def add_attribute_modifier(
+            token: Mapping[str, Any],
+            *,
+            conj_head: Mapping[str, Any] | None = None,
+        ) -> None:
+            token_i = _require_int(token, "i")
+            if token_i in emitted_attribute_tokens:
+                return
+            emitted_attribute_tokens.add(token_i)
+            source_detail = _modifier_detail(token, root_i)
+            edge_detail: JsonObject = {"root_i": root_i, "modifier_i": token_i}
+            if conj_head is not None:
+                source_detail.update(
+                    {
+                        "modifier_source": "conj_of_attribute_modifier",
+                        "conj_head_i": _require_int(conj_head, "i"),
+                        "conj_head_text": _token_text(conj_head),
+                    }
+                )
+                edge_detail.update(
+                    {
+                        "modifier_source": "conj_of_attribute_modifier",
+                        "conj_head_i": _require_int(conj_head, "i"),
+                    }
+                )
+            attribute_id = builder.add_mention(
+                mention_type="attribute",
+                text=_token_text(token),
+                lemma=_token_lemma(token),
+                rule_id=ATTRIBUTE_RULE_ID,
+                char_start=_optional_int(token, "char_start"),
+                char_end=_optional_int(token, "char_end"),
+                token_start=token_i,
+                token_end=token_i + 1,
+                source_text=chunk_text,
+                source_detail=source_detail,
+            )
+            builder.add_edge(
+                edge_type="has_attribute",
+                source_mention_id=object_id,
+                target_mention_id=attribute_id,
+                label="has_attribute",
+                rule_id=ATTRIBUTE_RULE_ID,
+                evidence_text=chunk_text,
+                source_detail=edge_detail,
+            )
+
+        for token in chunk_tokens:
             token_i = _require_int(token, "i")
             if token_i in selection.token_indices:
                 continue
@@ -935,30 +1281,17 @@ def _extract_objects_and_chunk_modifiers(
                     label="has_quantity",
                     rule_id=QUANTITY_RULE_ID,
                     evidence_text=_optional_text(chunk, "text"),
-                    source_detail={"root_i": _require_int(chunk, "root_i"), "modifier_i": token_i},
+                    source_detail={"root_i": root_i, "modifier_i": token_i},
                 )
             elif _is_attribute_modifier(token):
-                attribute_id = builder.add_mention(
-                    mention_type="attribute",
-                    text=_token_text(token),
-                    lemma=_token_lemma(token),
-                    rule_id=ATTRIBUTE_RULE_ID,
-                    char_start=_optional_int(token, "char_start"),
-                    char_end=_optional_int(token, "char_end"),
-                    token_start=token_i,
-                    token_end=token_i + 1,
-                    source_text=_optional_text(chunk, "text"),
-                    source_detail=_modifier_detail(token, _require_int(chunk, "root_i")),
-                )
-                builder.add_edge(
-                    edge_type="has_attribute",
-                    source_mention_id=object_id,
-                    target_mention_id=attribute_id,
-                    label="has_attribute",
-                    rule_id=ATTRIBUTE_RULE_ID,
-                    evidence_text=_optional_text(chunk, "text"),
-                    source_detail={"root_i": _require_int(chunk, "root_i"), "modifier_i": token_i},
-                )
+                add_attribute_modifier(token)
+                for conj_token, conj_head in _conjunct_attribute_modifiers(
+                    token,
+                    children_by_head=children_by_head,
+                    chunk_token_indices=chunk_token_indices,
+                    excluded_token_indices=excluded_modifier_tokens,
+                ):
+                    add_attribute_modifier(conj_token, conj_head=conj_head)
 
 
 def _extract_actions(
@@ -1011,6 +1344,7 @@ def _extract_event_roles(
         action_id = builder.action_by_token.get(token_i)
         if action_id is None or token_i not in builder.action_head_tokens:
             continue
+        passive_subject_added = False
         for child in children_by_head.get(token_i, ()):
             child_i = _require_int(child, "i")
             target_id = builder.object_by_token.get(child_i)
@@ -1027,6 +1361,24 @@ def _extract_event_roles(
                     evidence_text=f"{_token_text(child)} -> {_token_text(token)}",
                     source_detail={"dep": dep, "action_i": token_i, "target_i": child_i},
                 )
+            elif dep in PASSIVE_SUBJECT_DEPS:
+                builder.add_edge(
+                    edge_type="event_role",
+                    source_mention_id=action_id,
+                    target_mention_id=target_id,
+                    label="patient",
+                    rule_id=PASSIVE_PATIENT_RULE_ID,
+                    evidence_text=f"{_token_text(child)} -> {_token_text(token)}",
+                    source_detail={
+                        "dep": dep,
+                        "action_i": token_i,
+                        "target_i": child_i,
+                        "raw_role": "theme",
+                        "voice_normalization": "passive_to_active",
+                        "role_source": "passive_subject",
+                    },
+                )
+                passive_subject_added = True
             elif dep in PATIENT_DEPS:
                 builder.add_edge(
                     edge_type="event_role",
@@ -1037,6 +1389,13 @@ def _extract_event_roles(
                     evidence_text=f"{_token_text(token)} -> {_token_text(child)}",
                     source_detail={"dep": dep, "action_i": token_i, "target_i": child_i},
                 )
+        if passive_subject_added:
+            _extract_passive_by_agent_edges(
+                builder,
+                action_id=action_id,
+                action_i=token_i,
+                children_by_head=children_by_head,
+            )
     for prep_i in sorted(builder.consumed_action_adp_tokens):
         action_id = builder.action_by_token.get(prep_i)
         if action_id is None:
@@ -1069,6 +1428,336 @@ def _extract_event_roles(
             )
 
 
+def _extract_passive_by_agent_edges(
+    builder: _RawBuilder,
+    *,
+    action_id: str,
+    action_i: int,
+    children_by_head: Mapping[int, Sequence[Mapping[str, Any]]],
+) -> None:
+    for child in children_by_head.get(action_i, ()):
+        dep = _optional_text(child, "dep")
+        if dep not in PASSIVE_BY_DEPS:
+            continue
+        if _token_lemma(child).lower() != "by" and _token_text(child).lower() != "by":
+            continue
+        by_i = _require_int(child, "i")
+        for by_child in children_by_head.get(by_i, ()):
+            target_dep = _optional_text(by_child, "dep")
+            if target_dep not in PASSIVE_BY_OBJECT_DEPS:
+                continue
+            target_i = _require_int(by_child, "i")
+            target_id = builder.object_by_token.get(target_i)
+            if target_id is None:
+                continue
+            builder.add_edge(
+                edge_type="event_role",
+                source_mention_id=action_id,
+                target_mention_id=target_id,
+                label="agent",
+                rule_id=PASSIVE_AGENT_RULE_ID,
+                evidence_text=f"{_token_text(child)} -> {_token_text(by_child)}",
+                source_detail={
+                    "dep": dep,
+                    "action_i": action_i,
+                    "by_i": by_i,
+                    "target_i": target_i,
+                    "target_dep": target_dep,
+                    "raw_role": "by_agent_or_causer",
+                    "voice_normalization": "passive_to_active",
+                    "role_source": "passive_by_phrase",
+                },
+            )
+
+
+def _extract_doc_passive_by_agent_edges(
+    builder: _RawBuilder,
+    *,
+    action_id: str,
+    action_i: int,
+    children_by_head: Mapping[int, Sequence[Token]],
+) -> None:
+    for child in children_by_head.get(action_i, ()):
+        if child.dep_ not in PASSIVE_BY_DEPS:
+            continue
+        if child.lemma_.lower() != "by" and child.text.lower() != "by":
+            continue
+        for by_child in children_by_head.get(child.i, ()):
+            if by_child.dep_ not in PASSIVE_BY_OBJECT_DEPS:
+                continue
+            target_id = builder.object_by_token.get(by_child.i)
+            if target_id is None:
+                continue
+            builder.add_edge(
+                edge_type="event_role",
+                source_mention_id=action_id,
+                target_mention_id=target_id,
+                label="agent",
+                rule_id=PASSIVE_AGENT_RULE_ID,
+                evidence_text=f"{child.text} -> {by_child.text}",
+                source_detail={
+                    "dep": child.dep_,
+                    "action_i": action_i,
+                    "by_i": child.i,
+                    "target_i": by_child.i,
+                    "target_dep": by_child.dep_,
+                    "raw_role": "by_agent_or_causer",
+                    "voice_normalization": "passive_to_active",
+                    "role_source": "passive_by_phrase",
+                },
+            )
+
+
+def _inherit_acl_action_head_agents(
+    builder: _RawBuilder,
+    *,
+    tokens: Sequence[Mapping[str, Any]],
+    children_by_head: Mapping[int, Sequence[Mapping[str, Any]]],
+) -> None:
+    agent_edges_by_action = _agent_edges_by_action(builder)
+    token_by_i = {_require_int(token, "i"): token for token in tokens}
+    for token in tokens:
+        action_i = _require_int(token, "i")
+        if action_i not in builder.action_head_tokens:
+            continue
+        if _optional_text(token, "dep") != "acl":
+            continue
+        if _optional_text(token, "tag") not in ACL_AGENT_ALLOWED_TAGS:
+            continue
+        if _is_passive_like_action_token(token, children_by_head=children_by_head):
+            continue
+        action_id = builder.action_by_token.get(action_i)
+        if action_id is None:
+            continue
+        if agent_edges_by_action.get(action_id):
+            continue
+        head_i = _require_int(token, "head_i")
+        target_id = builder.object_by_token.get(head_i)
+        if target_id is None:
+            continue
+        head_token = token_by_i.get(head_i)
+        head_text = _token_text(head_token) if head_token is not None else str(head_i)
+        builder.add_edge(
+            edge_type="event_role",
+            source_mention_id=action_id,
+            target_mention_id=target_id,
+            label="agent",
+            rule_id=ACL_AGENT_RULE_ID,
+            evidence_text=f"{head_text} -> {_token_text(token)}",
+            source_detail={
+                "dep": "acl",
+                "action_i": action_i,
+                "target_i": head_i,
+                "role_source": "acl_head_object_agent",
+                "acl_head_i": head_i,
+            },
+        )
+
+
+def _inherit_doc_acl_action_head_agents(
+    builder: _RawBuilder,
+    *,
+    doc: Doc,
+    children_by_head: Mapping[int, Sequence[Token]],
+) -> None:
+    agent_edges_by_action = _agent_edges_by_action(builder)
+    for token in doc:
+        if token.i not in builder.action_head_tokens:
+            continue
+        if token.dep_ != "acl":
+            continue
+        if token.tag_ not in ACL_AGENT_ALLOWED_TAGS:
+            continue
+        if _is_passive_like_doc_action_token(token, children_by_head=children_by_head):
+            continue
+        action_id = builder.action_by_token.get(token.i)
+        if action_id is None:
+            continue
+        if agent_edges_by_action.get(action_id):
+            continue
+        target_id = builder.object_by_token.get(token.head.i)
+        if target_id is None:
+            continue
+        builder.add_edge(
+            edge_type="event_role",
+            source_mention_id=action_id,
+            target_mention_id=target_id,
+            label="agent",
+            rule_id=ACL_AGENT_RULE_ID,
+            evidence_text=f"{token.head.text} -> {token.text}",
+            source_detail={
+                "dep": "acl",
+                "action_i": token.i,
+                "target_i": token.head.i,
+                "role_source": "acl_head_object_agent",
+                "acl_head_i": token.head.i,
+            },
+        )
+
+
+def _inherit_conjunct_action_agents(
+    builder: _RawBuilder,
+    *,
+    tokens: Sequence[Mapping[str, Any]],
+    children_by_head: Mapping[int, Sequence[Mapping[str, Any]]],
+) -> None:
+    token_by_i = {_require_int(token, "i"): token for token in tokens}
+    while True:
+        agent_edges_by_action = _agent_edges_by_action(builder)
+        changed = False
+        for token in tokens:
+            target_action_i = _require_int(token, "i")
+            if target_action_i not in builder.action_head_tokens:
+                continue
+            if _optional_text(token, "dep") != "conj":
+                continue
+            if _is_passive_like_action_token(token, children_by_head=children_by_head):
+                continue
+            target_action_id = builder.action_by_token.get(target_action_i)
+            if target_action_id is None:
+                continue
+            if agent_edges_by_action.get(target_action_id):
+                continue
+            source_action_i = _require_int(token, "head_i")
+            if source_action_i not in builder.action_head_tokens:
+                continue
+            source_action_id = builder.action_by_token.get(source_action_i)
+            if source_action_id is None or source_action_id == target_action_id:
+                continue
+            source_agent_edge = _single_agent_edge(
+                agent_edges_by_action.get(source_action_id, ()),
+            )
+            if source_agent_edge is None:
+                continue
+            source_token = token_by_i.get(source_action_i)
+            target_i = source_agent_edge.source_detail.get("target_i")
+            source_text = _token_text(source_token) if source_token is not None else str(source_action_i)
+            builder.add_edge(
+                edge_type="event_role",
+                source_mention_id=target_action_id,
+                target_mention_id=source_agent_edge.target_mention_id,
+                label="agent",
+                rule_id=AGENT_INHERIT_RULE_ID,
+                evidence_text=f"{source_text} -> {_token_text(token)}",
+                source_detail={
+                    "dep": "conj",
+                    "action_i": target_action_i,
+                    "target_i": target_i if isinstance(target_i, int) else None,
+                    "role_source": "conj_agent_inheritance",
+                    "source_action_i": source_action_i,
+                    "target_action_i": target_action_i,
+                    "conj_head_i": source_action_i,
+                    "source_action_mention_id": source_action_id,
+                    "source_agent_edge_id": source_agent_edge.edge_id,
+                    "source_agent_rule_id": source_agent_edge.rule_id,
+                },
+            )
+            changed = True
+        if not changed:
+            return
+
+
+def _inherit_doc_conjunct_action_agents(
+    builder: _RawBuilder,
+    *,
+    doc: Doc,
+    children_by_head: Mapping[int, Sequence[Token]],
+) -> None:
+    while True:
+        agent_edges_by_action = _agent_edges_by_action(builder)
+        changed = False
+        for token in doc:
+            if token.i not in builder.action_head_tokens:
+                continue
+            if token.dep_ != "conj":
+                continue
+            if _is_passive_like_doc_action_token(token, children_by_head=children_by_head):
+                continue
+            target_action_id = builder.action_by_token.get(token.i)
+            if target_action_id is None:
+                continue
+            if agent_edges_by_action.get(target_action_id):
+                continue
+            source_action_i = token.head.i
+            if source_action_i not in builder.action_head_tokens:
+                continue
+            source_action_id = builder.action_by_token.get(source_action_i)
+            if source_action_id is None or source_action_id == target_action_id:
+                continue
+            source_agent_edge = _single_agent_edge(
+                agent_edges_by_action.get(source_action_id, ()),
+            )
+            if source_agent_edge is None:
+                continue
+            target_i = source_agent_edge.source_detail.get("target_i")
+            builder.add_edge(
+                edge_type="event_role",
+                source_mention_id=target_action_id,
+                target_mention_id=source_agent_edge.target_mention_id,
+                label="agent",
+                rule_id=AGENT_INHERIT_RULE_ID,
+                evidence_text=f"{token.head.text} -> {token.text}",
+                source_detail={
+                    "dep": "conj",
+                    "action_i": token.i,
+                    "target_i": target_i if isinstance(target_i, int) else None,
+                    "role_source": "conj_agent_inheritance",
+                    "source_action_i": source_action_i,
+                    "target_action_i": token.i,
+                    "conj_head_i": source_action_i,
+                    "source_action_mention_id": source_action_id,
+                    "source_agent_edge_id": source_agent_edge.edge_id,
+                    "source_agent_rule_id": source_agent_edge.rule_id,
+                },
+            )
+            changed = True
+        if not changed:
+            return
+
+
+def _agent_edges_by_action(builder: _RawBuilder) -> dict[str, list[RawEdge]]:
+    edges_by_action: dict[str, list[RawEdge]] = defaultdict(list)
+    for edge in builder.raw_edges:
+        if edge.edge_type != "event_role":
+            continue
+        if edge.label != "agent":
+            continue
+        edges_by_action[edge.source_mention_id].append(edge)
+    return edges_by_action
+
+
+def _is_passive_like_action_token(
+    token: Mapping[str, Any],
+    *,
+    children_by_head: Mapping[int, Sequence[Mapping[str, Any]]],
+) -> bool:
+    token_i = _require_int(token, "i")
+    return any(
+        _optional_text(child, "dep") in PASSIVE_LIKE_ACTION_CHILD_DEPS
+        for child in children_by_head.get(token_i, ())
+    )
+
+
+def _is_passive_like_doc_action_token(
+    token: Token,
+    *,
+    children_by_head: Mapping[int, Sequence[Token]],
+) -> bool:
+    return any(
+        child.dep_ in PASSIVE_LIKE_ACTION_CHILD_DEPS
+        for child in children_by_head.get(token.i, ())
+    )
+
+
+def _single_agent_edge(edges: Sequence[RawEdge]) -> RawEdge | None:
+    edge_by_target: dict[str, RawEdge] = {}
+    for edge in edges:
+        edge_by_target.setdefault(edge.target_mention_id, edge)
+    if len(edge_by_target) != 1:
+        return None
+    return next(iter(edge_by_target.values()))
+
+
 def _extract_relations(
     builder: _RawBuilder,
     *,
@@ -1089,24 +1778,32 @@ def _extract_relations(
         for child in children_by_head.get(prep_i, ()):
             if _optional_text(child, "dep") != "pobj":
                 continue
-            child_i = _require_int(child, "i")
-            target_id = builder.object_by_token.get(child_i)
-            if target_id is None:
-                continue
-            builder.add_edge(
-                edge_type="relation",
-                source_mention_id=source_id,
-                target_mention_id=target_id,
-                label=_token_lemma(token),
-                rule_id=RELATION_RULE_ID,
-                evidence_text=f"{_token_text(token)} -> {_token_text(child)}",
-                source_detail={
+            for target_candidate in _relation_target_candidates_from_base(
+                builder,
+                base_target=child,
+                children_by_head=children_by_head,
+                direct_resolution="direct_pobj",
+                conj_resolution="conj_of_pobj",
+            ):
+                source_detail: JsonObject = {
                     "prep_i": prep_i,
                     "source_i": _require_int(token, "head_i"),
-                    "target_i": child_i,
-                    "target_dep": "pobj",
-                },
-            )
+                    "target_i": target_candidate.target_i,
+                    "target_dep": target_candidate.target_dep,
+                    "target_resolution": target_candidate.target_resolution,
+                    "target_base_i": target_candidate.target_base_i,
+                }
+                if target_candidate.conj_head_i is not None:
+                    source_detail["conj_head_i"] = target_candidate.conj_head_i
+                builder.add_edge(
+                    edge_type="relation",
+                    source_mention_id=source_id,
+                    target_mention_id=target_candidate.target_mention_id,
+                    label=_token_lemma(token),
+                    rule_id=RELATION_RULE_ID,
+                    evidence_text=f"{_token_text(token)} -> {target_candidate.target_text}",
+                    source_detail=source_detail,
+                )
 
 
 def _extract_relation_mwe_edges(
@@ -1142,16 +1839,13 @@ def _extract_relation_mwe_edges(
         for child in children_by_head.get(final_adp_i, ()):
             if _optional_text(child, "dep") != "pobj":
                 continue
-            child_i = _require_int(child, "i")
-            target_id = builder.object_by_token.get(child_i)
-            if target_id is None:
-                continue
-            target_candidates.append(
-                _RelationTargetCandidate(
-                    target_i=child_i,
-                    target_mention_id=target_id,
-                    target_text=_token_text(child),
-                    target_dep="pobj",
+            target_candidates.extend(
+                _relation_target_candidates_from_base(
+                    builder,
+                    base_target=child,
+                    children_by_head=children_by_head,
+                    direct_resolution="direct_final_pobj",
+                    conj_resolution="conj_of_final_pobj",
                 ),
             )
         _add_relation_mwe_candidate_edges(
@@ -1164,6 +1858,122 @@ def _extract_relation_mwe_edges(
         )
 
 
+def _relation_target_candidates_from_base(
+    builder: _RawBuilder,
+    *,
+    base_target: Mapping[str, Any],
+    children_by_head: Mapping[int, Sequence[Mapping[str, Any]]],
+    direct_resolution: str,
+    conj_resolution: str,
+) -> tuple[_RelationTargetCandidate, ...]:
+    base_i = _require_int(base_target, "i")
+    base_id = builder.object_by_token.get(base_i)
+    if base_id is None:
+        return ()
+    candidates = [
+        _RelationTargetCandidate(
+            target_i=base_i,
+            target_mention_id=base_id,
+            target_text=_token_text(base_target),
+            target_dep=_optional_text(base_target, "dep") or "",
+            target_resolution=direct_resolution,
+            target_base_i=base_i,
+        )
+    ]
+    seen_token_indices = {base_i}
+    seen_mentions = {base_id}
+    pending = [base_target]
+    while pending:
+        head = pending.pop(0)
+        head_i = _require_int(head, "i")
+        for child in children_by_head.get(head_i, ()):
+            if _optional_text(child, "dep") != "conj":
+                continue
+            child_i = _require_int(child, "i")
+            if child_i in seen_token_indices:
+                continue
+            target_id = builder.object_by_token.get(child_i)
+            if target_id is None:
+                continue
+            seen_token_indices.add(child_i)
+            if target_id in seen_mentions:
+                continue
+            seen_mentions.add(target_id)
+            candidates.append(
+                _RelationTargetCandidate(
+                    target_i=child_i,
+                    target_mention_id=target_id,
+                    target_text=_token_text(child),
+                    target_dep=_optional_text(child, "dep") or "",
+                    target_resolution=conj_resolution,
+                    target_base_i=base_i,
+                    conj_head_i=head_i,
+                )
+            )
+            pending.append(child)
+    return tuple(candidates)
+
+
+def _doc_relation_target_candidates_from_base(
+    builder: _RawBuilder,
+    *,
+    base_target: Token,
+    children_by_head: Mapping[int, Sequence[Token]],
+    direct_resolution: str,
+    conj_resolution: str,
+) -> tuple[_RelationTargetCandidate, ...]:
+    base_i = base_target.i
+    base_id = builder.object_by_token.get(base_i)
+    if base_id is None:
+        return ()
+    candidates = [
+        _RelationTargetCandidate(
+            target_i=base_i,
+            target_mention_id=base_id,
+            target_text=base_target.text,
+            target_dep=base_target.dep_,
+            target_resolution=direct_resolution,
+            target_base_i=base_i,
+        )
+    ]
+    seen_token_indices = {base_i}
+    seen_mentions = {base_id}
+    pending = [base_target]
+    while pending:
+        head = pending.pop(0)
+        for child in children_by_head.get(head.i, ()):
+            if child.dep_ != "conj":
+                continue
+            if child.i in seen_token_indices:
+                continue
+            target_id = builder.object_by_token.get(child.i)
+            if target_id is None:
+                continue
+            seen_token_indices.add(child.i)
+            if target_id in seen_mentions:
+                continue
+            seen_mentions.add(target_id)
+            candidates.append(
+                _RelationTargetCandidate(
+                    target_i=child.i,
+                    target_mention_id=target_id,
+                    target_text=child.text,
+                    target_dep=child.dep_,
+                    target_resolution=conj_resolution,
+                    target_base_i=base_i,
+                    conj_head_i=head.i,
+                )
+            )
+            pending.append(child)
+    return tuple(candidates)
+
+
+def _relation_target_base_count(
+    target_candidates: Sequence[_RelationTargetCandidate],
+) -> int:
+    return len({candidate.target_base_i for candidate in target_candidates if candidate.target_base_i >= 0})
+
+
 def _relation_mwe_edge_detail(
     match: _PrepositionMweMatch,
     *,
@@ -1174,9 +1984,13 @@ def _relation_mwe_edge_detail(
     source_dep: str,
     target_i: int,
     target_dep: str,
+    target_resolution: str,
+    target_base_i: int,
+    conj_head_i: int | None,
     candidate_source_count: int,
     candidate_sources: Sequence[Mapping[str, Any]],
     candidate_target_count: int,
+    candidate_target_base_count: int,
     candidate_targets: Sequence[Mapping[str, Any]],
     ambiguity_scope: str,
 ) -> JsonObject:
@@ -1199,10 +2013,14 @@ def _relation_mwe_edge_detail(
         ),
         "target_i": target_i,
         "target_dep": target_dep,
+        "target_resolution": target_resolution,
+        "target_base_i": target_base_i,
+        "conj_head_i": conj_head_i,
         "candidate_target_count": candidate_target_count,
+        "candidate_target_base_count": candidate_target_base_count,
         "candidate_targets": [dict(candidate) for candidate in candidate_targets],
         "target_endpoint_status": _relation_endpoint_status(
-            candidate_target_count,
+            candidate_target_base_count,
             endpoint_name="target",
         ),
         "ambiguity_scope": ambiguity_scope,
@@ -1234,9 +2052,13 @@ def _add_relation_mwe_candidate_edges(
             "target_i": candidate.target_i,
             "target_mention_id": candidate.target_mention_id,
             "target_dep": candidate.target_dep,
+            "target_resolution": candidate.target_resolution,
+            "target_base_i": candidate.target_base_i,
+            "conj_head_i": candidate.conj_head_i,
         }
         for candidate in target_candidates
     ]
+    candidate_target_base_count = _relation_target_base_count(target_candidates)
     source_edge_candidates = (
         tuple(source_candidates)
         if source_candidates
@@ -1258,17 +2080,19 @@ def _add_relation_mwe_candidate_edges(
                 target_mention_id=MISSING_TARGET_MENTION_ID,
                 target_text="missing_target",
                 target_dep="",
+                target_resolution="missing_target",
+                target_base_i=-1,
             ),
         )
     )
     edge_type = (
         "relation"
-        if len(source_candidates) == 1 and len(target_candidates) == 1
+        if len(source_candidates) == 1 and candidate_target_base_count == 1
         else "ambiguous_relation_candidate"
     )
     ambiguity_scope = _relation_mwe_ambiguity_scope(
         source_count=len(source_candidates),
-        target_count=len(target_candidates),
+        target_count=candidate_target_base_count,
     )
     for source_candidate in source_edge_candidates:
         for target_candidate in target_edge_candidates:
@@ -1288,9 +2112,13 @@ def _add_relation_mwe_candidate_edges(
                     source_dep=source_candidate.source_dep,
                     target_i=target_candidate.target_i,
                     target_dep=target_candidate.target_dep,
+                    target_resolution=target_candidate.target_resolution,
+                    target_base_i=target_candidate.target_base_i,
+                    conj_head_i=target_candidate.conj_head_i,
                     candidate_source_count=len(source_candidates),
                     candidate_sources=candidate_sources,
                     candidate_target_count=len(target_candidates),
+                    candidate_target_base_count=candidate_target_base_count,
                     candidate_targets=candidate_targets,
                     ambiguity_scope=ambiguity_scope,
                 ),
@@ -1820,7 +2648,12 @@ def _selection_from_token_records(
         return None
     text = _token_record_span_text(tokens)
     surfaces = _token_record_span_lookup_surfaces(tokens)
-    lookup = _lookup_object_surface(surfaces, object_lookup, raw_surface=text)
+    lookup = _lookup_object_surface(
+        surfaces,
+        object_lookup,
+        raw_surface=text,
+        require_manual_on_any_surface_changed_hit=_is_plural_common_noun_token(tokens[-1]),
+    )
     if lookup is None:
         return None
     lookup_token_indices = tuple(_require_int(token, "i") for token in tokens)
@@ -1863,7 +2696,12 @@ def _selection_from_doc_tokens(
         return None
     text = _doc_token_span_text(tokens)
     surfaces = _doc_token_span_lookup_surfaces(tokens)
-    lookup = _lookup_object_surface(surfaces, object_lookup, raw_surface=text)
+    lookup = _lookup_object_surface(
+        surfaces,
+        object_lookup,
+        raw_surface=text,
+        require_manual_on_any_surface_changed_hit=_is_plural_common_noun_doc_token(tokens[-1]),
+    )
     if lookup is None:
         return None
     lookup_token_indices = tuple(token.i for token in tokens)
@@ -2027,7 +2865,6 @@ def _token_record_span_lookup_surfaces(tokens: Sequence[Mapping[str, Any]]) -> t
     return _span_lookup_surfaces(
         text,
         last_lemma=_token_lemma(last),
-        prefer_last_lemma=_is_plural_common_noun_token(last),
     )
 
 
@@ -2060,7 +2897,6 @@ def _doc_token_span_lookup_surfaces(tokens: Sequence[Token]) -> tuple[str, ...]:
     return _span_lookup_surfaces(
         text,
         last_lemma=_doc_token_lemma(tokens[-1]),
-        prefer_last_lemma=_is_plural_common_noun_doc_token(tokens[-1]),
     )
 
 
@@ -2077,17 +2913,14 @@ def _span_lookup_surfaces(
     text: str,
     *,
     last_lemma: str,
-    prefer_last_lemma: bool,
 ) -> tuple[str, ...]:
     surfaces: list[str] = []
     words = text.split()
     lemma_surface = ""
     if words and last_lemma and _normalize_query(words[-1]) != _normalize_query(last_lemma):
         lemma_surface = " ".join([*words[:-1], last_lemma])
-    if prefer_last_lemma and lemma_surface:
-        _append_unique(surfaces, lemma_surface)
     _append_unique(surfaces, text)
-    if not prefer_last_lemma and lemma_surface:
+    if lemma_surface:
         _append_unique(surfaces, lemma_surface)
     return tuple(surfaces)
 
@@ -2111,8 +2944,13 @@ def _lookup_object_surface(
     object_lookup: Any | None,
     *,
     raw_surface: str,
+    require_manual_on_any_surface_changed_hit: bool = False,
 ) -> _ObjectLookupResult | None:
-    lookup = _probe_object_surface(surfaces, object_lookup)
+    lookup = _probe_object_surface(
+        surfaces,
+        object_lookup,
+        require_manual_on_any_surface_changed_hit=require_manual_on_any_surface_changed_hit,
+    )
     if lookup is not None:
         _raise_if_ambiguous_lookup(raw_surface, lookup)
     return lookup
@@ -2121,20 +2959,117 @@ def _lookup_object_surface(
 def _probe_object_surface(
     surfaces: Sequence[str],
     object_lookup: Any | None,
+    *,
+    require_manual_on_any_surface_changed_hit: bool = False,
 ) -> _ObjectLookupResult | None:
     if object_lookup is None:
         return None
+    observed_query = _normalize_query(surfaces[0]) if surfaces else ""
+    hits: list[_ObjectLookupResult] = []
+    enable_surface_conflict_guard = not isinstance(object_lookup, GpicObjectInventoryLookup)
     if callable(object_lookup):
         for surface in surfaces:
             lookup = object_lookup(surface)
             if lookup is not None:
-                return lookup
+                hits.append(lookup)
+    else:
+        for surface in surfaces:
+            lookup = _lookup_oewn_synsets(surface, object_lookup["oewn"], object_lookup["morphy"])
+            if lookup.synsets:
+                hits.append(lookup)
+    if not hits:
         return None
-    for surface in surfaces:
-        lookup = _lookup_oewn_synsets(surface, object_lookup["oewn"], object_lookup["morphy"])
-        if lookup.synsets:
-            return lookup
-    return None
+    return _resolve_object_surface_hits(
+        observed_query,
+        hits,
+        enable_surface_conflict_guard=enable_surface_conflict_guard,
+        require_manual_on_any_surface_changed_hit=require_manual_on_any_surface_changed_hit,
+    )
+
+
+def _resolve_object_surface_hits(
+    observed_query: str,
+    hits: Sequence[_ObjectLookupResult],
+    *,
+    enable_surface_conflict_guard: bool = True,
+    require_manual_on_any_surface_changed_hit: bool = False,
+) -> _ObjectLookupResult:
+    observed_hit = next(
+        (hit for hit in hits if _normalize_query(hit.query) == observed_query),
+        None,
+    )
+    if observed_hit is not None and enable_surface_conflict_guard:
+        conflict = _object_surface_query_conflict_result(
+            observed_hit,
+            hits,
+            require_manual_on_any_surface_changed_hit=require_manual_on_any_surface_changed_hit,
+        )
+        if conflict is not None:
+            return conflict
+    return observed_hit if observed_hit is not None else hits[0]
+
+
+def _object_surface_query_conflict_result(
+    observed_hit: _ObjectLookupResult,
+    hits: Sequence[_ObjectLookupResult],
+    *,
+    require_manual_on_any_surface_changed_hit: bool = False,
+) -> _ObjectLookupResult | None:
+    observed_id = _selected_synset_id(observed_hit)
+    if not observed_id and not require_manual_on_any_surface_changed_hit:
+        return None
+    conflicting = [
+        hit
+        for hit in hits
+        if _normalize_query(hit.query) != _normalize_query(observed_hit.query)
+        and hit.synsets
+        and (
+            (
+                require_manual_on_any_surface_changed_hit
+                and _selected_synset_id(hit) != observed_id
+            )
+            or (
+                not require_manual_on_any_surface_changed_hit
+                and _selected_synset_id(hit)
+                and _selected_synset_id(hit) != observed_id
+            )
+        )
+    ]
+    if not conflicting:
+        return None
+    synsets: list[Any] = []
+    seen_synset_ids: set[str] = set()
+    for hit in (observed_hit, *conflicting):
+        for synset in hit.synsets:
+            synset_id = str(synset.id)
+            if synset_id in seen_synset_ids:
+                continue
+            synsets.append(synset)
+            seen_synset_ids.add(synset_id)
+    queries = _unique_nonempty(hit.query for hit in (observed_hit, *conflicting))
+    details = _unique_nonempty(
+        f"{hit.query}:{hit.lookup_case}:{_selected_synset_id(hit)}"
+        for hit in (observed_hit, *conflicting)
+    )
+    return _ObjectLookupResult(
+        lookup_case="plural_surface_query_conflict"
+        if require_manual_on_any_surface_changed_hit
+        else "surface_query_conflict",
+        query="|".join(queries),
+        synsets=tuple(synsets),
+        selected_synset=None,
+        synset_selection_tag="ambiguous_plural_observed_vs_base_query"
+        if require_manual_on_any_surface_changed_hit
+        else "ambiguous_observed_vs_surface_changed_query",
+        wn30_lemma_counts="||".join(details),
+        objectness_gate="",
+        decision_status="needs_manual",
+        decision_reason="manual_surface_query_conflict_required",
+    )
+
+
+def _selected_synset_id(lookup: _ObjectLookupResult) -> str:
+    return str(lookup.selected_synset.id) if lookup.selected_synset is not None else ""
 
 
 def load_gpic_object_inventory(path: str | Path) -> GpicObjectInventoryLookup:
@@ -2374,6 +3309,7 @@ def _raise_if_ambiguous_lookup(surface: str, lookup: _ObjectLookupResult) -> Non
     detail = (
         f"surface={surface!r}; query={lookup.query!r}; "
         f"decision_status={lookup.decision_status}; "
+        f"decision_reason={lookup.decision_reason}; "
         f"objectness_gate={lookup.objectness_gate}; "
         f"tag={lookup.synset_selection_tag}; synsets={synsets}; "
         f"lexfiles={lexfiles}; wn30_lemma_counts={lookup.wn30_lemma_counts}; "
@@ -2890,6 +3826,36 @@ def _is_attribute_modifier(token: Mapping[str, Any]) -> bool:
     return _optional_text(token, "dep") in ATTRIBUTE_MODIFIER_DEPS
 
 
+def _conjunct_attribute_modifiers(
+    token: Mapping[str, Any],
+    *,
+    children_by_head: Mapping[int, Sequence[Mapping[str, Any]]],
+    chunk_token_indices: set[int],
+    excluded_token_indices: set[int],
+) -> list[tuple[Mapping[str, Any], Mapping[str, Any]]]:
+    modifiers: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+    seen = {_require_int(token, "i")}
+    pending: list[Mapping[str, Any]] = [token]
+    while pending:
+        head = pending.pop(0)
+        for child in children_by_head.get(_require_int(head, "i"), ()):
+            child_i = _require_int(child, "i")
+            if child_i in seen:
+                continue
+            if child_i not in chunk_token_indices:
+                continue
+            if child_i in excluded_token_indices:
+                continue
+            if _optional_text(child, "dep") != "conj":
+                continue
+            if _is_quantity_modifier(child):
+                continue
+            seen.add(child_i)
+            modifiers.append((child, head))
+            pending.append(child)
+    return modifiers
+
+
 def _is_quantity_modifier(token: Mapping[str, Any]) -> bool:
     return (
         _optional_text(token, "dep") in QUANTITY_MODIFIER_DEPS
@@ -2899,6 +3865,35 @@ def _is_quantity_modifier(token: Mapping[str, Any]) -> bool:
 
 def _is_doc_attribute_modifier(token: Token) -> bool:
     return token.dep_ in ATTRIBUTE_MODIFIER_DEPS
+
+
+def _doc_conjunct_attribute_modifiers(
+    token: Token,
+    *,
+    children_by_head: Mapping[int, Sequence[Token]],
+    chunk_token_indices: set[int],
+    excluded_token_indices: set[int],
+) -> list[tuple[Token, Token]]:
+    modifiers: list[tuple[Token, Token]] = []
+    seen = {token.i}
+    pending: list[Token] = [token]
+    while pending:
+        head = pending.pop(0)
+        for child in children_by_head.get(head.i, ()):
+            if child.i in seen:
+                continue
+            if child.i not in chunk_token_indices:
+                continue
+            if child.i in excluded_token_indices:
+                continue
+            if child.dep_ != "conj":
+                continue
+            if _is_doc_quantity_modifier(child):
+                continue
+            seen.add(child.i)
+            modifiers.append((child, head))
+            pending.append(child)
+    return modifiers
 
 
 def _is_doc_quantity_modifier(token: Token) -> bool:

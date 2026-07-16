@@ -159,7 +159,7 @@ class Stage6ExportCountsTest(unittest.TestCase):
         self.assertEqual(fact_types.count("event_role"), 1)
         self.assertEqual(fact_types.count("relation"), 2)
         self.assertEqual(fact_types.count("ambiguous_relation_candidate"), 1)
-        self.assertEqual(fact_types.count("relation_component"), 3)
+        self.assertEqual(fact_types.count("relation_component"), 4)
         self.assertEqual(fact_types.count("object_pair_in_caption"), 4)
 
         relation_rows = result.count_tables["relation_triple_counts.tsv"]
@@ -197,6 +197,7 @@ class Stage6ExportCountsTest(unittest.TestCase):
         self.assertIn("relation_component:in front of:0:in", relation_component_keys)
         self.assertIn("relation_component:in front of:1:front", relation_component_keys)
         self.assertIn("relation_component:in front of:2:of", relation_component_keys)
+        self.assertIn("relation_component:on:0:on", relation_component_keys)
         candidate_rows = result.count_tables["ambiguous_relation_candidate_counts.tsv"]
         candidate_keys = {row.count_key for row in candidate_rows}
         self.assertIn(
@@ -336,6 +337,37 @@ class Stage6ExportCountsTest(unittest.TestCase):
             facts[0].count_key,
             "ambiguous_relation_candidate:source_missing:in front of:target_resolved",
         )
+
+    def test_event_role_fact_preserves_passive_voice_metadata(self) -> None:
+        mentions = [
+            mention("c1", "m0", "object", "ball", "R19"),
+            mention("c1", "m1", "action", "hold", "R22"),
+        ]
+        edges = [
+            edge(
+                "c1",
+                "e0",
+                "event_role",
+                "m1",
+                "m0",
+                "patient",
+                "R17.1",
+                canonical_detail={
+                    "raw_role": "theme",
+                    "voice_normalization": "passive_to_active",
+                },
+            )
+        ]
+
+        result = export_count_facts(mentions, edges)
+        fact = next(fact for fact in result.facts if fact.fact_type == "event_role")
+        row = result.count_tables["agent_patient_pair_counts.tsv"][0]
+
+        self.assertEqual(fact.values["raw_role"], "theme")
+        self.assertEqual(fact.values["voice_normalization"], "passive_to_active")
+        self.assertEqual(row.values["raw_role"], "theme")
+        self.assertEqual(row.values["voice_normalization"], "passive_to_active")
+        self.assertEqual(row.count_key, "event_role:hold:patient:ball")
 
     def test_run_stage6_writes_facts_and_tsv_tables(self) -> None:
         mentions = [

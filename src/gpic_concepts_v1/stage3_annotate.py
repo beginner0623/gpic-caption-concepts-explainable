@@ -9,10 +9,13 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+from gpic_concepts_v1.atomic_io import atomic_text_writer
 from gpic_concepts_v1.io_jsonl import iter_jsonl, write_jsonl
 from gpic_concepts_v1.schema import JsonObject, JsonRecord, PIPELINE_VERSION
 from gpic_concepts_v1.stage1 import make_caption_record_from_gpic_row
@@ -56,6 +59,7 @@ class Stage3Record(JsonRecord):
     sentences: list[JsonObject]
     noun_chunks: list[JsonObject]
     protected_spans: list[JsonObject]
+    tag_segments: list[JsonObject] = field(default_factory=list)
     stage: int = 3
     pipeline_version: str = PIPELINE_VERSION
     rule_ids: list[str] = field(default_factory=list)
@@ -70,6 +74,23 @@ class _PreparedStage3Doc:
     protected_spans: list[ProtectedSpanRecord]
     stage2_rule_ids: list[str]
     meta: JsonObject
+
+
+@dataclass(slots=True)
+class _TagSegment:
+    segment_id: str
+    raw_text: str
+    text: str
+    char_start: int
+    char_end: int
+
+
+@dataclass(slots=True)
+class _PreparedTagSegmentDoc:
+    segment: _TagSegment
+    doc: Doc
+    protected_spans: list[ProtectedSpanRecord]
+    stage2_rule_ids: list[str]
 
 
 @dataclass(slots=True)
@@ -136,6 +157,23 @@ def annotate_gpic_sentence_row(
     )
 
 
+def annotate_gpic_tag_list_row(
+    row: Mapping[str, Any],
+    *,
+    nlp: Language,
+) -> Stage3Record:
+    """Annotate one confirmed tag-list GPIC row by comma segment."""
+    caption_record = make_caption_record_from_gpic_row(row)
+    if caption_record.skipped or caption_record.caption_shape != "tag_list":
+        raise Stage2InputError("Stage 3 tag-list annotation only accepts tag-list captions")
+    return annotate_tag_list_text(
+        caption_id=caption_record.caption_id,
+        caption=caption_record.caption,
+        nlp=nlp,
+        meta=caption_record.meta,
+    )
+
+
 def annotate_text(
     *,
     caption_id: str,
@@ -154,6 +192,27 @@ def annotate_text(
     return _stage3_record_from_doc(prepared, doc, nlp=nlp)
 
 
+def annotate_tag_list_text(
+    *,
+    caption_id: str,
+    caption: str,
+    nlp: Language,
+    meta: Mapping[str, Any] | None = None,
+) -> Stage3Record:
+    """Annotate a tag-list caption segment by segment."""
+    prepared_segments = _prepare_tag_segment_docs(caption=caption, nlp=nlp)
+    docs = [prepared.doc for prepared in prepared_segments]
+    annotated_docs = list(nlp.pipe(docs, batch_size=max(1, min(len(docs), 32)))) if docs else []
+    return _stage3_record_from_tag_segments(
+        caption_id=caption_id,
+        caption=caption,
+        prepared_segments=prepared_segments,
+        docs=annotated_docs,
+        nlp=nlp,
+        meta=meta,
+    )
+
+
 def run_stage3_annotate(
     input_path: str | Path,
     *,
@@ -163,32 +222,93 @@ def run_stage3_annotate(
     limit: int | None = None,
     batch_size: int = DEFAULT_STAGE3_BATCH_SIZE,
     gpu_mode: str = "none",
+    caption_shape: str = "sentence",
+    progress_output: str | Path | None = None,
+    progress_interval_records: int = 5000,
 ) -> dict[str, Any]:
-    """Run Stage 3 over Stage 1 sentence rows."""
+    """Run Stage 3 over Stage 1 sentence rows or tag-list rows."""
     if batch_size < 1:
         raise ValueError("batch_size must be greater than zero")
+    if caption_shape not in {"sentence", "tag_list"}:
+        raise ValueError("caption_shape must be one of: sentence, tag_list")
+    if progress_interval_records < 1:
+        raise ValueError("progress_interval_records must be greater than zero")
+    started = perf_counter()
+    progress_path = Path(progress_output) if progress_output is not None else None
+    _write_stage3_progress(
+        progress_path,
+        status="running",
+        phase="model_load",
+        input_path=str(input_path),
+        output_path=str(output_path),
+        caption_shape=caption_shape,
+        total=0,
+        elapsed_seconds=round(perf_counter() - started, 3),
+    )
     nlp = make_stage3_nlp(model, gpu_mode=gpu_mode)
 
     span_counts: Counter[str] = Counter()
     token_total = 0
     noun_chunk_total = 0
+    tag_segment_total = 0
     total = 0
+    _write_stage3_progress(
+        progress_path,
+        status="running",
+        phase="annotation",
+        input_path=str(input_path),
+        output_path=str(output_path),
+        caption_shape=caption_shape,
+        model=model,
+        batch_size=batch_size,
+        gpu_mode=nlp.meta.get("gpic_gpu_mode", gpu_mode),
+        gpu_enabled=bool(nlp.meta.get("gpic_gpu_enabled", False)),
+        total=0,
+        elapsed_seconds=round(perf_counter() - started, 3),
+    )
 
     def iter_records() -> Any:
-        nonlocal noun_chunk_total, token_total, total
-        for record in iter_stage3_records_from_rows(
-            iter_jsonl(input_path),
-            nlp=nlp,
-            batch_size=batch_size,
-            limit=limit,
-        ):
+        nonlocal noun_chunk_total, tag_segment_total, token_total, total
+        if caption_shape == "tag_list":
+            records = iter_stage3_tag_list_records_from_rows(
+                iter_jsonl(input_path),
+                nlp=nlp,
+                limit=limit,
+            )
+        else:
+            records = iter_stage3_records_from_rows(
+                iter_jsonl(input_path),
+                nlp=nlp,
+                batch_size=batch_size,
+                limit=limit,
+            )
+        for record in records:
             total += 1
             token_total += len(record.tokens)
             noun_chunk_total += len(record.noun_chunks)
+            tag_segment_total += len(record.tag_segments)
             for span in record.protected_spans:
                 kind = span.get("kind")
                 if isinstance(kind, str):
                     span_counts[kind] += 1
+            if total == 1 or total % progress_interval_records == 0:
+                _write_stage3_progress(
+                    progress_path,
+                    status="running",
+                    phase="annotation",
+                    input_path=str(input_path),
+                    output_path=str(output_path),
+                    caption_shape=caption_shape,
+                    model=model,
+                    batch_size=batch_size,
+                    gpu_mode=nlp.meta.get("gpic_gpu_mode", gpu_mode),
+                    gpu_enabled=bool(nlp.meta.get("gpic_gpu_enabled", False)),
+                    total=total,
+                    token_total=token_total,
+                    noun_chunk_total=noun_chunk_total,
+                    tag_segment_total=tag_segment_total,
+                    elapsed_seconds=round(perf_counter() - started, 3),
+                )
             yield record
 
     written = write_jsonl(output_path, iter_records())
@@ -197,16 +317,51 @@ def run_stage3_annotate(
         "written": written,
         "model": model,
         "batch_size": batch_size,
+        "caption_shape": caption_shape,
         "gpu_mode": nlp.meta.get("gpic_gpu_mode", gpu_mode),
         "gpu_enabled": bool(nlp.meta.get("gpic_gpu_enabled", False)),
         "output_path": str(output_path),
         "token_total": token_total,
         "noun_chunk_total": noun_chunk_total,
+        "tag_segment_total": tag_segment_total,
         "protected_span_counts": dict(sorted(span_counts.items())),
     }
     if summary_path is not None:
         write_jsonl(summary_path, [summary])
+    _write_stage3_progress(
+        progress_path,
+        status="complete",
+        phase="complete",
+        input_path=str(input_path),
+        output_path=str(output_path),
+        caption_shape=caption_shape,
+        summary=summary,
+        total=total,
+        elapsed_seconds=round(perf_counter() - started, 3),
+    )
     return summary
+
+
+def _write_stage3_progress(
+    path: Path | None,
+    *,
+    status: str,
+    phase: str,
+    **payload: Any,
+) -> None:
+    if path is None:
+        return
+    progress = {
+        "schema_version": 1,
+        "artifact_type": "stage3_annotation_progress",
+        "status": status,
+        "phase": phase,
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        **payload,
+    }
+    with atomic_text_writer(path) as handle:
+        handle.write(json.dumps(progress, ensure_ascii=False, indent=2, sort_keys=True))
+        handle.write("\n")
 
 
 def iter_stage3_records_from_rows(
@@ -264,6 +419,19 @@ def iter_stage3_records_from_rows(
 
     if pending:
         yield from flush_pending()
+
+
+def iter_stage3_tag_list_records_from_rows(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    nlp: Language,
+    limit: int | None = None,
+) -> Iterator[Stage3Record]:
+    """Yield Stage 3 records from Stage 1 tag-list rows."""
+    for index, row in enumerate(rows):
+        if limit is not None and index >= limit:
+            break
+        yield annotate_gpic_tag_list_row(row, nlp=nlp)
 
 
 def iter_annotated_docs_from_rows(
@@ -381,6 +549,53 @@ def _prepare_stage3_doc(
     )
 
 
+def _prepare_tag_segment_docs(
+    *,
+    caption: str,
+    nlp: Language,
+) -> list[_PreparedTagSegmentDoc]:
+    prepared: list[_PreparedTagSegmentDoc] = []
+    for segment in _split_tag_segments(caption):
+        doc = nlp.make_doc(segment.text)
+        doc, protected_spans, stage2_rule_ids = protect_doc(
+            doc,
+            nlp=nlp,
+        )
+        prepared.append(
+            _PreparedTagSegmentDoc(
+                segment=segment,
+                doc=doc,
+                protected_spans=protected_spans,
+                stage2_rule_ids=stage2_rule_ids,
+            )
+        )
+    return prepared
+
+
+def _split_tag_segments(caption: str) -> list[_TagSegment]:
+    segments: list[_TagSegment] = []
+    raw_start = 0
+    for index, raw_segment in enumerate(caption.split(",")):
+        raw_end = raw_start + len(raw_segment)
+        left_trimmed = raw_segment.lstrip()
+        right_trimmed = raw_segment.rstrip()
+        text = raw_segment.strip()
+        if text:
+            char_start = raw_start + (len(raw_segment) - len(left_trimmed))
+            char_end = raw_start + len(right_trimmed)
+            segments.append(
+                _TagSegment(
+                    segment_id=f"t{index}",
+                    raw_text=raw_segment,
+                    text=text,
+                    char_start=char_start,
+                    char_end=char_end,
+                )
+            )
+        raw_start = raw_end + 1
+    return segments
+
+
 def _stage3_record_from_doc(
     prepared: _PreparedStage3Doc,
     doc: Doc,
@@ -398,6 +613,103 @@ def _stage3_record_from_doc(
         protected_spans=[record.to_dict() for record in prepared.protected_spans],
         rule_ids=prepared.stage2_rule_ids + stage3_rule_ids,
         meta=dict(prepared.meta),
+    )
+
+
+def _stage3_record_from_tag_segments(
+    *,
+    caption_id: str,
+    caption: str,
+    prepared_segments: Sequence[_PreparedTagSegmentDoc],
+    docs: Sequence[Doc],
+    nlp: Language,
+    meta: Mapping[str, Any] | None = None,
+) -> Stage3Record:
+    tokens: list[JsonObject] = []
+    sentences: list[JsonObject] = []
+    noun_chunks: list[JsonObject] = []
+    protected_spans: list[JsonObject] = []
+    tag_segments: list[JsonObject] = []
+    token_offset = 0
+    rule_ids: list[str] = []
+    seen_rule_ids: set[str] = set()
+
+    def add_rule_ids(values: Sequence[str]) -> None:
+        for value in values:
+            if value not in seen_rule_ids:
+                rule_ids.append(value)
+                seen_rule_ids.add(value)
+
+    for prepared, doc in zip(prepared_segments, docs, strict=True):
+        segment = prepared.segment
+        add_rule_ids(prepared.stage2_rule_ids + _stage3_rule_ids(prepared.protected_spans))
+        segment_tokens = [
+            _token_to_dict_with_offsets(
+                token,
+                token_offset=token_offset,
+                char_offset=segment.char_start,
+                segment_id=segment.segment_id,
+            )
+            for token in doc
+        ]
+        segment_chunks = [
+            _noun_chunk_to_dict_with_offsets(
+                chunk,
+                token_offset=token_offset,
+                char_offset=segment.char_start,
+                segment_id=segment.segment_id,
+            )
+            for chunk in doc.noun_chunks
+        ]
+        segment_sentences = [
+            _sentence_to_dict_with_offsets(
+                sent,
+                token_offset=token_offset,
+                char_offset=segment.char_start,
+            )
+            for sent in doc.sents
+        ]
+        segment_protected_spans = [
+            _protected_span_to_dict_with_offsets(
+                span,
+                token_offset=token_offset,
+                char_offset=segment.char_start,
+                segment_id=segment.segment_id,
+            )
+            for span in prepared.protected_spans
+        ]
+        tokens.extend(segment_tokens)
+        noun_chunks.extend(segment_chunks)
+        sentences.extend(segment_sentences)
+        protected_spans.extend(segment_protected_spans)
+        tag_segments.append(
+            {
+                "segment_id": segment.segment_id,
+                "raw_text": segment.raw_text,
+                "text": segment.text,
+                "char_start": segment.char_start,
+                "char_end": segment.char_end,
+                "token_start": token_offset,
+                "token_end": token_offset + len(doc),
+                "tokens": segment_tokens,
+                "noun_chunks": segment_chunks,
+            }
+        )
+        token_offset += len(doc)
+
+    record_meta = dict(meta or {})
+    record_meta["caption_shape"] = "tag_list"
+    return Stage3Record(
+        caption_id=caption_id,
+        caption=caption,
+        model=nlp.meta.get("gpic_model_id", DEFAULT_STAGE3_MODEL),
+        tokens=tokens,
+        sentences=sentences,
+        noun_chunks=noun_chunks,
+        protected_spans=protected_spans,
+        tag_segments=tag_segments,
+        rule_ids=rule_ids,
+        meta=record_meta,
     )
 
 
@@ -429,6 +741,22 @@ def _token_to_dict(token: Token) -> JsonObject:
     }
 
 
+def _token_to_dict_with_offsets(
+    token: Token,
+    *,
+    token_offset: int,
+    char_offset: int,
+    segment_id: str,
+) -> JsonObject:
+    record = _token_to_dict(token)
+    record["i"] = token.i + token_offset
+    record["head_i"] = token.head.i + token_offset
+    record["char_start"] = token.idx + char_offset
+    record["char_end"] = token.idx + char_offset + len(token.text)
+    record["segment_id"] = segment_id
+    return record
+
+
 def _sentence_to_dict(sent: Any) -> JsonObject:
     return {
         "text": sent.text,
@@ -436,6 +764,21 @@ def _sentence_to_dict(sent: Any) -> JsonObject:
         "token_end": sent.end,
         "char_start": sent.start_char,
         "char_end": sent.end_char,
+    }
+
+
+def _sentence_to_dict_with_offsets(
+    sent: Any,
+    *,
+    token_offset: int,
+    char_offset: int,
+) -> JsonObject:
+    return {
+        "text": sent.text,
+        "token_start": sent.start + token_offset,
+        "token_end": sent.end + token_offset,
+        "char_start": sent.start_char + char_offset,
+        "char_end": sent.end_char + char_offset,
     }
 
 
@@ -455,3 +798,39 @@ def _noun_chunk_to_dict(chunk: Any) -> JsonObject:
         "char_start": chunk.start_char,
         "char_end": chunk.end_char,
     }
+
+
+def _noun_chunk_to_dict_with_offsets(
+    chunk: Any,
+    *,
+    token_offset: int,
+    char_offset: int,
+    segment_id: str,
+) -> JsonObject:
+    record = _noun_chunk_to_dict(chunk)
+    record["root_i"] = chunk.root.i + token_offset
+    record["root_head_i"] = chunk.root.head.i + token_offset
+    record["token_start"] = chunk.start + token_offset
+    record["token_end"] = chunk.end + token_offset
+    record["char_start"] = chunk.start_char + char_offset
+    record["char_end"] = chunk.end_char + char_offset
+    record["segment_id"] = segment_id
+    return record
+
+
+def _protected_span_to_dict_with_offsets(
+    span: ProtectedSpanRecord,
+    *,
+    token_offset: int,
+    char_offset: int,
+    segment_id: str,
+) -> JsonObject:
+    record = span.to_dict()
+    record["char_start"] = span.char_start + char_offset
+    record["char_end"] = span.char_end + char_offset
+    if span.token_start is not None:
+        record["token_start"] = span.token_start + token_offset
+    if span.token_end is not None:
+        record["token_end"] = span.token_end + token_offset
+    record["segment_id"] = segment_id
+    return record

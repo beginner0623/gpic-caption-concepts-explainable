@@ -7,7 +7,7 @@
 - 이 벤치는 extraction rule을 바꾸지 않는다.
 - Stage 3의 spaCy 실행을 `nlp.pipe(batch_size=128)`로 묶어 실행한다.
 - tag-list caption은 v1 설계대로 제외한다.
-- relation MWE, coreference, passive normalization 등은 v1 설계대로 구현하지 않는다.
+- benchmark는 extraction rule을 새로 바꾸지 않는다. passive voice는 현재 v1 Stage 4 rule 상태를 그대로 따른다.
 
 ## 2026-07-01 Batch Stage 3 Optimization
 

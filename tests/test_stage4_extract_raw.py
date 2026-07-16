@@ -121,6 +121,65 @@ class Stage4ExtractRawTest(unittest.TestCase):
         self.assertIn(("event_role", "agent", "R16"), _edge_sig(edges))
         self.assertIn(("event_role", "patient", "R17"), _edge_sig(edges))
 
+    def test_tag_list_extracts_segment_objects_modifiers_only(self) -> None:
+        brown = token(0, "brown", "brown", "ADJ", "amod", 1, tag="JJ")
+        dog = token(1, "dog", "dog", "NOUN", "ROOT", 1)
+        two = token(2, "two", "two", "NUM", "nummod", 3, tag="CD")
+        bench = token(3, "bench", "bench", "NOUN", "ROOT", 3)
+        standing = token(4, "standing", "stand", "VERB", "ROOT", 4, tag="VBG")
+        dog_chunk = chunk("brown dog", 1, 0, 2, "dog")
+        bench_chunk = chunk("two bench", 3, 2, 4, "bench")
+        record = {
+            "caption_id": "tag1",
+            "caption": "brown dog, two bench, standing",
+            "tokens": [brown, dog, two, bench, standing],
+            "noun_chunks": [dog_chunk, bench_chunk],
+            "tag_segments": [
+                {
+                    "segment_id": "t0",
+                    "text": "brown dog",
+                    "tokens": [brown, dog],
+                    "noun_chunks": [dog_chunk],
+                },
+                {
+                    "segment_id": "t1",
+                    "text": "two bench",
+                    "tokens": [two, bench],
+                    "noun_chunks": [bench_chunk],
+                },
+                {
+                    "segment_id": "t2",
+                    "text": "standing",
+                    "tokens": [standing],
+                    "noun_chunks": [],
+                },
+            ],
+            "meta": {"caption_shape": "tag_list"},
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+            action_lookup=fake_action_lookup,
+            preposition_mwe_lookup=(),
+        )
+        mentions = [mention.to_dict() for mention in result.raw_mentions]
+        edges = [edge.to_dict() for edge in result.raw_edges]
+
+        self.assertEqual(
+            [(m["mention_type"], m["text"], m["rule_id"]) for m in mentions],
+            [
+                ("object", "dog", "R12"),
+                ("attribute", "brown", "R13"),
+                ("object", "bench", "R12"),
+                ("quantity", "two", "R14"),
+                ("attribute", "standing", "R13"),
+            ],
+        )
+        self.assertEqual(_edge_sig(edges), {("has_attribute", "has_attribute", "R13"), ("has_quantity", "has_quantity", "R14")})
+        self.assertTrue(all(m["source_detail"].get("caption_shape") == "tag_list" for m in mentions))
+        self.assertEqual(mentions[-1]["source_detail"]["modifier_source"], "tag_list_unattached_attribute")
+
     def test_ambiguous_object_synset_stops_raw_extraction(self) -> None:
         record = {
             "caption_id": "c-ambiguous",
@@ -535,7 +594,7 @@ class Stage4ExtractRawTest(unittest.TestCase):
         )
         self.assertFalse(object_mentions[0]["source_detail"]["has_oewn_noun_synset"])
 
-    def test_plural_common_noun_prefers_head_lemma_lookup_before_exact_surface(self) -> None:
+    def test_runtime_surface_query_conflict_blocks_extraction_without_inventory(self) -> None:
         record = {
             "caption_id": "c-plural",
             "caption": "Two men stand.",
@@ -547,10 +606,80 @@ class Stage4ExtractRawTest(unittest.TestCase):
             "noun_chunks": [chunk("Two men", 1, 0, 2, "men")],
         }
 
-        result = extract_raw_concepts_from_stage3_record(
-            record,
-            object_lookup=fake_plural_exact_polluted_lookup,
-        )
+        with self.assertRaisesRegex(
+            Stage4SynsetAmbiguityError,
+            "manual_surface_query_conflict_required",
+        ):
+            extract_raw_concepts_from_stage3_record(
+                record,
+                object_lookup=fake_plural_exact_and_lemma_hit_lookup,
+            )
+
+    def test_inventory_exact_row_wins_over_surface_changed_query_conflict(self) -> None:
+        record = {
+            "caption_id": "c-plural-inventory",
+            "caption": "Two men stand.",
+            "tokens": [
+                token(0, "Two", "two", "NUM", "nummod", 1, tag="CD"),
+                token(1, "men", "man", "NOUN", "nsubj", 2, tag="NNS"),
+                token(2, "stand", "stand", "VERB", "ROOT", 2, tag="VBP"),
+            ],
+            "noun_chunks": [chunk("Two men", 1, 0, 2, "men")],
+        }
+        tmp_path = _stage4_temp_base() / uuid.uuid4().hex
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        try:
+            inventory_path = tmp_path / "object_inventory.tsv"
+            inventory_path.write_text(
+                "\t".join(
+                    [
+                        "span_key",
+                        "observed_surface",
+                        "decision_status",
+                        "decision_reason",
+                        "selected_lookup_case",
+                        "selected_query",
+                        "selected_oewn_synset",
+                        "selected_oewn_lexfile",
+                        "objectness_gate",
+                        "synset_lemmas",
+                        "canonical_surface",
+                        "canonical_label_key",
+                        "canonical_selection_tag",
+                    ]
+                )
+                + "\n"
+                + "\t".join(
+                    [
+                        "men",
+                        "men",
+                        "chosen",
+                        "manual_object_synset_selected",
+                        "manual_object_inventory_resolution",
+                        "men",
+                        "fake-men-n",
+                        "noun.person",
+                        "object_compatible",
+                        "men",
+                        "men",
+                        "men",
+                        "manual_canonical",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = extract_raw_concepts_from_stage3_record(
+                record,
+                object_lookup=load_gpic_object_inventory(inventory_path),
+            )
+        finally:
+            for path in sorted(tmp_path.rglob("*"), reverse=True):
+                if path.is_file():
+                    path.unlink(missing_ok=True)
+                elif path.is_dir():
+                    path.rmdir()
+            tmp_path.rmdir()
 
         object_mentions = [
             mention.to_dict()
@@ -559,8 +688,11 @@ class Stage4ExtractRawTest(unittest.TestCase):
         ]
         self.assertEqual(len(object_mentions), 1)
         self.assertEqual(object_mentions[0]["text"], "men")
-        self.assertEqual(object_mentions[0]["lemma"], "man")
-        self.assertEqual(object_mentions[0]["source_detail"]["lookup_query"], "man")
+        self.assertEqual(object_mentions[0]["source_detail"]["lookup_query"], "men")
+        self.assertEqual(
+            object_mentions[0]["source_detail"]["selected_oewn_synset"],
+            "fake-men-n",
+        )
 
     def test_joined_variant_lookup_requires_manual_even_when_object_compatible(self) -> None:
         synset = FakeSynset("fake-blackshirt-n", "noun.person", ["Blackshirt"])
@@ -631,6 +763,142 @@ class Stage4ExtractRawTest(unittest.TestCase):
         self.assertIn(("event_role", "agent", "R16"), _edge_sig(edges))
         self.assertNotIn(("event_role", "patient", "R17"), _edge_sig(edges))
         self.assertNotIn(("relation", "on", "R18"), _edge_sig(edges))
+
+    def test_conjunct_action_inherits_agent_from_source_action(self) -> None:
+        record = {
+            "caption_id": "c-action-agent-conj",
+            "caption": "Dogs stand and move.",
+            "tokens": [
+                token(0, "Dogs", "dog", "NOUN", "nsubj", 1, tag="NNS"),
+                token(1, "stand", "stand", "VERB", "ROOT", 1, tag="VBP"),
+                token(2, "and", "and", "CCONJ", "cc", 3, tag="CC"),
+                token(3, "move", "move", "VERB", "conj", 1, tag="VBP"),
+            ],
+            "noun_chunks": [chunk("Dogs", 0, 0, 1, "Dogs")],
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+        )
+        edges = [edge.to_dict() for edge in result.raw_edges]
+        agent_edges = [
+            edge
+            for edge in edges
+            if edge["edge_type"] == "event_role" and edge["label"] == "agent"
+        ]
+
+        self.assertEqual({edge["rule_id"] for edge in agent_edges}, {"R16", "R16.1"})
+        inherited = next(edge for edge in agent_edges if edge["rule_id"] == "R16.1")
+        self.assertEqual(inherited["source_detail"]["role_source"], "conj_agent_inheritance")
+        self.assertEqual(inherited["source_detail"]["source_action_i"], 1)
+        self.assertEqual(inherited["source_detail"]["target_action_i"], 3)
+        self.assertEqual(inherited["source_detail"]["conj_head_i"], 1)
+        self.assertEqual(inherited["source_detail"]["target_i"], 0)
+
+    def test_chained_conjunct_action_inherits_agent_by_fixed_point(self) -> None:
+        record = {
+            "caption_id": "c-action-agent-conj-chain",
+            "caption": "Dogs stand, move, and play.",
+            "tokens": [
+                token(0, "Dogs", "dog", "NOUN", "nsubj", 1, tag="NNS"),
+                token(1, "stand", "stand", "VERB", "ROOT", 1, tag="VBP"),
+                token(2, ",", ",", "PUNCT", "punct", 1, tag=","),
+                token(3, "move", "move", "VERB", "conj", 1, tag="VBP"),
+                token(4, ",", ",", "PUNCT", "punct", 3, tag=","),
+                token(5, "and", "and", "CCONJ", "cc", 6, tag="CC"),
+                token(6, "play", "play", "VERB", "conj", 3, tag="VBP"),
+            ],
+            "noun_chunks": [chunk("Dogs", 0, 0, 1, "Dogs")],
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+        )
+        edges = [edge.to_dict() for edge in result.raw_edges]
+        inherited_edges = [
+            edge
+            for edge in edges
+            if edge["edge_type"] == "event_role"
+            and edge["label"] == "agent"
+            and edge["rule_id"] == "R16.1"
+        ]
+
+        self.assertEqual(len(inherited_edges), 2)
+        self.assertEqual(
+            {edge["source_detail"]["target_action_i"] for edge in inherited_edges},
+            {3, 6},
+        )
+        play_agent = next(
+            edge for edge in inherited_edges if edge["source_detail"]["target_action_i"] == 6
+        )
+        self.assertEqual(play_agent["source_detail"]["source_action_i"], 3)
+        self.assertEqual(play_agent["source_detail"]["conj_head_i"], 3)
+
+    def test_conjunct_action_does_not_inherit_patient(self) -> None:
+        record = {
+            "caption_id": "c-action-no-patient-conj",
+            "caption": "A man stands and holds a ball.",
+            "tokens": [
+                token(0, "A", "a", "DET", "det", 1, tag="DT"),
+                token(1, "man", "man", "NOUN", "nsubj", 2),
+                token(2, "stands", "stand", "VERB", "ROOT", 2, tag="VBZ"),
+                token(3, "and", "and", "CCONJ", "cc", 4, tag="CC"),
+                token(4, "holds", "hold", "VERB", "conj", 2, tag="VBZ"),
+                token(5, "a", "a", "DET", "det", 6, tag="DT"),
+                token(6, "ball", "ball", "NOUN", "dobj", 4),
+            ],
+            "noun_chunks": [
+                chunk("A man", 1, 0, 2, "man"),
+                chunk("a ball", 6, 5, 7, "ball"),
+            ],
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+        )
+        edges = [edge.to_dict() for edge in result.raw_edges]
+        patient_edges = [
+            edge
+            for edge in edges
+            if edge["edge_type"] == "event_role" and edge["label"] == "patient"
+        ]
+
+        self.assertIn(("event_role", "agent", "R16.1"), _edge_sig(edges))
+        self.assertEqual(len(patient_edges), 1)
+        self.assertEqual(patient_edges[0]["rule_id"], "R17")
+        self.assertEqual(patient_edges[0]["source_detail"]["action_i"], 4)
+        self.assertEqual(patient_edges[0]["source_detail"]["target_i"], 6)
+
+    def test_conjunct_action_does_not_inherit_agent_into_passive_target(self) -> None:
+        record = {
+            "caption_id": "c-action-agent-conj-passive-target",
+            "caption": "People stand and a truck is parked.",
+            "tokens": [
+                token(0, "People", "people", "NOUN", "nsubj", 1, tag="NNS"),
+                token(1, "stand", "stand", "VERB", "ROOT", 1, tag="VBP"),
+                token(2, "and", "and", "CCONJ", "cc", 5, tag="CC"),
+                token(3, "a", "a", "DET", "det", 4, tag="DT"),
+                token(4, "truck", "truck", "NOUN", "nsubjpass", 5),
+                token(5, "parked", "park", "VERB", "conj", 1, tag="VBN"),
+                token(6, "is", "be", "AUX", "auxpass", 5, tag="VBZ"),
+            ],
+            "noun_chunks": [
+                chunk("People", 0, 0, 1, "People"),
+                chunk("a truck", 4, 3, 5, "truck"),
+            ],
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+        )
+        edges = [edge.to_dict() for edge in result.raw_edges]
+
+        self.assertIn(("event_role", "agent", "R16"), _edge_sig(edges))
+        self.assertNotIn(("event_role", "agent", "R16.1"), _edge_sig(edges))
 
     def test_selected_phrasal_action_prep_creates_patient_and_suppresses_relation(self) -> None:
         record = {
@@ -888,6 +1156,49 @@ class Stage4ExtractRawTest(unittest.TestCase):
 
         self.assertIn(("relation", "with", "R18"), _edge_sig(edges))
 
+    def test_single_adp_relation_expands_target_conj_chain(self) -> None:
+        record = {
+            "caption_id": "c-on-target-conj",
+            "caption": "A dog on a bench and sign.",
+            "tokens": [
+                token(0, "A", "a", "DET", "det", 1, tag="DT"),
+                token(1, "dog", "dog", "NOUN", "ROOT", 1),
+                token(2, "on", "on", "ADP", "prep", 1, tag="IN"),
+                token(3, "a", "a", "DET", "det", 4, tag="DT"),
+                token(4, "bench", "bench", "NOUN", "pobj", 2),
+                token(5, "and", "and", "CCONJ", "cc", 4, tag="CC"),
+                token(6, "sign", "sign", "NOUN", "conj", 4),
+            ],
+            "noun_chunks": [
+                chunk("A dog", 1, 0, 2, "dog"),
+                chunk("a bench", 4, 3, 5, "bench"),
+                chunk("sign", 6, 6, 7, "sign"),
+            ],
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+        )
+        edges = [edge.to_dict() for edge in result.raw_edges]
+        relations = [
+            edge
+            for edge in edges
+            if edge["edge_type"] == "relation" and edge["rule_id"] == "R18"
+        ]
+
+        self.assertEqual(len(relations), 2)
+        self.assertEqual({edge["source_detail"]["target_i"] for edge in relations}, {4, 6})
+        self.assertEqual(
+            {edge["source_detail"]["target_resolution"] for edge in relations},
+            {"direct_pobj", "conj_of_pobj"},
+        )
+        conj_relation = next(
+            edge for edge in relations if edge["source_detail"]["target_i"] == 6
+        )
+        self.assertEqual(conj_relation["source_detail"]["target_base_i"], 4)
+        self.assertEqual(conj_relation["source_detail"]["conj_head_i"], 4)
+
     def test_preposition_mwe_relation_uses_canonical_span_and_suppresses_single_adp(self) -> None:
         record = {
             "caption_id": "c-front-of",
@@ -990,6 +1301,66 @@ class Stage4ExtractRawTest(unittest.TestCase):
         self.assertEqual(relation["source_detail"]["source_resolution"], "head_direct_object_child")
         self.assertEqual(relation["source_detail"]["source_dep"], "nsubj")
         self.assertEqual(relation["source_detail"]["candidate_source_count"], 1)
+
+    def test_preposition_mwe_relation_expands_target_conj_chain(self) -> None:
+        record = {
+            "caption_id": "c-front-of-target-conj",
+            "caption": "Dogs stand in front of a bench and sign.",
+            "tokens": [
+                token(0, "Dogs", "dog", "NOUN", "nsubj", 1, tag="NNS"),
+                token(1, "stand", "stand", "VERB", "ROOT", 1, tag="VBP"),
+                token(2, "in", "in", "ADP", "prep", 1, tag="IN"),
+                token(3, "front", "front", "NOUN", "pobj", 2),
+                token(4, "of", "of", "ADP", "prep", 3, tag="IN"),
+                token(5, "a", "a", "DET", "det", 6, tag="DT"),
+                token(6, "bench", "bench", "NOUN", "pobj", 4),
+                token(7, "and", "and", "CCONJ", "cc", 6, tag="CC"),
+                token(8, "sign", "sign", "NOUN", "conj", 6),
+            ],
+            "noun_chunks": [
+                chunk("Dogs", 0, 0, 1, "Dogs"),
+                chunk("front", 3, 3, 4, "front"),
+                chunk("a bench", 6, 5, 7, "bench"),
+                chunk("sign", 8, 8, 9, "sign"),
+            ],
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+            preposition_mwe_lookup=(in_front_of_entry(),),
+        )
+        edges = [edge.to_dict() for edge in result.raw_edges]
+        relations = [
+            edge
+            for edge in edges
+            if edge["edge_type"] == "relation" and edge["rule_id"] == "R18.1"
+        ]
+
+        self.assertNotIn(
+            ("ambiguous_relation_candidate", "in front of", "R18.1"),
+            _edge_sig(edges),
+        )
+        self.assertEqual(len(relations), 2)
+        self.assertEqual({edge["source_detail"]["target_i"] for edge in relations}, {6, 8})
+        self.assertEqual(
+            {edge["source_detail"]["target_resolution"] for edge in relations},
+            {"direct_final_pobj", "conj_of_final_pobj"},
+        )
+        self.assertTrue(
+            all(edge["source_detail"]["candidate_source_count"] == 1 for edge in relations)
+        )
+        self.assertTrue(
+            all(edge["source_detail"]["candidate_target_count"] == 2 for edge in relations)
+        )
+        self.assertTrue(
+            all(edge["source_detail"]["candidate_target_base_count"] == 1 for edge in relations)
+        )
+        conj_relation = next(
+            edge for edge in relations if edge["source_detail"]["target_i"] == 8
+        )
+        self.assertEqual(conj_relation["source_detail"]["target_base_i"], 6)
+        self.assertEqual(conj_relation["source_detail"]["conj_head_i"], 6)
 
     def test_action_attached_preposition_mwe_nsubjpass_source_creates_relation(self) -> None:
         record = {
@@ -1260,7 +1631,130 @@ class Stage4ExtractRawTest(unittest.TestCase):
         self.assertEqual(actions[0]["text"], "frame")
         self.assertEqual(actions[0]["source_detail"]["selected_token_indices"], [1])
 
-    def test_nsubjpass_is_not_normalized_to_agent(self) -> None:
+    def test_acl_action_inherits_agent_from_head_object(self) -> None:
+        record = {
+            "caption_id": "c-acl-agent",
+            "caption": "A man holding a ball.",
+            "tokens": [
+                token(0, "A", "a", "DET", "det", 1, tag="DT"),
+                token(1, "man", "man", "NOUN", "ROOT", 1),
+                token(2, "holding", "hold", "VERB", "acl", 1, tag="VBG"),
+                token(3, "a", "a", "DET", "det", 4, tag="DT"),
+                token(4, "ball", "ball", "NOUN", "dobj", 2),
+            ],
+            "noun_chunks": [
+                chunk("A man", 1, 0, 2, "man"),
+                chunk("a ball", 4, 3, 5, "ball"),
+            ],
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+        )
+        edges = [edge.to_dict() for edge in result.raw_edges]
+        acl_agent = [
+            edge
+            for edge in edges
+            if edge["edge_type"] == "event_role"
+            and edge["label"] == "agent"
+            and edge["rule_id"] == "R16.3"
+        ]
+
+        self.assertNotIn(("event_role", "agent", "R16"), _edge_sig(edges))
+        self.assertIn(("event_role", "patient", "R17"), _edge_sig(edges))
+        self.assertEqual(len(acl_agent), 1)
+        self.assertEqual(acl_agent[0]["source_detail"]["dep"], "acl")
+        self.assertEqual(acl_agent[0]["source_detail"]["target_i"], 1)
+        self.assertEqual(acl_agent[0]["source_detail"]["role_source"], "acl_head_object_agent")
+
+    def test_acl_action_does_not_add_agent_when_direct_agent_exists(self) -> None:
+        record = {
+            "caption_id": "c-acl-agent-existing",
+            "caption": "A man dogs holding a ball.",
+            "tokens": [
+                token(0, "A", "a", "DET", "det", 1, tag="DT"),
+                token(1, "man", "man", "NOUN", "ROOT", 1),
+                token(2, "dogs", "dog", "NOUN", "nsubj", 3, tag="NNS"),
+                token(3, "holding", "hold", "VERB", "acl", 1, tag="VBG"),
+                token(4, "a", "a", "DET", "det", 5, tag="DT"),
+                token(5, "ball", "ball", "NOUN", "dobj", 3),
+            ],
+            "noun_chunks": [
+                chunk("A man", 1, 0, 2, "man"),
+                chunk("dogs", 2, 2, 3, "dogs"),
+                chunk("a ball", 5, 4, 6, "ball"),
+            ],
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+        )
+        edges = [edge.to_dict() for edge in result.raw_edges]
+        agent_edges = [
+            edge
+            for edge in edges
+            if edge["edge_type"] == "event_role" and edge["label"] == "agent"
+        ]
+
+        self.assertEqual({edge["rule_id"] for edge in agent_edges}, {"R16"})
+        self.assertNotIn(("event_role", "agent", "R16.3"), _edge_sig(edges))
+        self.assertEqual(agent_edges[0]["source_detail"]["target_i"], 2)
+
+    def test_acl_action_does_not_inherit_agent_into_passive_like_action(self) -> None:
+        record = {
+            "caption_id": "c-acl-agent-passive-like",
+            "caption": "A ball held by a man.",
+            "tokens": [
+                token(0, "A", "a", "DET", "det", 1, tag="DT"),
+                token(1, "ball", "ball", "NOUN", "ROOT", 1),
+                token(2, "held", "hold", "VERB", "acl", 1, tag="VBN"),
+                token(3, "by", "by", "ADP", "agent", 2, tag="IN"),
+                token(4, "a", "a", "DET", "det", 5, tag="DT"),
+                token(5, "man", "man", "NOUN", "pobj", 3),
+            ],
+            "noun_chunks": [
+                chunk("A ball", 1, 0, 2, "ball"),
+                chunk("a man", 5, 4, 6, "man"),
+            ],
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+        )
+        edges = [edge.to_dict() for edge in result.raw_edges]
+
+        self.assertNotIn(("event_role", "agent", "R16.3"), _edge_sig(edges))
+
+    def test_acl_action_does_not_inherit_agent_from_vbn_modifier(self) -> None:
+        record = {
+            "caption_id": "c-acl-agent-vbn",
+            "caption": "A ball placed near a wall.",
+            "tokens": [
+                token(0, "A", "a", "DET", "det", 1, tag="DT"),
+                token(1, "ball", "ball", "NOUN", "ROOT", 1),
+                token(2, "placed", "place", "VERB", "acl", 1, tag="VBN"),
+                token(3, "near", "near", "ADP", "prep", 2, tag="IN"),
+                token(4, "a", "a", "DET", "det", 5, tag="DT"),
+                token(5, "wall", "wall", "NOUN", "pobj", 3),
+            ],
+            "noun_chunks": [
+                chunk("A ball", 1, 0, 2, "ball"),
+                chunk("a wall", 5, 4, 6, "wall"),
+            ],
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+        )
+        edges = [edge.to_dict() for edge in result.raw_edges]
+
+        self.assertNotIn(("event_role", "agent", "R16.3"), _edge_sig(edges))
+
+    def test_nsubjpass_is_normalized_to_passive_patient(self) -> None:
         record = {
             "caption_id": "c4",
             "caption": "A ball is held.",
@@ -1278,8 +1772,93 @@ class Stage4ExtractRawTest(unittest.TestCase):
             object_lookup=fake_object_lookup,
         )
         edges = [edge.to_dict() for edge in result.raw_edges]
+        passive_patient = [
+            edge
+            for edge in edges
+            if edge["edge_type"] == "event_role"
+            and edge["label"] == "patient"
+            and edge["rule_id"] == "R17.1"
+        ]
 
         self.assertNotIn(("event_role", "agent", "R16"), _edge_sig(edges))
+        self.assertEqual(len(passive_patient), 1)
+        self.assertEqual(passive_patient[0]["source_detail"]["dep"], "nsubjpass")
+        self.assertEqual(passive_patient[0]["source_detail"]["raw_role"], "theme")
+        self.assertEqual(
+            passive_patient[0]["source_detail"]["voice_normalization"],
+            "passive_to_active",
+        )
+
+    def test_passive_by_phrase_creates_agent_only_with_passive_subject(self) -> None:
+        record = {
+            "caption_id": "c-passive-by",
+            "caption": "A ball is held by a man.",
+            "tokens": [
+                token(0, "A", "a", "DET", "det", 1, tag="DT"),
+                token(1, "ball", "ball", "NOUN", "nsubjpass", 3),
+                token(2, "is", "be", "AUX", "auxpass", 3, tag="VBZ"),
+                token(3, "held", "hold", "VERB", "ROOT", 3, tag="VBN"),
+                token(4, "by", "by", "ADP", "agent", 3, tag="IN"),
+                token(5, "a", "a", "DET", "det", 6, tag="DT"),
+                token(6, "man", "man", "NOUN", "pobj", 4),
+            ],
+            "noun_chunks": [
+                chunk("A ball", 1, 0, 2, "ball"),
+                chunk("a man", 6, 5, 7, "man"),
+            ],
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+        )
+        edges = [edge.to_dict() for edge in result.raw_edges]
+        passive_agent = [
+            edge
+            for edge in edges
+            if edge["edge_type"] == "event_role"
+            and edge["label"] == "agent"
+            and edge["rule_id"] == "R16.2"
+        ]
+
+        self.assertIn(("event_role", "patient", "R17.1"), _edge_sig(edges))
+        self.assertNotIn(("event_role", "agent", "R16"), _edge_sig(edges))
+        self.assertEqual(len(passive_agent), 1)
+        self.assertEqual(passive_agent[0]["source_detail"]["dep"], "agent")
+        self.assertEqual(passive_agent[0]["source_detail"]["by_i"], 4)
+        self.assertEqual(passive_agent[0]["source_detail"]["target_i"], 6)
+        self.assertEqual(passive_agent[0]["source_detail"]["raw_role"], "by_agent_or_causer")
+        self.assertEqual(
+            passive_agent[0]["source_detail"]["voice_normalization"],
+            "passive_to_active",
+        )
+
+    def test_active_by_phrase_does_not_create_passive_agent(self) -> None:
+        record = {
+            "caption_id": "c-active-by",
+            "caption": "A man walks by a river.",
+            "tokens": [
+                token(0, "A", "a", "DET", "det", 1, tag="DT"),
+                token(1, "man", "man", "NOUN", "nsubj", 2),
+                token(2, "walks", "walk", "VERB", "ROOT", 2, tag="VBZ"),
+                token(3, "by", "by", "ADP", "prep", 2, tag="IN"),
+                token(4, "a", "a", "DET", "det", 5, tag="DT"),
+                token(5, "river", "river", "NOUN", "pobj", 3),
+            ],
+            "noun_chunks": [
+                chunk("A man", 1, 0, 2, "man"),
+                chunk("a river", 5, 4, 6, "river"),
+            ],
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+        )
+        edges = [edge.to_dict() for edge in result.raw_edges]
+
+        self.assertIn(("event_role", "agent", "R16"), _edge_sig(edges))
+        self.assertNotIn(("event_role", "agent", "R16.2"), _edge_sig(edges))
 
     def test_run_stage4_extract_raw_writes_outputs(self) -> None:
         record = {
@@ -1350,6 +1929,61 @@ class Stage4ExtractRawTest(unittest.TestCase):
             )
         )
         self.assertIn(("has_attribute", "has_attribute", "R13"), _edge_sig(edges))
+
+    def test_conjunct_attribute_modifier_inherits_from_base_modifier(self) -> None:
+        record = {
+            "caption_id": "c-conj-attr",
+            "caption": "Players wear maroon and yellow jerseys.",
+            "tokens": [
+                token(0, "maroon", "maroon", "NOUN", "nmod", 3, tag="NN"),
+                token(1, "and", "and", "CCONJ", "cc", 0, tag="CC"),
+                token(2, "yellow", "yellow", "ADJ", "conj", 0, tag="JJ"),
+                token(3, "jerseys", "jersey", "NOUN", "ROOT", 3, tag="NNS"),
+            ],
+            "noun_chunks": [chunk("maroon and yellow jerseys", 3, 0, 4, "jerseys")],
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+        )
+        mentions = [mention.to_dict() for mention in result.raw_mentions]
+        edges = [edge.to_dict() for edge in result.raw_edges]
+        attribute_mentions = [mention for mention in mentions if mention["mention_type"] == "attribute"]
+        attribute_edges = [edge for edge in edges if edge["edge_type"] == "has_attribute"]
+
+        self.assertEqual([mention["text"] for mention in attribute_mentions], ["maroon", "yellow"])
+        self.assertEqual(len(attribute_edges), 2)
+        yellow = next(mention for mention in attribute_mentions if mention["text"] == "yellow")
+        self.assertEqual(yellow["source_detail"].get("modifier_source"), "conj_of_attribute_modifier")
+        self.assertEqual(yellow["source_detail"].get("conj_head_i"), 0)
+
+    def test_chained_conjunct_attribute_modifier_inherits_from_base_modifier(self) -> None:
+        record = {
+            "caption_id": "c-conj-attr-chain",
+            "caption": "Players wear blue, white, and yellow jerseys.",
+            "tokens": [
+                token(0, "blue", "blue", "ADJ", "amod", 5, tag="JJ"),
+                token(1, ",", ",", "PUNCT", "punct", 0, tag=","),
+                token(2, "white", "white", "ADJ", "conj", 0, tag="JJ"),
+                token(3, "and", "and", "CCONJ", "cc", 2, tag="CC"),
+                token(4, "yellow", "yellow", "ADJ", "conj", 2, tag="JJ"),
+                token(5, "jerseys", "jersey", "NOUN", "ROOT", 5, tag="NNS"),
+            ],
+            "noun_chunks": [chunk("blue, white, and yellow jerseys", 5, 0, 6, "jerseys")],
+        }
+
+        result = extract_raw_concepts_from_stage3_record(
+            record,
+            object_lookup=fake_object_lookup,
+        )
+        mentions = [mention.to_dict() for mention in result.raw_mentions]
+        attribute_mentions = [mention for mention in mentions if mention["mention_type"] == "attribute"]
+
+        self.assertEqual([mention["text"] for mention in attribute_mentions], ["blue", "white", "yellow"])
+        yellow = next(mention for mention in attribute_mentions if mention["text"] == "yellow")
+        self.assertEqual(yellow["source_detail"].get("modifier_source"), "conj_of_attribute_modifier")
+        self.assertEqual(yellow["source_detail"].get("conj_head_i"), 2)
 
 
 def can_load_trf_model() -> bool:
@@ -1447,6 +2081,7 @@ def fake_object_lookup(surface: str) -> _ObjectLookupResult | None:
         "man": FakeSynset("fake-man-n", "noun.person", ["man"]),
         "dog": FakeSynset("fake-dog-n", "noun.animal", ["dog"]),
         "dogs": FakeSynset("fake-dog-n", "noun.animal", ["dog"]),
+        "people": FakeSynset("fake-people-n", "noun.person", ["people"]),
         "ball": FakeSynset("fake-ball-n", "noun.artifact", ["ball"]),
         "bench": FakeSynset("fake-bench-n", "noun.artifact", ["bench"]),
         "collar": FakeSynset("fake-collar-n", "noun.artifact", ["collar"]),
@@ -1454,9 +2089,11 @@ def fake_object_lookup(surface: str) -> _ObjectLookupResult | None:
         "jerseys": FakeSynset("fake-jersey-n", "noun.artifact", ["jersey"]),
         "legs": FakeSynset("fake-leg-n", "noun.body", ["leg"]),
         "focus": FakeSynset("fake-focus-n", "noun.attribute", ["focus"]),
+        "river": FakeSynset("fake-river-n", "noun.object", ["river"]),
         "road": FakeSynset("fake-road-n", "noun.artifact", ["road"]),
         "screen": FakeSynset("fake-screen-n", "noun.artifact", ["screen"]),
         "sign": FakeSynset("fake-sign-n", "noun.artifact", ["sign"]),
+        "truck": FakeSynset("fake-truck-n", "noun.artifact", ["truck"]),
         "van": FakeSynset("fake-van-n", "noun.artifact", ["van"]),
         "wall": FakeSynset("fake-wall-n", "noun.artifact", ["wall"]),
     }
@@ -1588,7 +2225,7 @@ def fake_ambiguous_object_lookup(surface: str) -> _ObjectLookupResult | None:
     )
 
 
-def fake_plural_exact_polluted_lookup(surface: str) -> _ObjectLookupResult | None:
+def fake_plural_exact_and_lemma_hit_lookup(surface: str) -> _ObjectLookupResult | None:
     key = " ".join(surface.strip().lower().split())
     if key == "man":
         synset = FakeSynset("fake-man-n", "noun.person", ["man"])
@@ -1606,16 +2243,19 @@ def fake_plural_exact_polluted_lookup(surface: str) -> _ObjectLookupResult | Non
             canonical_selection_tag="selected_single_observed_variant_matched_synset_lemma",
         )
     if key == "men":
-        synset = FakeSynset("fake-men-group-n", "noun.group", ["men"])
+        synset = FakeSynset("fake-men-n", "noun.person", ["men"])
         return _ObjectLookupResult(
-            lookup_case="test_exact_pollution",
+            lookup_case="test_exact",
             query=key,
             synsets=(synset,),
             selected_synset=synset,
-            synset_selection_tag="test_exact_pollution",
+            synset_selection_tag="test_single_noun_synset",
             wn30_lemma_counts="",
-            objectness_gate="conditional",
-            decision_status="needs_manual",
+            objectness_gate="object_compatible",
+            decision_status="chosen",
+            canonical_surface="men",
+            canonical_label_key="men",
+            canonical_selection_tag="selected_single_observed_variant_matched_synset_lemma",
         )
     return None
 

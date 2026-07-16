@@ -2,6 +2,722 @@
 
 This file records tests that affect future implementation decisions.
 
+## 2026-07-13: Plural Object Exact-Vs-Base Recheck
+
+Purpose:
+
+- Strengthen object plural lookup so plural exact surface and base-form OEWN
+  candidates are checked together.
+- Rebuild the 10K object inventory after removing plural-head rows from the
+  current object prior, so plural rows are re-evaluated under the new rule.
+
+Commands:
+
+```powershell
+.\scripts\run_python.ps1 -m compileall scripts src
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_build_gpic_observed_object_inventory.py
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_stage4_extract_raw.py
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 300 -- scripts\filter_object_inventory_plural_prior.py --stage3-records outputs\real10k_mixed_formal_after_action_v3_current\stage3\stage3_records.jsonl --prior-object-inventory resources\gpic_inventory\current\inventory\object_inventory.tsv --output-filtered-prior outputs\front10000_plural_object_recheck_20260713\inventory\object_inventory_prior_without_plural_heads.tsv --removed-output outputs\front10000_plural_object_recheck_20260713\inventory\object_inventory_removed_plural_heads.tsv --summary outputs\front10000_plural_object_recheck_20260713\inventory\object_inventory_plural_prior_filter_summary.json
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 1200 -- scripts\build_gpic_observed_object_inventory.py --input outputs\real10k_mixed_formal_after_action_v3_current\stage3\stage3_records.jsonl --prior-object-inventory outputs\front10000_plural_object_recheck_20260713\inventory\object_inventory_prior_without_plural_heads.tsv --output outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck.tsv --summary outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_summary.json
+```
+
+Results:
+
+- `compileall scripts src`: passed.
+- `test_build_gpic_observed_object_inventory.py`: 9 tests passed.
+- `test_stage4_extract_raw.py`: 49 tests passed.
+- Prior filter:
+  - plural-head candidate span keys from 10K Stage 3 records: `11,256`
+  - current prior object rows removed: `1,896`
+  - current prior object rows kept: `4,617`
+- Rebuilt object inventory:
+  - total rows: `6,513`
+  - `chosen`: `4,487`
+  - `excluded`: `1,209`
+  - `needs_manual`: `817`
+- `needs_manual` reasons:
+  - `manual_objectness_required`: `379`
+  - `manual_synset_required`: `279`
+  - `manual_surface_query_conflict_required`: `139`
+  - `manual_joined_variant_required`: `20`
+- Important plural conflict examples now block as intended:
+  - `glasses -> glasses|glass`
+  - `colors -> colors|color`
+  - `pants -> pants|pant`
+  - `trunks -> trunks|trunk`
+  - `rings -> rings|ring`
+
+Artifacts:
+
+- Full rebuilt object inventory:
+  `outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck.tsv`
+- All pending rows:
+  `outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_needs_manual.tsv`
+- Plural exact-vs-base conflict subset:
+  `outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_surface_base_conflicts.tsv`
+- Removed prior rows:
+  `outputs\front10000_plural_object_recheck_20260713\inventory\object_inventory_removed_plural_heads.tsv`
+
+Interpretation:
+
+- The current object lookup now avoids both earlier extremes:
+  - it does not blindly use base/Morphy first for every plural, which caused
+    `glasses -> glass`-style errors
+  - it does not blindly trust exact plural surface when a base-form noun
+    candidate also exists, which caused `colors`-style errors
+- The recheck output is a review artifact and has not been published to
+  `resources\gpic_inventory\current`.
+
+## 2026-07-13: Plural Object Manual Feedback Overlay
+
+Purpose:
+
+- Apply user-reviewed plural object feedback to the 10K plural recheck object
+  inventory.
+- Keep surface rewrite-only decisions separate from synset selections while
+  preserving the rule that changed object heads must have their replacement
+  synset looked up.
+
+Commands:
+
+```powershell
+.\scripts\run_python.ps1 -c "<merge gpic_observed_object_inventory_plural_recheck_v1_synset_decisions.tsv and gpic_observed_object_inventory_plural_recheck_v1_surface_rewrite_only_map.tsv>"
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 600 -- scripts\apply_object_manual_resolution.py --full-inventory outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck.tsv --resolved-subset outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v1_manual_feedback_merged.tsv --output outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v1_manual_resolved.tsv --resolved-copy outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v1_manual_resolved_subset.tsv --summary outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v1_manual_resolved_summary.json
+.\scripts\run_python.ps1 -m compileall scripts src
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_apply_object_manual_resolution.py
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_build_gpic_observed_object_inventory.py
+```
+
+Results:
+
+- Feedback rows:
+  - synset decisions: `791`
+  - surface rewrite-only rows: `26`
+  - merged resolved feedback rows: `817`
+- Initial overlay exposed an implementation bug:
+  - `corn cobs -> cobs` failed because `cobs` was not present as a row in the
+    full inventory.
+  - Other rewrite rows such as `white lines -> lines` needed to use replacement
+    decisions from the same feedback file rather than the unresolved original
+    full-inventory row.
+- Fixed `apply_object_manual_resolution.py` so surface rewrite replacement
+  source lookup prefers non-rewrite rows from the same resolved feedback file
+  and falls back to OEWN head lookup when the replacement row is absent.
+- Verification:
+  - `compileall scripts src`: passed.
+  - `test_apply_object_manual_resolution.py`: 8 tests passed.
+  - `test_build_gpic_observed_object_inventory.py`: 9 tests passed.
+- Overlay result:
+  - total rows: `6,513`
+  - `chosen`: `5,303`
+  - `excluded`: `1,209`
+  - `needs_manual`: `1`
+  - remaining blocker: `corn cobs -> cobs`, selected query `cob`, OEWN noun
+    candidates include food and animal senses, so it still needs manual synset
+    selection.
+
+Artifacts:
+
+- Merged feedback:
+  `outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v1_manual_feedback_merged.tsv`
+- Overlay output:
+  `outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v1_manual_resolved.tsv`
+- Remaining blocker:
+  `outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v1_remaining_needs_manual.tsv`
+
+Interpretation:
+
+- Do not proceed to object parent/canonical enrichment from this inventory until
+  the remaining `corn cobs` blocker is resolved.
+
+## 2026-07-13: Corn Cobs Phrase-Preserved Manual Correction
+
+Purpose:
+
+- Correct the previous `corn cobs -> cobs` surface rewrite decision.
+- Preserve `corn cobs` as a phrase-level object span and apply the reviewed
+  phrase synset decision.
+
+Commands:
+
+```powershell
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 600 -- scripts\apply_object_manual_resolution.py --full-inventory outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v1_manual_resolved.tsv --resolved-subset C:\Users\rlath\Downloads\gpic_observed_object_inventory_plural_recheck_corn_cobs_phrase_preserved_resolved.tsv --output outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v2_phrase_preserved_manual_resolved.tsv --resolved-copy outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v2_phrase_preserved_manual_resolved_subset.tsv --summary outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v2_phrase_preserved_manual_resolved_summary.json
+.\scripts\run_python.ps1 -c "<verify decision_status counts and corn cobs row>"
+```
+
+Results:
+
+- Overlay input rows: `1`
+- Final object inventory rows: `6,513`
+- Final decision status counts:
+  - `chosen`: `5,304`
+  - `excluded`: `1,209`
+  - `needs_manual`: `0`
+- Corrected `corn cobs` row:
+  - `decision_status=chosen`
+  - `decision_reason=manual_phrase_preserved_synset_selected`
+  - `selected_query=corn cob`
+  - `selected_oewn_synset=oewn-08561700-n`
+  - `selected_oewn_lexfile=noun.location`
+  - `manual_action=select_synset_keep_phrase`
+  - `replacement_span_key` is empty
+
+Artifacts:
+
+- Final phrase-preserved object inventory:
+  `outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v2_phrase_preserved_manual_resolved.tsv`
+- One-row resolved copy:
+  `outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v2_phrase_preserved_manual_resolved_subset.tsv`
+- Summary:
+  `outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v2_phrase_preserved_manual_resolved_summary.json`
+
+Interpretation:
+
+- The object manual/synset gate for this plural recheck inventory is clear.
+- The manual file's canonical fields were not treated as authoritative; object
+  canonical enrichment should still be run by the pipeline's canonical step.
+
+## 2026-07-13: Front10K Plural Recheck V2 Promotion And Formal Run
+
+Purpose:
+
+- Enrich the phrase-preserved plural recheck object inventory with canonical
+  object surfaces.
+- Continue Stage 3.5 attribute/action inventory workflow from that object
+  inventory.
+- Publish the completed inventory bundle as the active current inventory.
+- Re-run formal mixed Stage 1-6 for the same first 10K GPIC caption input.
+
+Commands:
+
+```powershell
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 900 -- scripts\enrich_gpic_inventory_canonical.py --input outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v2_phrase_preserved_manual_resolved.tsv --output outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v2_phrase_preserved_manual_resolved_canonical.tsv --ambiguous-output outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v2_phrase_preserved_manual_resolved_canonical_ambiguous.tsv --summary outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v2_phrase_preserved_manual_resolved_canonical_summary.json --ngram-evidence resources\source_labels\google_ngram_canonical_frequency_evidence.tsv
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 1800 -- scripts\run_stage35_inventory_workflow.py --stage3-records outputs\real10k_mixed_formal_after_action_v3_current\stage3\stage3_records.jsonl --output-dir outputs\front10000_plural_object_recheck_20260713\workflow_after_object_v2 --object-inventory outputs\front10000_plural_object_recheck_20260713\inventory\gpic_observed_object_inventory_plural_recheck_v2_phrase_preserved_manual_resolved_canonical.tsv --attribute-prior-inventory resources\gpic_inventory\current\inventory\attribute_inventory.tsv --action-prior-inventory resources\gpic_inventory\current\inventory\action_inventory.tsv --base-lexicon-dir resources\gpic_inventory\current\lexicons --publish-current --snapshot-label front10000_plural_recheck_v2 --publish-summary outputs\front10000_plural_object_recheck_20260713\workflow_after_object_v2\publish_summary.json
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 2400 -- scripts\run_mixed_caption_pipeline.py --input "C:\Users\rlath\OneDrive\Desktop\PILAB\0. 연구과제\기영님 연구과제(blue maze)\caption to concept\gpic-caption-concepts\data\gpic_captions_10k_train00000_00099\train\gpic_train_00000_00099_merged_10000.jsonl.gz" --output-dir outputs\front10000_plural_recheck_v2_formal_current --inventory-bundle resources\gpic_inventory\current\inventory_bundle.json --preposition-mwe-lexicon resources\lexicons\preposition_mwes.tsv --prefer-gpu --batch-size 128 --md-report outputs\front10000_plural_recheck_v2_formal_current\caption_to_concept_front10000_plural_recheck_v2.md --md-limit 100 --max-object-pairs-per-caption 40
+.\scripts\run_python.ps1 -c "<verify current inventory gate counts and selected plural rows>"
+```
+
+Results:
+
+- Object canonical enrichment:
+  - rows: `6,513`
+  - canonical selected rows: `5,304`
+  - selected-synset missing rows: `1,209`
+  - canonical ambiguous rows: `0`
+- Stage 3.5 workflow:
+  - status: `complete`
+  - executed steps:
+    `build_attribute_inventory`, `enrich_attribute_canonical`,
+    `build_action_inventory`, `enrich_action_canonical`,
+    `export_stage5_lexicon_bundle`
+  - published current snapshot label: `front10000_plural_recheck_v2`
+  - published current rows:
+    - object inventory: `6,513`
+    - attribute inventory: `3,531`
+    - action inventory: `1,947`
+    - action canonical inventory: `1,947`
+- Current inventory gate verification:
+  - object status counts: `chosen=5304`, `excluded=1209`, blockers `0`
+  - attribute status counts: `chosen=3531`, blockers `0`
+  - action status counts: `chosen=1873`, `raw_fallback=74`
+  - action canonical blockers: `0`
+- Formal mixed Stage 1-6:
+  - status: `completed`
+  - total captions: `10,000`
+  - sentence captions: `9,896`
+  - tag-list captions: `104`
+  - Stage 3 sentence GPU enabled: `true`
+  - Stage 3 tag-list GPU enabled: `true`
+  - total runtime: `181.479171` seconds
+  - throughput: `55.102742` captions/sec
+  - Stage 6 fact total: `1,724,773`
+- Spot checks:
+  - `corn cobs` inventory row is phrase-preserved:
+    `selected_query=corn cob`, `selected_oewn_synset=oewn-08561700-n`,
+    `canonical_surface=corncob`, empty `replacement_span_key`.
+  - Stage 6 object count has `corncob` with `raw_variants=corn cobs`.
+  - `glasses` remains `glasses`, while singular `glass` remains separate.
+  - `colors`, `pants`, `trunks`, and `rings` follow the manual selected
+    canonical rows in the current inventory.
+
+Artifacts:
+
+- Current inventory bundle:
+  `resources\gpic_inventory\current\inventory_bundle.json`
+- Workflow state:
+  `outputs\front10000_plural_object_recheck_20260713\workflow_after_object_v2\stage35_workflow_state.json`
+- Publish summary:
+  `outputs\front10000_plural_object_recheck_20260713\workflow_after_object_v2\publish_summary.json`
+- Formal mixed output:
+  `outputs\front10000_plural_recheck_v2_formal_current`
+- Formal Markdown report:
+  `outputs\front10000_plural_recheck_v2_formal_current\caption_to_concept_front10000_plural_recheck_v2.md`
+
+Interpretation:
+
+- The active current inventory now points to the plural recheck v2 snapshot.
+- The formal 10K mixed run used the active current inventory bundle and passed
+  Stage 1-6 without preview/runtime-action lookup mode.
+
+## 2026-07-13: Stage 3.5 Publish-Current Integration
+
+Purpose:
+
+- Verify that a completed Stage 3.5 workflow can publish its generated
+  inventory bundle to the managed current inventory path in the same workflow
+  command when `--publish-current` is requested.
+- Keep probe/simulation workflows unpublished unless they explicitly opt in.
+
+Commands:
+
+```powershell
+.\scripts\run_tests.ps1 --timeout-seconds 90 discover -s tests -p test_stage35_inventory_workflow.py
+.\scripts\run_tests.ps1 --timeout-seconds 90 discover -s tests -p test_publish_inventory_bundle.py
+```
+
+Results:
+
+- `test_stage35_inventory_workflow.py`: 11 tests passed.
+- `test_publish_inventory_bundle.py`: 3 tests passed.
+
+Interpretation:
+
+- The Stage 3.5 workflow now writes `inventory_bundle.json` on completion and,
+  when requested, publishes that completed bundle to the current inventory
+  target before reporting the workflow state.
+- The workflow state records `publish_current`, `published_current_bundle`, and
+  the publish summary, so an unpublished snapshot is distinguishable from an
+  active current inventory update.
+
+## 2026-07-13: Front-10000 Current Bundle Stage 4/5/6 Rerun
+
+Purpose:
+
+- Run formal Stage 4/5/6 from the managed current 10K inventory bundle and
+  compare with the previous formal 10K output.
+- Check whether the managed current 10K bundle follows the current object
+  lookup policy, even when that differs from an older historical 10K run.
+
+Commands:
+
+```powershell
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 900 -- scripts\run_stage4_extract_raw.py --input outputs\real10k_mixed_formal_after_action_v3_current\stage3\stage3_records.jsonl --raw-mentions outputs\front10000_formal_stage456_using_current_20260713_rerun\stage4\raw_mentions.jsonl --raw-edges outputs\front10000_formal_stage456_using_current_20260713_rerun\stage4\raw_edges.jsonl --summary outputs\front10000_formal_stage456_using_current_20260713_rerun\stage4\summary.jsonl --object-inventory resources\gpic_inventory\current\inventory\object_inventory.tsv --action-inventory resources\gpic_inventory\current\inventory\action_inventory.tsv --preposition-mwe-lexicon resources\lexicons\preposition_mwes.tsv
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 900 -- scripts\run_stage5_canonicalize.py --raw-mentions outputs\front10000_formal_stage456_using_current_20260713_rerun\stage4\raw_mentions.jsonl --raw-edges outputs\front10000_formal_stage456_using_current_20260713_rerun\stage4\raw_edges.jsonl --lexicon-dir resources\gpic_inventory\current\lexicons --canonical-mentions outputs\front10000_formal_stage456_using_current_20260713_rerun\stage5\canonical_mentions.jsonl --canonical-edges outputs\front10000_formal_stage456_using_current_20260713_rerun\stage5\canonical_edges.jsonl --summary outputs\front10000_formal_stage456_using_current_20260713_rerun\stage5\summary.jsonl --attribute-inventory resources\gpic_inventory\current\inventory\attribute_inventory.tsv
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 1200 -- scripts\run_stage6_export_counts.py --canonical-mentions outputs\front10000_formal_stage456_using_current_20260713_rerun\stage5\canonical_mentions.jsonl --canonical-edges outputs\front10000_formal_stage456_using_current_20260713_rerun\stage5\canonical_edges.jsonl --output-dir outputs\front10000_formal_stage456_using_current_20260713_rerun\stage6 --summary outputs\front10000_formal_stage456_using_current_20260713_rerun\stage6\summary.jsonl
+```
+
+Initial comparison:
+
+- Stage 4 and Stage 5 totals matched the previous formal 10K run.
+- Stage 6 did not initially match:
+  - fact total changed from `1,724,720` to `1,724,814`
+  - the change came from object canonical differences:
+    `pants`, `colors`, `trunks`, and `rings`.
+- Corrected interpretation:
+  - The initial mismatch was not evidence that manual decisions failed to
+    propagate.
+  - The older 100-caption run used a plural-head-lemma-first lookup path, so
+    `pants -> pant`, `colors -> color`, and `trunks -> trunk` became
+    `needs_manual` and were manually resolved there.
+  - The current object lookup policy prefers observed exact surface lookup for
+    new rows and only sends exact-vs-base conflicts to `needs_manual` when both
+    sides select conflicting synsets. Under that current policy, the new 10K
+    rows `pants`, `colors`, `trunks`, and `rings` can be auto-selected by OEWN
+    exact-surface evidence.
+  - Therefore the Stage 6 difference from the historical 10K run was a policy
+    difference between historical output and current output, not a broken
+    current-inventory reuse path.
+
+Retracted correction:
+
+- Restored the previous manual object rows for:
+  `pants`, `colors`, `trunks`, `rings`, `day`, and `time` into
+  `outputs\front10000_inventory_using_current_front1000_20260713_rerun\inventory\gpic_observed_object_inventory_manual_resolved_parent_canonical_metadata.tsv`.
+- Republished
+  `outputs\front10000_inventory_using_current_front1000_20260713_rerun\workflow_after_object_manual\inventory_bundle.json`
+  to `resources\gpic_inventory\current`.
+- Reran Stage 4/5/6 into
+  `outputs\front10000_formal_stage456_using_current_20260713_rerun_fixed`.
+- This correction was later judged wrong because it forced historical manual
+  rows over rows that were correctly auto-selected by the current rule.
+
+Historical comparison after the retracted correction:
+
+- Stage 5 canonical outputs are byte-identical to the previous formal run:
+  - `stage5/canonical_mentions.jsonl`: same SHA-256
+  - `stage5/canonical_edges.jsonl`: same SHA-256
+- Stage 6 final outputs are byte-identical where it matters for count export:
+  - `stage6/facts.jsonl`: same SHA-256
+  - key count tables including `object_counts.tsv`,
+    `attribute_counts.tsv`, `action_counts.tsv`,
+    `relation_triple_counts.tsv`, and
+    `object_cooccurrence_pair_counts.tsv`: same SHA-256
+- `stage4/raw_edges.jsonl` is byte-identical.
+- `stage4/raw_mentions.jsonl` differs only in action lookup provenance metadata
+  such as `decision_reason` / `synset_selection_tag`; Stage 5 canonical output
+  and Stage 6 facts are unchanged by that metadata difference.
+
+Reverted current inventory correction:
+
+```powershell
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 600 -- scripts\enrich_gpic_inventory_synset_metadata.py --input outputs\front10000_inventory_using_current_front1000_20260713_rerun\inventory\gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv --output outputs\front10000_inventory_using_current_front1000_20260713_rerun\inventory\gpic_observed_object_inventory_manual_resolved_parent_canonical_metadata.tsv --summary outputs\front10000_inventory_using_current_front1000_20260713_rerun\inventory\gpic_observed_object_inventory_manual_resolved_parent_canonical_metadata_summary.json
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 300 -- scripts\publish_inventory_bundle.py --source-bundle outputs\front10000_inventory_using_current_front1000_20260713_rerun\workflow_after_object_manual\inventory_bundle.json --target-dir resources\gpic_inventory\current --snapshot-label front10000 --source-stage3-records outputs\real10k_mixed_formal_after_action_v3_current\stage3\stage3_records.jsonl --summary resources\gpic_inventory\current\publish_summary.json
+```
+
+Current verification after revert:
+
+- `resources\gpic_inventory\current\inventory\object_inventory.tsv` now has:
+  - `pants -> selected_query=pants`, `decision_reason=selected_object_compatible`
+  - `colors -> selected_query=colors`, `decision_reason=selected_object_compatible`
+  - `trunks -> selected_query=trunks`, `decision_reason=selected_object_compatible`
+  - `rings -> selected_query=rings`, `decision_reason=selected_object_compatible`
+- The historical byte-identical output directory
+  `outputs\front10000_formal_stage456_using_current_20260713_rerun_fixed` should
+  be treated as a historical comparison artifact, not the active current-policy
+  output.
+
+## 2026-07-13: Central Current Inventory Publish And 1K Bundle Simulation
+
+Purpose:
+
+- Populate the managed current inventory TSVs from the first 100 captions only.
+- Publish that completed 100-caption Stage 3.5 bundle to
+  `resources/gpic_inventory/current/inventory_bundle.json`.
+- Run the 1K mixed formal pipeline using only that central bundle, to verify
+  bundle reuse before promoting a larger 10K inventory.
+
+Commands:
+
+```powershell
+.\scripts\run_tests.ps1 --timeout-seconds 90 discover -s tests -p "test_publish_inventory_bundle.py"
+.\scripts\run_tests.ps1 --timeout-seconds 90 discover -s tests -p "test_stage35_inventory_workflow.py"
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 300 -- scripts\build_gpic_observed_object_inventory.py --input outputs\front100_inventory_current\stage3\stage3_records.jsonl --prior-object-inventory outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_corrected_source_parent_canonical_metadata.tsv --output outputs\front100_inventory_current\inventory\gpic_observed_object_inventory.tsv --summary outputs\front100_inventory_current\inventory\gpic_observed_object_inventory_summary.json
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 180 -- scripts\enrich_gpic_inventory_parents.py --input outputs\front100_inventory_current\inventory\gpic_observed_object_inventory.tsv --output outputs\front100_inventory_current\inventory\gpic_observed_object_inventory_parents.tsv --summary outputs\front100_inventory_current\inventory\gpic_observed_object_inventory_parents_summary.json
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 -- scripts\enrich_gpic_inventory_canonical.py --input outputs\front100_inventory_current\inventory\gpic_observed_object_inventory_parents.tsv --output outputs\front100_inventory_current\inventory\gpic_observed_object_inventory_parent_canonical.tsv --ngram-evidence resources\source_labels\google_ngram_canonical_frequency_evidence.tsv --ambiguous-output outputs\front100_inventory_current\inventory\gpic_observed_object_inventory_parent_canonical_ambiguous.tsv --summary outputs\front100_inventory_current\inventory\gpic_observed_object_inventory_parent_canonical_summary.json
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 180 -- scripts\enrich_gpic_inventory_synset_metadata.py --input outputs\front100_inventory_current\inventory\gpic_observed_object_inventory_parent_canonical.tsv --output outputs\front100_inventory_current\inventory\gpic_observed_object_inventory_parent_canonical_metadata.tsv --summary outputs\front100_inventory_current\inventory\gpic_observed_object_inventory_parent_canonical_metadata_summary.json
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 600 -- scripts\run_stage35_inventory_workflow.py --stage3-records outputs\front100_inventory_current\stage3\stage3_records.jsonl --output-dir outputs\front100_inventory_current --object-inventory outputs\front100_inventory_current\inventory\gpic_observed_object_inventory_parent_canonical_metadata.tsv --attribute-prior-inventory outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object_manual_resolved_canonical.tsv --action-prior-inventory outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_manual_resolved.tsv --base-lexicon-dir outputs\front1000_mixed_current\lexicons_after_action_manual_resolved --preposition-mwe-lexicon resources\lexicons\preposition_mwes.tsv --ngram-evidence resources\source_labels\google_ngram_canonical_frequency_evidence.tsv --lexicon-output-dir outputs\front100_inventory_current\lexicons_after_stage35_workflow
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 -- scripts\publish_inventory_bundle.py --source-bundle outputs\front100_inventory_current\inventory_bundle.json --target-dir resources\gpic_inventory\current --snapshot-label front100 --source-stage3-records outputs\front100_inventory_current\stage3\stage3_records.jsonl --summary resources\gpic_inventory\current\publish_summary.json
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 900 -- scripts\run_mixed_caption_pipeline.py --input outputs\front1000_current_guard_scoped_input\gpic_rows_front1000.jsonl --output-dir outputs\front1000_formal_using_front100_inventory_current --inventory-bundle resources\gpic_inventory\current\inventory_bundle.json --preposition-mwe-lexicon resources\lexicons\preposition_mwes.tsv --prefer-gpu --batch-size 128 --md-report outputs\front1000_formal_using_front100_inventory_current\caption_to_concept_front1000_using_front100_inventory.md --md-limit 100 --max-object-pairs-per-caption 40
+```
+
+Results:
+
+- Publish unit tests: 3 tests passed.
+- Stage 3.5 workflow tests: 8 tests passed.
+- First-100 central inventory row counts:
+  - object: 407
+  - attribute: 173
+  - action: 126
+  - action canonical: 126
+- The first publish attempt exposed a bug: complete Stage 3.5 bundles could
+  point `action_inventory` at `_manual_resolved.tsv` even when no manual action
+  step had created that file.
+- Fixed workflow bundle writing to use the existing resolved action inventory
+  when present, otherwise the raw action inventory generated by the action
+  builder.
+- Fixed central publish to require and copy
+  `action_inventory.tsv.pipeline_state.json`, rewriting its `output` field to
+  the central action TSV path.
+- 1K formal mixed run using only
+  `resources\gpic_inventory\current\inventory_bundle.json` completed:
+  - output dir: `outputs\front1000_formal_using_front100_inventory_current`
+  - preview mode: false
+  - runtime action lookup preview: false
+  - Stage 1 total: 1,000
+  - caption shape counts: `sentence=797`, `tag_list=203`
+  - Stage 6 facts: 48,560
+  - total pipeline seconds: `37.107571`
+  - throughput: `26.948678 captions/sec`
+
+Interpretation:
+
+- The central current inventory path is now a real managed input, not a run
+  snapshot alias.
+- A first-100 current bundle can drive a 1K formal mixed run without mutating
+  inventory TSVs.
+- The next promotion step should rebuild/publish the 10K inventory into the
+  same central path after reviewing the 1K simulation output.
+
+## 2026-07-13: Inventory Bundle Manifest Gate
+
+Purpose:
+
+- Make prior inventory reuse less dependent on manually passing four separate
+  paths.
+- Verify that a completed Stage 3.5 workflow writes `inventory_bundle.json`.
+- Verify that the formal mixed runner can consume the bundle and rejects
+  mismatched explicit per-family paths.
+
+Commands:
+
+```powershell
+.\scripts\run_python.ps1 -c "import ast, pathlib; files=['src/gpic_concepts_v1/inventory_bundle.py','scripts/run_stage35_inventory_workflow.py','scripts/run_mixed_caption_pipeline.py','tests/test_stage35_inventory_workflow.py','tests/test_mixed_caption_pipeline.py']; [ast.parse(pathlib.Path(f).read_text(encoding='utf-8'), filename=f) for f in files]; print('AST_OK')"
+.\scripts\run_tests.ps1 --timeout-seconds 60 discover -s tests -p test_stage35_inventory_workflow.py
+.\scripts\run_tests.ps1 --timeout-seconds 60 discover -s tests -p test_mixed_caption_pipeline.py
+.\scripts\run_python.ps1 -c "from gpic_concepts_v1.inventory_bundle import load_inventory_bundle, build_inventory_bundle_state, write_inventory_bundle; src='outputs/real10k_mixed_inventory_current/stage35_workflow_state.json'; out='outputs/real10k_mixed_inventory_current/inventory_bundle.json'; b=load_inventory_bundle(src); write_inventory_bundle(out, build_inventory_bundle_state(object_inventory=b.object_inventory, attribute_inventory=b.attribute_inventory, action_inventory=b.action_inventory, action_canonical_inventory=b.action_canonical_inventory, lexicon_dir=b.lexicon_dir, source_workflow_state=src)); print('WROTE', out)"
+.\scripts\run_python.ps1 -c "from gpic_concepts_v1.inventory_bundle import load_inventory_bundle; b=load_inventory_bundle('outputs/real10k_mixed_inventory_current/inventory_bundle.json'); print('CURRENT_BUNDLE_OK', b.object_inventory, b.attribute_inventory, b.action_inventory, b.lexicon_dir)"
+```
+
+Results:
+
+- AST check: `AST_OK`.
+- `test_stage35_inventory_workflow.py`: 7 tests passed.
+- `test_mixed_caption_pipeline.py`: 6 tests passed.
+- Current 10K inventory bundle generated:
+  `outputs\real10k_mixed_inventory_current\inventory_bundle.json`.
+- Generated bundle read-back: `CURRENT_BUNDLE_OK`.
+
+Interpretation:
+
+- The Stage 3.5 workflow now supports `--prior-inventory-bundle` and writes a
+  completed `inventory_bundle.json`.
+- The formal mixed runner now supports `--inventory-bundle`.
+- If a bundle and an explicit inventory/lexicon path disagree, the runner raises
+  `inventory_bundle_path_mismatch` instead of silently mixing snapshots.
+
+## 2026-07-13: Real 10K Action Manual Resolution And Formal Mixed Run
+
+Purpose:
+
+- Apply the 135-row action manual feedback for the real 10K mixed inventory.
+- Let the Stage 3.5 workflow advance automatically through action canonical
+  enrichment and Stage 5 lexicon export.
+- Re-run the 10K formal mixed caption pipeline with the completed object,
+  attribute, and action inventories.
+
+Inputs:
+
+- Action manual decisions:
+  `C:\Users\rlath\Downloads\gpic_observed_action_inventory_after_attribute_v3_manual_resolved.tsv`
+- Action manual audit:
+  `C:\Users\rlath\Downloads\gpic_observed_action_inventory_after_attribute_v3_manual_resolution_audit.tsv`
+- Stage 3.5 workflow output state:
+  `outputs\real10k_mixed_inventory_current\stage35_workflow_state.json`
+
+Commands:
+
+```powershell
+.\scripts\assert_active_workspace.ps1
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 300 -- scripts\run_stage35_inventory_workflow.py --stage3-records outputs\real10k_mixed_guard_scoped_timed_20260713_1240\stage3\stage3_records.jsonl --output-dir outputs\real10k_mixed_inventory_current --object-inventory outputs\real10k_mixed_inventory_current\inventory\gpic_observed_object_inventory_manual_resolved_v3_parent_canonical_metadata.tsv --attribute-inventory outputs\real10k_mixed_inventory_current\inventory\gpic_observed_attribute_inventory_after_object_v3.tsv --attribute-canonical-inventory outputs\real10k_mixed_inventory_current\inventory\gpic_observed_attribute_inventory_after_object_v3_manual_resolved_canonical.tsv --action-inventory outputs\real10k_mixed_inventory_current\inventory\gpic_observed_action_inventory_after_attribute_v3.tsv --action-prior-inventory outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_manual_resolved.tsv --action-manual-decisions "C:\Users\rlath\Downloads\gpic_observed_action_inventory_after_attribute_v3_manual_resolved.tsv" --base-lexicon-dir outputs\front1000_mixed_current\lexicons_after_action_manual_resolved --preposition-mwe-lexicon resources\lexicons\preposition_mwes.tsv --ngram-evidence resources\source_labels\google_ngram_canonical_frequency_evidence.tsv --lexicon-output-dir outputs\real10k_mixed_inventory_current\lexicons_after_stage35_workflow
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 2400 -- scripts\run_mixed_caption_pipeline.py --input "C:\Users\rlath\OneDrive\Desktop\PILAB\0. 연구과제\기영님 연구과제(blue maze)\caption to concept\gpic-caption-concepts\data\gpic_captions_10k_train00000_00099\train\gpic_train_00000_00099_merged_10000.jsonl.gz" --output-dir outputs\real10k_mixed_formal_after_action_v3_current --object-inventory outputs\real10k_mixed_inventory_current\inventory\gpic_observed_object_inventory_manual_resolved_v3_parent_canonical_metadata.tsv --attribute-inventory outputs\real10k_mixed_inventory_current\inventory\gpic_observed_attribute_inventory_after_object_v3_manual_resolved_canonical.tsv --action-inventory outputs\real10k_mixed_inventory_current\inventory\gpic_observed_action_inventory_after_attribute_v3_manual_resolved.tsv --lexicon-dir outputs\real10k_mixed_inventory_current\lexicons_after_stage35_workflow --preposition-mwe-lexicon resources\lexicons\preposition_mwes.tsv --prefer-gpu --batch-size 128
+```
+
+Results:
+
+- Action manual overlay:
+  - full rows: 1,947
+  - manual decision rows: 135
+  - merged status counts: `chosen=1873`, `raw_fallback=74`
+- Action canonical enrichment:
+  - canonical selected rows: 1,873
+  - canonical ambiguous rows: 0
+  - raw fallback not-applicable rows: 74
+- Stage 5 lexicon bundle:
+  - output dir:
+    `outputs\real10k_mixed_inventory_current\lexicons_after_stage35_workflow`
+  - pipeline state: `status=ready`, `action_canonical_exported=true`
+  - action synonym rows: 1,914
+  - action synonym rows added: 1,359
+- Stage 3.5 workflow final state:
+  - `status=complete`
+  - `next_required_step=formal_stage4_5_6`
+  - executed steps:
+    `apply_action_manual_resolution`, `enrich_action_canonical`,
+    `export_stage5_lexicon_bundle`
+- Formal 10K mixed output:
+  - output dir:
+    `outputs\real10k_mixed_formal_after_action_v3_current`
+  - pipeline state: `status=completed`, `preview_mode=false`
+  - caption shape counts: `sentence=9896`, `tag_list=104`
+  - Stage 3 GPU enabled: true
+  - total pipeline seconds: `206.642167`
+  - throughput: `48.392834 captions/sec`
+  - Stage 4 raw mentions: 200,372
+  - Stage 4 raw edges: 123,548
+  - Stage 6 facts: 1,724,720
+  - Stage 6 table rows:
+    `object_counts=5275`, `attribute_counts=3528`, `action_counts=1079`,
+    `relation_triple_counts=11831`, `object_cooccurrence_pair_counts=431714`
+
+Interpretation:
+
+- The action manual gate is clear for the real 10K run.
+- The current formal 10K count tables should use
+  `outputs\real10k_mixed_formal_after_action_v3_current`.
+- The previous `blocked_action_needs_manual` workflow state is superseded by
+  the current `complete` state.
+
+## 2026-07-13: Stage 3.5 Inventory Workflow Orchestrator
+
+Change:
+
+- Added `scripts/run_stage35_inventory_workflow.py`.
+- The workflow runner inspects object, attribute, action, canonical, and
+  Stage 5 lexicon artifacts, runs the next clear offline step, and stops with a
+  `stage35_workflow_state.json` blocker when manual or canonical work remains.
+- The runner calls existing build/apply/canonical/export scripts instead of
+  adding new extraction or canonicalization semantics.
+
+Commands:
+
+```powershell
+.\scripts\assert_active_workspace.ps1
+.\scripts\run_python.ps1 -c "import ast, pathlib; files=['scripts/run_stage35_inventory_workflow.py','tests/test_stage35_inventory_workflow.py']; [ast.parse(pathlib.Path(f).read_text(encoding='utf-8'), filename=f) for f in files]; print('AST_OK')"
+.\scripts\run_tests.ps1 --timeout-seconds 60 discover -s tests -p test_stage35_inventory_workflow.py
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 -- scripts\run_stage35_inventory_workflow.py --stage3-records outputs\real10k_mixed_guard_scoped_timed_20260713_1240\stage3\stage3_records.jsonl --output-dir outputs\real10k_mixed_inventory_current --object-inventory outputs\real10k_mixed_inventory_current\inventory\gpic_observed_object_inventory_manual_resolved_v3_parent_canonical_metadata.tsv --attribute-inventory outputs\real10k_mixed_inventory_current\inventory\gpic_observed_attribute_inventory_after_object_v3.tsv --attribute-canonical-inventory outputs\real10k_mixed_inventory_current\inventory\gpic_observed_attribute_inventory_after_object_v3_manual_resolved_canonical.tsv --action-inventory outputs\real10k_mixed_inventory_current\inventory\gpic_observed_action_inventory_after_attribute_v3.tsv --action-prior-inventory outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_manual_resolved.tsv --base-lexicon-dir outputs\front1000_mixed_current\lexicons_after_action_manual_resolved --preposition-mwe-lexicon resources\lexicons\preposition_mwes.tsv --ngram-evidence resources\source_labels\google_ngram_canonical_frequency_evidence.tsv --lexicon-output-dir outputs\real10k_mixed_inventory_current\lexicons_after_stage35_workflow
+```
+
+Results:
+
+- Active workspace guard: passed.
+- AST parse: passed.
+- `test_stage35_inventory_workflow.py`: 5 tests passed.
+- Current real-10K workflow state:
+  - status: `blocked_action_needs_manual`
+  - next required step: `resolve_action_manual`
+  - action inventory:
+    `outputs\real10k_mixed_inventory_current\inventory\gpic_observed_action_inventory_after_attribute_v3.tsv`
+  - decision counts: `chosen=1738`, `needs_manual=135`, `raw_fallback=74`
+  - state file:
+    `outputs\real10k_mixed_inventory_current\stage35_workflow_state.json`
+
+Interpretation:
+
+- After object and attribute canonical inventories are clear, the new workflow
+  advances to action inventory status and stops at the 135 pending action
+  manual rows.
+- It does not proceed to action canonical enrichment, Stage 5 lexicon export, or
+  formal Stage 4 while the action manual gate is blocked.
+- Canonical enrichment commands that write an ambiguous canonical artifact and
+  then exit nonzero are treated as produced blocker artifacts; the workflow can
+  loop once more and stop with canonical blocker state instead of crashing
+  without a state file.
+
+## 2026-07-13: Object/Attribute Selected-Query Prior Reuse And Observed-Surface Lexicon Export
+
+Change:
+
+- Object and attribute observed inventory builders now reuse prior final
+  `chosen` decisions by exact `span_key` first, then by unique resolved
+  `selected_query` when the prior selected synset is present in the current
+  runtime candidates.
+- `excluded` and no-synset rows remain exact-span-only.
+- Attribute/action Stage 5 synonym export now emits original observed surface
+  variants from `span_key`, `observed_surface`, and `example_surfaces`.
+
+Commands:
+
+```powershell
+.\scripts\assert_active_workspace.ps1
+.\scripts\run_python.ps1 -c "... ast.parse(...) ..."
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_build_gpic_observed_object_inventory.py"
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_build_gpic_observed_attribute_inventory.py"
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_export_attribute_stage5_lexicons.py"
+```
+
+Results:
+
+- Active workspace guard: passed.
+- AST parse check passed for edited builders/exporter and their tests.
+- `test_build_gpic_observed_object_inventory.py`: 5 tests passed.
+- `test_build_gpic_observed_attribute_inventory.py`: 10 tests passed.
+- `test_export_attribute_stage5_lexicons.py`: 2 tests passed.
+
+Interpretation:
+
+- The duplicate manual-resolution gap for inflectional/Morphy-normalized
+  object and attribute surfaces is covered without broad synonym aliasing.
+- Stage 5 lexicon export now keeps pre-Morphy observed surfaces such as
+  additional `example_surfaces` variants, so canonicalization can use the forms
+  that actually appeared in captions.
+
+## 2026-07-13: Action Inventory Selected-Query Prior Reuse
+
+Change:
+
+- Stage 3.5 action inventory generation now reuses prior resolved action
+  decisions by exact `span_key` first, then by unique resolved
+  `selected_query`.
+- Conflicting prior decisions for the same `selected_query` are not reused.
+
+Commands:
+
+```powershell
+.\scripts\run_python.ps1 -c "... ast.parse(...) ..."
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_build_gpic_observed_action_inventory.py"
+.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 300 -- scripts\build_gpic_observed_action_inventory.py --input outputs\front1000_mixed_current\stage3\stage3_records.jsonl --action-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_action_inventory_canonical.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory.tsv --needs-manual-output outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_needs_manual.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_summary.json
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_formal_inventory_gates.py"
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_stage4_extract_raw.py"
+```
+
+Results:
+
+- AST parse check passed for the edited action lookup files.
+- `test_build_gpic_observed_action_inventory.py`: 3 tests passed.
+- `test_formal_inventory_gates.py`: 10 tests passed.
+- `test_stage4_extract_raw.py`: 48 tests passed.
+- Front 1k action inventory rebuild:
+  - rows: 563
+  - previous blocker count: `needs_manual=24`
+  - current decision status counts: `chosen=536`, `needs_manual=19`,
+    `raw_fallback=8`
+  - `prior_action_selected_query_reused=106`
+  - representative rows now resolved by prior selected-query reuse:
+    `rides`, `mark`, `singing`, `sitting in`
+
+Interpretation:
+
+- The previous duplicate manual gap was caused by exact-span-only prior reuse.
+- The new selected-query reuse removes duplicate manual work for inflectional
+  or Morphy-normalized variants when prior action inventory evidence is unique.
+- The remaining 19 action `needs_manual` rows do not have unique prior
+  selected-query evidence and still require manual resolution before formal
+  Stage 4.
+
+## 2026-07-13: Formal Pipeline State Manifest Gate
+
+Change:
+
+- Added formal pipeline state manifests so Stage 4/5/6 no longer rely on
+  conversational memory or filename conventions to know which preparation
+  stages are complete.
+- Action inventory artifacts now write and require
+  `<artifact>.pipeline_state.json` before formal Stage 4.
+- Stage 5 lexicon bundles now write and require `pipeline_state.json` before
+  the mixed formal runner can use them.
+
+Commands:
+
+```powershell
+.\scripts\assert_active_workspace.ps1
+.\scripts\run_python.ps1 -c "... ast.parse(...) ..."
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_pipeline_state.py"
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_formal_inventory_gates.py"
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_mixed_caption_pipeline.py"
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_export_attribute_stage5_lexicons.py"
+.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_build_gpic_observed_action_inventory.py"
+```
+
+Result:
+
+- Active workspace guard: passed.
+- AST parse check: passed for 10 changed/new Python files.
+- `test_pipeline_state.py`: 2 tests passed.
+- `test_formal_inventory_gates.py`: 10 tests passed.
+- `test_mixed_caption_pipeline.py`: 4 tests passed.
+- `test_export_attribute_stage5_lexicons.py`: 2 tests passed.
+- `test_build_gpic_observed_action_inventory.py`: 1 test passed.
+
+Interpretation:
+
+- Legacy action inventories without pipeline-state sidecars are blocked before
+  formal Stage 4.
+- Mixed formal runs are blocked when the Stage 5 lexicon bundle lacks a valid
+  pipeline-state manifest or action canonical export.
+- Existing front-1k action inventory work remains blocked until the current
+  action `needs_manual` rows are resolved and the action canonical export is
+  regenerated through the formal path.
+
 ## 2026-07-08: Attribute Type Deferral And Object Core-Span Consumption
 
 Change:
@@ -1275,6 +1991,8 @@ Results:
   - rows: 257
   - blocked_rows: 231
   - first blocker reasons include `selected_synset_missing_canonical_surface`
+  - note: this was a formal Stage 5 readiness gate, not the earlier
+    attribute synset/manual inventory gate.
 
 Interpretation:
 
@@ -2507,3 +3225,1998 @@ Interpretation:
 - Stage 4 time increased by about 0.036 seconds on 100 captions in this run.
 - The dominant runtime remains Stage 3 transformer parsing in this 100-caption
   benchmark.
+
+## 2026-07-12: 100-Caption R13 Attribute Conj Chain Rerun
+
+Purpose:
+
+- Re-run the same `0101-0200` 100-caption sample after adding R13 attribute
+  conjunct expansion.
+- During self-review, direct-conj-only expansion missed `yellow` in
+  `blue, white, and yellow planes`, because the parse attached it as a chained
+  conjunct (`blue -> white -> yellow`). The rule and implementation were
+  adjusted to same-noun-chunk conj-chain expansion rooted at an accepted
+  attribute modifier.
+
+Output directory:
+
+- `outputs/case_reports_sentence100_0101_0200_attribute_conj_current`
+
+Validation commands:
+
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_stage4_extract_raw.py`
+  - Result: 35 tests passed.
+- `.\scripts\run_python.ps1 -c "import ast, pathlib; files=[pathlib.Path('src/gpic_concepts_v1/stage4_extract_raw.py'), pathlib.Path('tests/test_stage4_extract_raw.py')]; [ast.parse(p.read_text(encoding='utf-8'), filename=str(p)) for p in files]; print('syntax ok: stage4 + test')"`
+  - Result: passed.
+
+Rerun commands:
+
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage4_extract_raw.py --input outputs\case_reports_sentence100_0101_0200_current\stage3_records.jsonl --object-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv --action-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_action_inventory_manual_resolved.tsv --raw-mentions outputs\case_reports_sentence100_0101_0200_attribute_conj_current\raw_mentions.jsonl --raw-edges outputs\case_reports_sentence100_0101_0200_attribute_conj_current\raw_edges.jsonl --summary outputs\case_reports_sentence100_0101_0200_attribute_conj_current\stage4_summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage5_canonicalize.py --raw-mentions outputs\case_reports_sentence100_0101_0200_attribute_conj_current\raw_mentions.jsonl --raw-edges outputs\case_reports_sentence100_0101_0200_attribute_conj_current\raw_edges.jsonl --lexicon-dir outputs\case_reports_sentence100_0101_0200_current\stage5_lexicons_attribute_action_canonical --canonical-mentions outputs\case_reports_sentence100_0101_0200_attribute_conj_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_attribute_conj_current\canonical_edges.jsonl --summary outputs\case_reports_sentence100_0101_0200_attribute_conj_current\stage5_summary.jsonl --attribute-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_attribute_inventory_current_manual_resolved_canonical.tsv`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage6_export_counts.py --canonical-mentions outputs\case_reports_sentence100_0101_0200_attribute_conj_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_attribute_conj_current\canonical_edges.jsonl --output-dir outputs\case_reports_sentence100_0101_0200_attribute_conj_current\stage6 --summary outputs\case_reports_sentence100_0101_0200_attribute_conj_current\stage6_summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\build_caption_concept_md.py --sentence-rows outputs\case_reports_sentence100_0101_0200_current\sentence_rows_0101_0200.jsonl --stage3-records outputs\case_reports_sentence100_0101_0200_current\stage3_records.jsonl --canonical-mentions outputs\case_reports_sentence100_0101_0200_attribute_conj_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_attribute_conj_current\canonical_edges.jsonl --facts outputs\case_reports_sentence100_0101_0200_attribute_conj_current\stage6\facts.jsonl --output outputs\case_reports_sentence100_0101_0200_attribute_conj_current\caption_to_concept_cases_0101_0200_attribute_conj_current.md --start 0 --limit 100 --max-object-pairs-per-caption 40`
+
+Rerun results:
+
+- Stage 4:
+  - raw mentions: 2255
+  - raw edges: 1307
+  - mention type counts: `action=432`, `attribute=631`, `object=1155`,
+    `quantity=37`
+  - edge type counts: `ambiguous_relation_candidate=7`, `event_role=427`,
+    `has_attribute=631`, `has_quantity=37`, `relation=205`
+- Stage 5:
+  - canonical mentions: 2255
+  - canonical edges: 1307
+  - `formal_attribute_inventory_gate=true`
+  - canonical source counts: `gpic_observed_inventory=1051`, `lexicon=1032`,
+    `raw_fallback=172`
+- Stage 6:
+  - fact total: 23153
+  - `attribute_exists=631`
+  - `has_attribute=631`
+  - `object_attribute_pair_counts.tsv` rows: 562
+- Markdown report:
+  `outputs/case_reports_sentence100_0101_0200_attribute_conj_current/caption_to_concept_cases_0101_0200_attribute_conj_current.md`
+
+Self-review notes:
+
+- 21 attribute mentions have
+  `source_detail.modifier_source=conj_of_attribute_modifier`.
+- Examples recovered as expected:
+  - `red and purple lights`: `purple -> lights`
+  - `blue and white uniform`: `white -> uniform`
+  - `blue, white, and yellow planes`: `white -> planes` and `yellow -> planes`
+  - `gold and silver details`: `silver -> details`
+- No obvious false-positive conjunct attribute was found in the 21-row manual
+  spot check.
+- Compared with the older
+  `case_reports_sentence100_0101_0200_preposition_mwe_missing_endpoint`
+  artifact, attributes increased by 17 and `has_attribute` edges increased by
+  17. Object/relation counts are not an apples-to-apples R13 comparison because
+  the active preposition MWE lexicon is now the 5021-row broad lexicon recorded
+  in the previous speed probe.
+
+## 2026-07-12: R18/R18.1 Relation Target Conj Regression
+
+Purpose:
+
+- Verify the target-side relation conjunction rule before and after
+  implementation.
+- Keep R18.1 multiple-independent-target behavior ambiguous while allowing one
+  base target with coordinated target conjuncts to produce normal relation
+  edges.
+
+Validation commands:
+
+- `.\scripts\run_tests.ps1 --pytest --timeout-seconds 60 -q tests\test_stage4_extract_raw.py -k "target_conj"`
+  - Before implementation: 2 failed, both expected missing target-conj
+    relation edges.
+  - After implementation: 2 passed, 35 deselected.
+- `.\scripts\run_tests.ps1 --pytest --timeout-seconds 120 -q tests\test_stage4_extract_raw.py`
+  - Result: 37 passed, 1 warning from third-party `torch.jit.script`
+    deprecation.
+- `.\scripts\run_tests.ps1 --pytest --timeout-seconds 120 -q tests\test_stage6_export_counts.py`
+  - Result: 4 passed.
+- `.\scripts\run_python.ps1 -m compileall src\gpic_concepts_v1\stage4_extract_raw.py`
+  - Result: failed with `PermissionError` writing `__pycache__`; this is the
+    known bytecode-write failure mode, not a syntax failure.
+- `.\scripts\run_python.ps1 -c "import ast, pathlib; ast.parse(pathlib.Path('src/gpic_concepts_v1/stage4_extract_raw.py').read_text(encoding='utf-8'))"`
+  - Result: passed. Used as bytecode-free syntax check.
+
+Implementation notes:
+
+- R18 now expands a direct `pobj` target through object-mapped target-side
+  `conj` chains.
+- R18.1 now distinguishes `candidate_target_count` from
+  `candidate_target_base_count`.
+- R18.1 normal relation edge selection uses one source candidate plus one
+  independent target base; coordinated targets from that base are emitted as
+  multiple normal relation edges.
+- Multiple independent target bases still produce
+  `ambiguous_relation_candidate` edges.
+
+## 2026-07-12: 100-Caption R18/R18.1 Relation Target Conj Rerun
+
+Purpose:
+
+- Re-run the same `0101-0200` 100-caption sample after R18/R18.1 target-side
+  relation conjunction expansion.
+- Compare against `case_reports_sentence100_0101_0200_attribute_conj_current`
+  as the prior 100-caption baseline.
+
+Output directory:
+
+- `outputs/case_reports_sentence100_0101_0200_relation_target_conj_current`
+
+Rerun commands:
+
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage4_extract_raw.py --input outputs\case_reports_sentence100_0101_0200_current\stage3_records.jsonl --object-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv --action-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_action_inventory_manual_resolved.tsv --raw-mentions outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\raw_mentions.jsonl --raw-edges outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\raw_edges.jsonl --summary outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\stage4_summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage5_canonicalize.py --raw-mentions outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\raw_mentions.jsonl --raw-edges outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\raw_edges.jsonl --lexicon-dir outputs\case_reports_sentence100_0101_0200_current\stage5_lexicons_attribute_action_canonical --canonical-mentions outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\canonical_edges.jsonl --summary outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\stage5_summary.jsonl --attribute-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_attribute_inventory_current_manual_resolved_canonical.tsv`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage6_export_counts.py --canonical-mentions outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\canonical_edges.jsonl --output-dir outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\stage6 --summary outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\stage6_summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\build_caption_concept_md.py --sentence-rows outputs\case_reports_sentence100_0101_0200_current\sentence_rows_0101_0200.jsonl --stage3-records outputs\case_reports_sentence100_0101_0200_current\stage3_records.jsonl --canonical-mentions outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\canonical_edges.jsonl --facts outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\stage6\facts.jsonl --output outputs\case_reports_sentence100_0101_0200_relation_target_conj_current\caption_to_concept_cases_0101_0200_relation_target_conj_current.md --start 0 --limit 100 --max-object-pairs-per-caption 40`
+
+Rerun results:
+
+- Stage 4:
+  - raw mentions: 2255
+  - raw edges: 1350
+  - mention type counts: `action=432`, `attribute=631`, `object=1155`,
+    `quantity=37`
+  - edge type counts: `ambiguous_relation_candidate=8`, `event_role=427`,
+    `has_attribute=631`, `has_quantity=37`, `relation=247`
+- Stage 5:
+  - canonical mentions: 2255
+  - canonical edges: 1350
+  - canonical source counts: `gpic_observed_inventory=1051`, `lexicon=1032`,
+    `raw_fallback=172`
+- Stage 6:
+  - fact total: 23199
+  - fact type counts include `relation=247`,
+    `ambiguous_relation_candidate=4`, `relation_component=78`
+  - `relation_triple_counts.tsv` rows: 233
+- Markdown report:
+  `outputs/case_reports_sentence100_0101_0200_relation_target_conj_current/caption_to_concept_cases_0101_0200_relation_target_conj_current.md`
+
+Comparison with previous 100-caption baseline:
+
+- Raw relation-like edges:
+  - Previous: `relation=205`, `ambiguous_relation_candidate=7`
+  - New: `relation=247`, `ambiguous_relation_candidate=8`
+- New relation-like edges: 43 total.
+  - `relation`: 42
+  - `ambiguous_relation_candidate`: 1
+  - `R18`: 40
+  - `R18.1`: 3
+  - all 43 have target resolution `conj_of_pobj` or `conj_of_final_pobj`
+- `relation_triple_counts.tsv`:
+  - previous rows: 192
+  - new rows: 233
+  - new-only rows: 41
+  - existing rows with increased count: 1
+
+Self-review notes:
+
+- Every new relation-like edge has a direct base-target counterpart.
+- Duplicate relation-like edge keys: 0.
+- New-only non-conj relation-like edges: 0.
+- Good recovered examples include:
+  - `seagull --with--> wings`
+  - `pasta --with--> chicken`
+  - `van --with--> logo`
+  - `building --with--> window frames`
+  - `scene --next to--> door`
+- Expected noisy examples also appear because the current policy counts any
+  object-mapped target conjunct, including objects that are visually/property-
+  like in context:
+  - `artificial flowers --in--> yellow`
+  - `artificial flowers --in--> red`
+  - `materials --like--> roofing`
+- The one new ambiguous R18.1 edge is target-conj recovery in an already
+  source-missing/ambiguous `in front of ... wall and banner` style case, so it
+  remains out of normal relation triple count.
+
+## 2026-07-12: R16.1 Action Conj Agent Inheritance Regression
+
+Purpose:
+
+- Add agent-only inheritance for coordinated actions.
+- Verify patient roles are not inherited.
+- Verify passive-like conjunct targets do not inherit active agents.
+
+Validation commands:
+
+- `.\scripts\run_tests.ps1 --pytest --timeout-seconds 60 -q tests\test_stage4_extract_raw.py -k "conjunct_action"`
+  - Before implementation: 3 failed, all due missing R16.1 agent inheritance.
+  - After implementation and passive-like safety gate: 4 passed, 37 deselected.
+- `.\scripts\run_tests.ps1 --pytest --timeout-seconds 120 -q tests\test_stage4_extract_raw.py`
+  - Result: 41 passed, 1 warning from third-party `torch.jit.script`
+    deprecation.
+- `.\scripts\run_tests.ps1 --pytest --timeout-seconds 120 -q tests\test_stage6_export_counts.py`
+  - Result: 4 passed.
+- `.\scripts\run_python.ps1 -c "import ast, pathlib; ast.parse(pathlib.Path('src/gpic_concepts_v1/stage4_extract_raw.py').read_text(encoding='utf-8')); ast.parse(pathlib.Path('tests/test_stage4_extract_raw.py').read_text(encoding='utf-8')); print('ast ok')"`
+  - Result: passed.
+
+Implementation notes:
+
+- R16.1 runs after direct R16/R17 event role extraction and before R18/R18.1
+  relation extraction.
+- R16.1 copies an agent only when the target action is a `conj` action, the
+  target action has no existing agent, and the source action has exactly one
+  agent.
+- R16.1 uses fixed-point propagation, so chained coordination can inherit from
+  an action that itself just inherited an agent.
+- R16.1 does not inherit patients.
+- Self-review of the first 100-caption run found false positives where active
+  agents were inherited into passive-like `parked/framed` targets. The final
+  rule excludes target actions with direct `nsubjpass`, `auxpass`, or `agent`
+  children.
+
+## 2026-07-12: 100-Caption R16.1 Action Conj Agent Rerun
+
+Purpose:
+
+- Re-run the same `0101-0200` 100-caption sample after R16.1.
+- Compare against `case_reports_sentence100_0101_0200_relation_target_conj_current`
+  as the previous 100-caption baseline.
+
+Output directory:
+
+- `outputs/case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current`
+
+Rerun commands:
+
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage4_extract_raw.py --input outputs\case_reports_sentence100_0101_0200_current\stage3_records.jsonl --object-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv --action-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_action_inventory_manual_resolved.tsv --raw-mentions outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\raw_mentions.jsonl --raw-edges outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\raw_edges.jsonl --summary outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\stage4_summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage5_canonicalize.py --raw-mentions outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\raw_mentions.jsonl --raw-edges outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\raw_edges.jsonl --lexicon-dir outputs\case_reports_sentence100_0101_0200_current\stage5_lexicons_attribute_action_canonical --canonical-mentions outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\canonical_edges.jsonl --summary outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\stage5_summary.jsonl --attribute-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_attribute_inventory_current_manual_resolved_canonical.tsv`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage6_export_counts.py --canonical-mentions outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\canonical_edges.jsonl --output-dir outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\stage6 --summary outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\stage6_summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\build_caption_concept_md.py --sentence-rows outputs\case_reports_sentence100_0101_0200_current\sentence_rows_0101_0200.jsonl --stage3-records outputs\case_reports_sentence100_0101_0200_current\stage3_records.jsonl --canonical-mentions outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\canonical_edges.jsonl --facts outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\stage6\facts.jsonl --output outputs\case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current\caption_to_concept_cases_0101_0200_action_agent_conj_passive_safe_current.md --limit 100 --start 0`
+
+Rerun results:
+
+- Stage 4:
+  - raw mentions: 2255
+  - raw edges: 1361
+  - mention type counts: `action=432`, `attribute=631`, `object=1155`,
+    `quantity=37`
+  - edge type counts: `ambiguous_relation_candidate=8`, `event_role=438`,
+    `has_attribute=631`, `has_quantity=37`, `relation=247`
+- Stage 5:
+  - canonical mentions: 2255
+  - canonical edges: 1361
+  - canonical source counts: `gpic_observed_inventory=1051`, `lexicon=1032`,
+    `raw_fallback=172`
+- Stage 6:
+  - fact total: 23210
+  - fact type counts include `event_role=438`, `relation=247`,
+    `ambiguous_relation_candidate=4`, `relation_component=78`
+  - `agent_patient_pair_counts.tsv` rows: 383
+  - `relation_triple_counts.tsv` rows: 233
+- Markdown report:
+  `outputs/case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current/caption_to_concept_cases_0101_0200_action_agent_conj_passive_safe_current.md`
+
+Comparison with previous 100-caption baseline:
+
+- Previous raw edge types:
+  `has_quantity=37`, `has_attribute=631`, `event_role=427`,
+  `relation=247`, `ambiguous_relation_candidate=8`
+- New raw edge types:
+  `has_quantity=37`, `has_attribute=631`, `event_role=438`,
+  `relation=247`, `ambiguous_relation_candidate=8`
+- R16.1 edges: 11 total.
+- R16.1 labels: `agent=11`.
+- R16.1 patient edges: 0.
+- Passive-like false positives found in the first self-review (`parked` and
+  `framed`) are not present as R16.1 edges after the safety gate.
+
+Additional self-review:
+
+- R16.1 generated 8 new `agent_patient_pair_counts.tsv` rows and increased 2
+  existing rows.
+- New rows:
+  - `event_role:carry:agent:individual`, count 2
+  - `event_role:have on:agent:he`, count 1
+  - `event_role:have on:agent:headset`, count 1
+  - `event_role:have:agent:he`, count 1
+  - `event_role:mention:agent:banner`, count 1
+  - `event_role:sing:agent:man`, count 1
+  - `event_role:talk:agent:people`, count 1
+  - `event_role:wrap:agent:that`, count 1
+- Increased rows:
+  - `event_role:stand:agent:he`, 2 -> 3
+  - `event_role:wear:agent:he`, 2 -> 3
+- Residual risk: `event_role:wrap:agent:that` comes from the source action in
+  `ivy that climbs ... and wraps ...`; R16.1 correctly copied the source
+  action's single agent, but the source agent itself is a pronoun/reference-like
+  object because this pipeline still does not do coreference resolution.
+
+## 2026-07-12: R16.2/R17.1 Passive Voice Regression
+
+Purpose:
+
+- Add passive subject and passive by-phrase handling without moving repair
+  logic into Stage 5.
+- Verify active `by` phrases do not become passive agents.
+- Verify passive metadata survives into Stage 6 count facts/tables.
+
+Commands:
+
+- `.\scripts\run_tests.ps1 --pytest --timeout-seconds 60 -q tests\test_stage4_extract_raw.py -k "passive or active_by"`
+  - Before implementation: 2 failed, 2 passed, 39 deselected.
+  - After implementation: 4 passed, 39 deselected.
+- `.\scripts\run_tests.ps1 --pytest --timeout-seconds 120 -q tests\test_stage4_extract_raw.py`
+  - 43 passed, 1 warning.
+- `.\scripts\run_tests.ps1 --pytest --timeout-seconds 120 -q tests\test_stage6_export_counts.py`
+  - 5 passed.
+- `.\scripts\run_python.ps1 -m compileall src scripts tests`
+  - Failed with `PermissionError` while writing repo-local `__pycache__`
+    files. This is the known sandbox/OneDrive pycache write issue, not a
+    syntax failure.
+- `.\scripts\run_python.ps1 -c "... ast.parse(... encoding='utf-8-sig') ..."`
+  - `ast ok` for:
+    `src/gpic_concepts_v1/stage4_extract_raw.py`,
+    `src/gpic_concepts_v1/stage6_export_counts.py`,
+    `scripts/build_caption_concept_md.py`.
+
+Implemented behavior:
+
+- R17.1 creates `event_role:patient` from direct `nsubjpass`/`csubjpass`
+  object children.
+- R16.2 creates `event_role:agent` from direct passive `by + pobj` only when
+  the same action already has an R17.1 passive subject edge.
+- Stage 6 event_role facts and `agent_patient_pair_counts.tsv` now include
+  `raw_role` and `voice_normalization` explanatory fields.
+
+## 2026-07-12: 100-Caption Passive Voice Rerun
+
+Purpose:
+
+- Re-run the same `0101-0200` 100-caption sample after R16.2/R17.1.
+- Compare against
+  `outputs/case_reports_sentence100_0101_0200_action_agent_conj_passive_safe_current`.
+
+Output directory:
+
+- `outputs/case_reports_sentence100_0101_0200_passive_voice_current`
+
+Commands:
+
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage4_extract_raw.py --input outputs\case_reports_sentence100_0101_0200_current\stage3_records.jsonl --object-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv --action-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_action_inventory_manual_resolved.tsv --raw-mentions outputs\case_reports_sentence100_0101_0200_passive_voice_current\raw_mentions.jsonl --raw-edges outputs\case_reports_sentence100_0101_0200_passive_voice_current\raw_edges.jsonl --summary outputs\case_reports_sentence100_0101_0200_passive_voice_current\stage4_summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage5_canonicalize.py --raw-mentions outputs\case_reports_sentence100_0101_0200_passive_voice_current\raw_mentions.jsonl --raw-edges outputs\case_reports_sentence100_0101_0200_passive_voice_current\raw_edges.jsonl --lexicon-dir outputs\case_reports_sentence100_0101_0200_current\stage5_lexicons_attribute_action_canonical --canonical-mentions outputs\case_reports_sentence100_0101_0200_passive_voice_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_passive_voice_current\canonical_edges.jsonl --summary outputs\case_reports_sentence100_0101_0200_passive_voice_current\stage5_summary.jsonl --attribute-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_attribute_inventory_current_manual_resolved_canonical.tsv`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage6_export_counts.py --canonical-mentions outputs\case_reports_sentence100_0101_0200_passive_voice_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_passive_voice_current\canonical_edges.jsonl --output-dir outputs\case_reports_sentence100_0101_0200_passive_voice_current\stage6 --summary outputs\case_reports_sentence100_0101_0200_passive_voice_current\stage6_summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\build_caption_concept_md.py --sentence-rows outputs\case_reports_sentence100_0101_0200_current\sentence_rows_0101_0200.jsonl --stage3-records outputs\case_reports_sentence100_0101_0200_current\stage3_records.jsonl --canonical-mentions outputs\case_reports_sentence100_0101_0200_passive_voice_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_passive_voice_current\canonical_edges.jsonl --facts outputs\case_reports_sentence100_0101_0200_passive_voice_current\stage6\facts.jsonl --output outputs\case_reports_sentence100_0101_0200_passive_voice_current\caption_to_concept_cases_0101_0200_passive_voice_current.md --limit 100 --start 0`
+
+Results:
+
+- Stage 4/5 edge type counts:
+  `ambiguous_relation_candidate=8`, `event_role=479`,
+  `has_attribute=631`, `has_quantity=37`, `relation=247`.
+- Stage 6 fact type counts include:
+  `event_role=479`, `relation=247`, `ambiguous_relation_candidate=4`.
+- Stage 6 table rows:
+  `agent_patient_pair_counts.tsv=423`,
+  `relation_triple_counts.tsv=233`,
+  `object_counts.tsv=504`.
+- MD report:
+  `outputs/case_reports_sentence100_0101_0200_passive_voice_current/caption_to_concept_cases_0101_0200_passive_voice_current.md`
+
+Passive edge audit:
+
+- R17.1 edges: 40 total, all `patient`.
+- R16.2 edges: 1 total, `agent`.
+- All 41 passive edges have `voice_normalization=passive_to_active`.
+- Baseline R16.1-safe run had `event_role=438`; passive run has
+  `event_role=479`, so the net increase is 41 event roles.
+- Diff against baseline produced 40 changed/new count rows because one passive
+  row, `event_role:mount:patient:sign`, has count 2.
+- Example new rows:
+  - `event_role:mount:patient:sign`, count 2
+  - `event_role:illuminate:agent:lighting`, count 1
+  - `event_role:park:patient:van`, count 1
+  - `event_role:see:patient:bus`, count 1
+  - `event_role:display:patient:airplane`, count 1
+
+Residual risk:
+
+- The rule inherits existing action canonicalization quality. Existing false
+  positives such as phrasal action choices remain possible, but passive role
+  extraction itself is limited to direct passive dependency evidence.
+
+Additional self-review:
+
+- Passive raw edge audit:
+  - passive edges: 41
+  - `R17.1`: 40
+  - `R16.2`: 1
+  - duplicate passive exact keys: 0
+  - R16.2 actions without same-action R17.1 passive subject: 0
+  - all passive edges have `voice_normalization=passive_to_active`
+- Conj interaction audit:
+  - R16.1 edges: 11
+  - R16.1 edges on passive actions: 0
+- Count-table audit:
+  - `agent_patient_pair_counts.tsv` has `raw_role` and
+    `voice_normalization` columns.
+  - aggregate rows with `voice_normalization=passive_to_active`: 40
+    because 41 passive facts collapse into 40 count rows.
+- Baseline comparison:
+  - R16: unchanged at 247
+  - R16.1: unchanged at 11
+  - R17: unchanged at 180
+  - R17.1: +40
+  - R16.2: +1
+- Sample review showed expected passive conversions such as:
+  - `parked -> fire truck`, `nsubjpass`, `theme`
+  - `seen -> bus`, `nsubjpass`, `theme`
+  - `mounted -> signs`, `nsubjpass`, `theme`
+- Residual non-passive-rule issues observed:
+  - Existing object/reference limitations can still produce targets like
+    `They` or `both`.
+  - Existing action canonicalization can still produce phrasal labels such as
+    `set in` or `set on`.
+  - These are not introduced by R16.2/R17.1; they remain separate object/action
+    inventory or coreference issues.
+
+## 2026-07-12: R16.3 ACL Action Head-Object Agent Regression
+
+Purpose:
+
+- Add the narrow `acl` agent recovery rule without reviving the old broad
+  inheritance behavior.
+- Verify the rule handles active participial `acl` only and does not treat VBN
+  reduced passive/adjectival modifiers as agents.
+
+Commands:
+
+- `.\scripts\run_tests.ps1 --pytest --timeout-seconds 120 -q tests\test_stage4_extract_raw.py -k "acl"`
+  - After implementation: 4 passed, 43 deselected.
+- `.\scripts\run_tests.ps1 --pytest --timeout-seconds 180 -q tests\test_stage4_extract_raw.py`
+  - After implementation: 47 passed, 1 warning.
+
+Implementation notes:
+
+- R16.3 runs after direct R16/R17/R17.1/R16.2 event role extraction and before
+  R16.1 conjunct action agent inheritance.
+- R16.3 creates only `event_role:agent`.
+- R16.3 requires:
+  - action head token is selected as an action head
+  - `dep == "acl"`
+  - `tag == "VBG"`
+  - action has no existing agent edge
+  - acl dependency head token is already selected as an object
+  - action is not passive-like by direct child dep `nsubjpass`, `auxpass`, or
+    `agent`
+- R16.3 does not handle `relcl` relative-pronoun resolution.
+- R16.3 does not inherit patients.
+
+Self-review adjustment:
+
+- The first 100-caption run without the VBG gate produced 25 R16.3 edges and
+  incorrectly included VBN reduced passive/adjectival cases such as
+  `bicycles parked`, `plaque mounted`, `screens placed`, and
+  `advertisement painted`.
+- The rule was narrowed to `tag == "VBG"` and a VBN negative regression test
+  was added.
+
+## 2026-07-12: 100-Caption R16.3 ACL Agent Rerun
+
+Purpose:
+
+- Re-run the same `0101-0200` 100-caption sample after R16.3.
+- Compare against `outputs/case_reports_sentence100_0101_0200_passive_voice_current`.
+
+Output directory:
+
+- `outputs/case_reports_sentence100_0101_0200_acl_agent_current`
+
+Commands:
+
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage4_extract_raw.py --input outputs\case_reports_sentence100_0101_0200_current\stage3_records.jsonl --object-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv --action-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_action_inventory_manual_resolved.tsv --raw-mentions outputs\case_reports_sentence100_0101_0200_acl_agent_current\raw_mentions.jsonl --raw-edges outputs\case_reports_sentence100_0101_0200_acl_agent_current\raw_edges.jsonl --summary outputs\case_reports_sentence100_0101_0200_acl_agent_current\stage4_summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage5_canonicalize.py --raw-mentions outputs\case_reports_sentence100_0101_0200_acl_agent_current\raw_mentions.jsonl --raw-edges outputs\case_reports_sentence100_0101_0200_acl_agent_current\raw_edges.jsonl --lexicon-dir outputs\case_reports_sentence100_0101_0200_current\stage5_lexicons_attribute_action_canonical --canonical-mentions outputs\case_reports_sentence100_0101_0200_acl_agent_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_acl_agent_current\canonical_edges.jsonl --summary outputs\case_reports_sentence100_0101_0200_acl_agent_current\stage5_summary.jsonl --attribute-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_attribute_inventory_current_manual_resolved_canonical.tsv`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage6_export_counts.py --canonical-mentions outputs\case_reports_sentence100_0101_0200_acl_agent_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_acl_agent_current\canonical_edges.jsonl --output-dir outputs\case_reports_sentence100_0101_0200_acl_agent_current\stage6 --summary outputs\case_reports_sentence100_0101_0200_acl_agent_current\stage6_summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\build_caption_concept_md.py --sentence-rows outputs\case_reports_sentence100_0101_0200_current\sentence_rows_0101_0200.jsonl --stage3-records outputs\case_reports_sentence100_0101_0200_current\stage3_records.jsonl --canonical-mentions outputs\case_reports_sentence100_0101_0200_acl_agent_current\canonical_mentions.jsonl --canonical-edges outputs\case_reports_sentence100_0101_0200_acl_agent_current\canonical_edges.jsonl --facts outputs\case_reports_sentence100_0101_0200_acl_agent_current\stage6\facts.jsonl --output outputs\case_reports_sentence100_0101_0200_acl_agent_current\caption_to_concept_cases_0101_0200_acl_agent_current.md --limit 100 --start 0`
+
+Results:
+
+- Stage 4/5 edge type counts:
+  `ambiguous_relation_candidate=8`, `event_role=486`,
+  `has_attribute=631`, `has_quantity=37`, `relation=247`.
+- Stage 6 fact type counts include:
+  `event_role=486`, `relation=247`, `ambiguous_relation_candidate=4`.
+- Stage 6 table rows:
+  `agent_patient_pair_counts.tsv=428`,
+  `relation_triple_counts.tsv=233`,
+  `object_counts.tsv=504`.
+- MD report:
+  `outputs/case_reports_sentence100_0101_0200_acl_agent_current/caption_to_concept_cases_0101_0200_acl_agent_current.md`
+
+R16.3 audit:
+
+- R16.3 edges: 7 total.
+- R16.3 labels: `agent=7`.
+- R16.1 edges remained 11 after the VBG gate.
+- R16.1 edges whose source agent came from R16.3: 0.
+- Event-role rule counts:
+  - R16: 247
+  - R16.1: 11
+  - R16.2: 1
+  - R16.3: 7
+  - R17: 180
+  - R17.1: 40
+
+Sample R16.3 edges:
+
+- `holding -> supports`
+- `marking -> line`
+- `wearing -> man`
+- `carrying -> woman`
+- `showing -> sign`
+- `reading -> sign`
+- `wearing -> man`
+
+Residual risk:
+
+- R16.3 still inherits existing parser/action quality. If the parser labels a
+  gerund-like modifier as `acl/VBG` where the head is not a semantic agent, the
+  rule can still add a questionable agent.
+- VBN passive/adjectival false positives observed in the first run were removed
+  by the VBG gate.
+- `relcl` relative-pronoun cases remain intentionally unresolved.
+
+## 2026-07-12: Tag-list Segment Extraction Tests
+
+Purpose:
+
+- Accept the R1.1 tag-list route change and the Stage 3/4 tag-list object,
+  attribute, and quantity branch.
+- Verify tag-list rows no longer depend on `tag_list_deferred` skip semantics.
+- Verify tag-list Stage 4 does not enter the sentence action/relation path.
+
+Validation notes:
+
+- A direct `.\scripts\run_python.ps1 -m compileall src scripts tests` attempt
+  failed with `PermissionError` while writing repo-local `__pycache__` files.
+  This is the known pycache write issue, not evidence of a syntax error.
+- Syntax validation was repeated with `ast.parse`, which does not write
+  `__pycache__`.
+
+Commands:
+
+- `.\scripts\run_python.ps1 -c "import ast, pathlib; files=['src/gpic_concepts_v1/schema.py','src/gpic_concepts_v1/stage1.py','src/gpic_concepts_v1/stage1_loader.py','src/gpic_concepts_v1/stage3_annotate.py','src/gpic_concepts_v1/stage4_extract_raw.py','scripts/run_stage1_records.py','scripts/run_stage3_annotate.py','tests/test_schema.py','tests/test_stage1.py','tests/test_stage1_loader.py','tests/test_stage3_annotate.py','tests/test_stage4_extract_raw.py']; [ast.parse(pathlib.Path(f).read_text(encoding='utf-8')) for f in files]; print('ast ok')"`
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_schema.py`
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_stage1.py`
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_stage1_loader.py`
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_stage4_extract_raw.py -k tag_list`
+- `.\scripts\run_tests.ps1 --timeout-seconds 240 discover -s tests -p test_stage3_annotate.py -k tag_list`
+- `.\scripts\run_tests.ps1 --timeout-seconds 240 discover -s tests -p test_stage3_annotate.py`
+- `.\scripts\run_tests.ps1 --timeout-seconds 240 discover -s tests -p test_stage4_extract_raw.py`
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_stage2_preprocess.py -k tag_list`
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_stage1*.py`
+- `git diff --check`
+
+Results:
+
+- AST parse: `ast ok`.
+- `test_schema.py`: 7 passed.
+- `test_stage1.py`: 9 passed.
+- `test_stage1_loader.py`: 2 passed.
+- Stage 4 tag-list focused test: 1 passed.
+- Stage 3 tag-list focused tests: 3 passed.
+- Full `test_stage3_annotate.py`: 7 passed.
+- Full `test_stage4_extract_raw.py`: 48 passed.
+- Stage 2 tag-list boundary test: 1 passed.
+- Combined Stage 1 pattern: 11 passed.
+- `git diff --check`: only existing CRLF/LF warnings for
+  `docs/rule_change_review_log_v1.md` and `scripts/build_caption_concept_md.py`.
+
+Residual risk:
+
+- Tag-list action, event-role, and relation extraction remain intentionally
+  unimplemented.
+- Tag-list cross-segment grouping remains intentionally unimplemented.
+- Only object-bearing segment noun chunks and single-token floating
+  attribute-like segments are extracted in this first tag-list branch.
+
+## 2026-07-12: GPIC Object Inventory Prior Reuse Tests
+
+Purpose:
+
+- Verify that already resolved GPIC observed object inventory rows can be reused by exact `span_key` when building a new object inventory batch.
+- Prevent tag-list object inventory builds from re-queuing sentence-batch object spans that already have selected synset/canonical/parent evidence.
+
+Commands:
+
+- `.\scripts\run_python.ps1 -c "import ast, pathlib; ast.parse(pathlib.Path('scripts/build_gpic_observed_object_inventory.py').read_text(encoding='utf-8')); ast.parse(pathlib.Path('tests/test_build_gpic_observed_object_inventory.py').read_text(encoding='utf-8')); print('ast_ok')"`
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_build_gpic_observed_object_inventory.py`
+
+Results:
+
+- AST parse: `ast_ok`.
+- `test_build_gpic_observed_object_inventory.py`: 3 passed.
+
+Residual risk:
+
+- Prior reuse is exact `span_key` only. Surface variants still need normal lookup/manual resolution.
+- Reused prior rows can carry a stale prior mistake; `decision_basis` records the reuse path for audit.
+
+Tag-list prior-reuse verification:
+
+- Command:
+  - `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 -- scripts\build_gpic_observed_object_inventory.py --input outputs\tag_list_current_run\stage3_tag_list\stage3_records.jsonl --prior-object-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv --output outputs\tag_list_current_run\inventory_prior\gpic_tag_list_object_inventory.tsv --summary outputs\tag_list_current_run\inventory_prior\gpic_tag_list_object_inventory_summary.json`
+- Result:
+  - inventory_rows: 85
+  - prior_reusable_rows: 567
+  - prior_reused_rows: 37
+  - decision_status_counts: `chosen=69`, `excluded=1`, `needs_manual=15`
+  - previous no-prior tag-list run had `needs_manual=25`
+- Old needs_manual rows resolved by prior reuse:
+  - `book`, `text`, `background`, `court`, `forest`, `jersey`, `night`, `person`, `sign`, `waves`
+- Remaining needs_manual subset:
+  - `outputs/tag_list_current_run/inventory_prior/gpic_tag_list_object_inventory_needs_manual.tsv`
+
+## 2026-07-12: Tag-list Attribute Inventory Prior Reuse Correction
+
+Purpose:
+
+- Correct the tag-list attribute inventory build so it follows the same
+  prior-inventory reuse workflow as object inventory.
+- Prevent tag-list attribute rows from being rebuilt in isolation when a
+  resolved/canonical sentence attribute inventory already exists for the same
+  `span_key`.
+- Preserve prior canonical fields from the reused attribute inventory instead
+  of dropping them during the observed-inventory rebuild.
+
+Code change:
+
+- `scripts/build_gpic_observed_attribute_inventory.py` now:
+  - reuses final prior rows with `decision_status=chosen` or `excluded`
+  - preserves non-manual prior canonical fields
+  - reports `prior_reused_rows`, `prior_selected_synset_reused_rows`, and
+    `prior_canonical_reused_rows` in the summary
+
+Commands:
+
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_build_gpic_observed_attribute_inventory.py`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 scripts\build_gpic_observed_attribute_inventory.py --input outputs\tag_list_current_run\stage3_tag_list\stage3_records.jsonl --object-inventory outputs\tag_list_current_run\inventory_prior\gpic_tag_list_object_inventory_manual_resolved_parent_canonical.tsv --attribute-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_attribute_inventory_current_manual_resolved_canonical.tsv --output outputs\tag_list_current_run\inventory_prior\gpic_tag_list_attribute_inventory.tsv --summary outputs\tag_list_current_run\inventory_prior\gpic_tag_list_attribute_inventory_summary.json`
+
+Results:
+
+- Attribute inventory tests: 8 passed.
+- Tag-list attribute inventory rows: 28.
+- Prior reused rows: 16.
+- Prior selected-synset reused rows: 16.
+- Prior canonical reused rows: 16.
+- Decision status counts after prior reuse:
+  - `chosen=18`
+  - `needs_manual=10`
+- Synset/manual gate status:
+  - `blocked_attribute_synset_inventory_before_canonical`
+  - blockers: `pending_manual_decision_status=10`
+- Needs-manual subset:
+  - `outputs/tag_list_current_run/inventory_prior/gpic_tag_list_attribute_inventory_needs_manual.tsv`
+
+Interpretation:
+
+- The previous tag-list attribute inventory build ignored the available
+  sentence attribute prior. That was not a formal pipeline result.
+- The corrected build now uses the same cross-caption-shape inventory namespace
+  as object inventory.
+- Canonical missing rows are not part of this current synset/manual gate.
+  Canonical checks start only after the 10 `needs_manual` attribute rows are
+  resolved and the offline canonical inventory build is run.
+- Existing files under `outputs/tag_list_current_run/manual_resolved` include
+  Stage 5/6 preview output created before attribute manual/canonical completion.
+  They are not formal tag-list caption-to-concept output and are marked with
+  `PREVIEW_NOT_FORMAL.md`.
+
+## 2026-07-12: Tag-list Attribute Manual Resolution And Formal Output
+
+Purpose:
+
+- Apply the user-provided 10-row tag-list attribute manual resolution file.
+- Follow the same sentence workflow order:
+  needs-manual resolution, canonical enrichment, Stage 5, Stage 6.
+- Replace the earlier preview-only Stage 5/6 result with a formal output
+  folder that passes the attribute inventory gate.
+
+Inputs:
+
+- `outputs/tag_list_current_run/inventory_prior/gpic_tag_list_attribute_inventory.tsv`
+- `C:\Users\rlath\Downloads\gpic_tag_list_attribute_inventory_resolved.tsv`
+- `C:\Users\rlath\Downloads\gpic_tag_list_attribute_inventory_manual_decisions.tsv`
+
+Commands:
+
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 scripts\apply_attribute_manual_resolution.py --full-inventory outputs\tag_list_current_run\inventory_prior\gpic_tag_list_attribute_inventory.tsv --resolved-subset C:\Users\rlath\Downloads\gpic_tag_list_attribute_inventory_resolved.tsv --manual-decisions C:\Users\rlath\Downloads\gpic_tag_list_attribute_inventory_manual_decisions.tsv --output outputs\tag_list_current_run\inventory_prior\gpic_tag_list_attribute_inventory_manual_resolved.tsv --resolved-copy outputs\tag_list_current_run\inventory_prior\gpic_tag_list_attribute_inventory_manual_resolved_subset.tsv --manual-decisions-copy outputs\tag_list_current_run\inventory_prior\gpic_tag_list_attribute_inventory_manual_decisions.tsv --summary outputs\tag_list_current_run\inventory_prior\gpic_tag_list_attribute_inventory_manual_resolution_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 180 scripts\enrich_gpic_attribute_inventory_canonical.py --input outputs\tag_list_current_run\inventory_prior\gpic_tag_list_attribute_inventory_manual_resolved.tsv --output outputs\tag_list_current_run\inventory_prior\gpic_tag_list_attribute_inventory_manual_resolved_canonical.tsv --ambiguous-output outputs\tag_list_current_run\inventory_prior\gpic_tag_list_attribute_inventory_manual_resolved_canonical_ambiguous.tsv --summary outputs\tag_list_current_run\inventory_prior\gpic_tag_list_attribute_inventory_manual_resolved_canonical_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 scripts\export_attribute_stage5_lexicons.py --attribute-inventory outputs\tag_list_current_run\inventory_prior\gpic_tag_list_attribute_inventory_manual_resolved_canonical.tsv --output-dir outputs\tag_list_current_run\stage5_lexicons_attribute_manual_resolved --base-lexicon-dir resources\lexicons --summary outputs\tag_list_current_run\stage5_lexicons_attribute_manual_resolved_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 180 scripts\run_stage4_extract_raw.py --input outputs\tag_list_current_run\stage3_tag_list\stage3_records.jsonl --object-inventory outputs\tag_list_current_run\inventory_prior\gpic_tag_list_object_inventory_manual_resolved_parent_canonical.tsv --raw-mentions outputs\tag_list_current_run\formal_attribute_resolved\raw_mentions.jsonl --raw-edges outputs\tag_list_current_run\formal_attribute_resolved\raw_edges.jsonl --summary outputs\tag_list_current_run\formal_attribute_resolved\stage4_summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 180 scripts\run_stage5_canonicalize.py --raw-mentions outputs\tag_list_current_run\formal_attribute_resolved\raw_mentions.jsonl --raw-edges outputs\tag_list_current_run\formal_attribute_resolved\raw_edges.jsonl --lexicon-dir outputs\tag_list_current_run\stage5_lexicons_attribute_manual_resolved --canonical-mentions outputs\tag_list_current_run\formal_attribute_resolved\canonical_mentions.jsonl --canonical-edges outputs\tag_list_current_run\formal_attribute_resolved\canonical_edges.jsonl --summary outputs\tag_list_current_run\formal_attribute_resolved\stage5_summary.jsonl --attribute-inventory outputs\tag_list_current_run\inventory_prior\gpic_tag_list_attribute_inventory_manual_resolved_canonical.tsv`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 180 scripts\run_stage6_export_counts.py --canonical-mentions outputs\tag_list_current_run\formal_attribute_resolved\canonical_mentions.jsonl --canonical-edges outputs\tag_list_current_run\formal_attribute_resolved\canonical_edges.jsonl --output-dir outputs\tag_list_current_run\formal_attribute_resolved\stage6 --summary outputs\tag_list_current_run\formal_attribute_resolved\stage6_summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 180 scripts\build_caption_concept_md.py --sentence-rows outputs\tag_list_current_run\stage1\tag_rows.jsonl --stage3-records outputs\tag_list_current_run\stage3_tag_list\stage3_records.jsonl --canonical-mentions outputs\tag_list_current_run\formal_attribute_resolved\canonical_mentions.jsonl --canonical-edges outputs\tag_list_current_run\formal_attribute_resolved\canonical_edges.jsonl --facts outputs\tag_list_current_run\formal_attribute_resolved\stage6\facts.jsonl --output outputs\tag_list_current_run\formal_attribute_resolved\caption_to_concept_tag_list_formal_attribute_resolved.md --start 0 --limit 21 --max-object-pairs-per-caption 40`
+
+Results:
+
+- Manual overlay:
+  - full rows: 28
+  - overlaid rows: 10
+  - merged decision status counts: `chosen=28`
+- Attribute canonical enrichment:
+  - rows: 28
+  - canonical selected rows: 28
+  - canonical ambiguous rows: 0
+  - selected synset missing rows: 0
+- Stage 5 lexicon export:
+  - attribute synonym rows: 28
+  - attribute type rows: 0
+- Formal Stage 4:
+  - raw mentions: 137
+  - raw edges: 37
+  - edge type counts: `has_attribute=37`
+- Formal Stage 5:
+  - `formal_attribute_inventory_gate=True`
+  - canonical mentions: 137
+  - canonical edges: 37
+  - canonical source counts:
+    `gpic_observed_inventory=93`, `lexicon=37`, `raw_fallback=7`
+- Formal Stage 6:
+  - fact total: 611
+  - fact type counts:
+    `entity_exists=95`, `attribute_exists=42`, `has_attribute=37`,
+    `object_parent=97`, `object_pair_in_caption=340`
+- Markdown report:
+  - `outputs/tag_list_current_run/formal_attribute_resolved/caption_to_concept_tag_list_formal_attribute_resolved.md`
+
+Interpretation:
+
+- The tag-list attribute branch now follows the sentence workflow order.
+- The previous preview Stage 5/6 output remains explicitly marked as preview
+  and should not be used as formal output.
+
+## 2026-07-12: Combined Sentence And Tag-list Report
+
+Purpose:
+
+- Present the existing sentence 100-caption formal output and the tag-list
+  21-caption formal output in one report instead of keeping them as separate
+  user-facing artifacts.
+- Recompute Stage 6 counts over the combined canonical mention/edge JSONL
+  rather than concatenating old count tables.
+
+Inputs:
+
+- Sentence rows:
+  `outputs/case_reports_sentence100_0101_0200_current/sentence_rows_0101_0200.jsonl`
+- Sentence canonical output:
+  `outputs/case_reports_sentence100_0101_0200_acl_agent_current/canonical_mentions.jsonl`
+  and `canonical_edges.jsonl`
+- Tag-list rows:
+  `outputs/tag_list_current_run/stage1/tag_rows.jsonl`
+- Tag-list canonical output:
+  `outputs/tag_list_current_run/formal_attribute_resolved/canonical_mentions.jsonl`
+  and `canonical_edges.jsonl`
+
+Generated combined inputs:
+
+- `outputs/combined_sentence100_taglist21_current/caption_rows.jsonl`
+- `outputs/combined_sentence100_taglist21_current/stage3_records.jsonl`
+- `outputs/combined_sentence100_taglist21_current/canonical_mentions.jsonl`
+- `outputs/combined_sentence100_taglist21_current/canonical_edges.jsonl`
+
+Commands:
+
+- `.\scripts\run_python.ps1 -c "... combine sentence/tag-list JSONL files ..."`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\run_stage6_export_counts.py --canonical-mentions outputs\combined_sentence100_taglist21_current\canonical_mentions.jsonl --canonical-edges outputs\combined_sentence100_taglist21_current\canonical_edges.jsonl --output-dir outputs\combined_sentence100_taglist21_current\stage6 --summary outputs\combined_sentence100_taglist21_current\stage6_summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\build_caption_concept_md.py --sentence-rows outputs\combined_sentence100_taglist21_current\caption_rows.jsonl --stage3-records outputs\combined_sentence100_taglist21_current\stage3_records.jsonl --canonical-mentions outputs\combined_sentence100_taglist21_current\canonical_mentions.jsonl --canonical-edges outputs\combined_sentence100_taglist21_current\canonical_edges.jsonl --facts outputs\combined_sentence100_taglist21_current\stage6\facts.jsonl --output outputs\combined_sentence100_taglist21_current\caption_to_concept_cases_sentence100_taglist21_combined.md --start 0 --limit 121 --max-object-pairs-per-caption 40`
+
+Results:
+
+- Combined caption rows: 121.
+- Caption type counts:
+  - `short=47`
+  - `medium=38`
+  - `long=15`
+  - `tag=21`
+- Stage 3 records: 121.
+- Canonical mentions: 2392.
+- Canonical edges: 1446.
+- Combined Stage 6 facts: 23869.
+- Combined Stage 6 fact type counts:
+  - `entity_exists=1250`
+  - `attribute_exists=673`
+  - `action_event=432`
+  - `event_role=486`
+  - `relation=247`
+  - `has_attribute=668`
+  - `has_quantity=37`
+  - `quantity_exists=37`
+  - `object_parent=1207`
+  - `relation_component=78`
+  - `ambiguous_relation_candidate=4`
+  - `object_pair_in_caption=18750`
+- Combined report:
+  - `outputs/combined_sentence100_taglist21_current/caption_to_concept_cases_sentence100_taglist21_combined.md`
+
+Interpretation:
+
+- This report combines already-formal sentence and tag-list outputs into one
+  user-facing report.
+- No new extraction rule was applied during the merge.
+- Stage 6 count tables were recomputed from the combined canonical JSONL files,
+  so count tables are not stale concatenations.
+
+## 2026-07-12: Local Repo Copy And Copied `.mamba` Smoke Check
+
+Purpose:
+
+- Decide whether to keep the copied `.mamba` environment after moving the repo
+  from the OneDrive-backed junction path to a real local Documents\Codex path.
+- Verify that the new path does not keep reparse/junction state and that
+  `scripts\run_python.ps1` uses the copied environment.
+
+Paths:
+
+- Source workspace path:
+  `C:\Users\rlath\Documents\Codex\gpic-explainable-link`
+- New local workspace path:
+  `C:\Users\rlath\Documents\Codex\gpic-caption-concepts-explainable`
+- Copy log:
+  `C:\Users\rlath\Documents\Codex\gpic_repo_copy_20260712.log`
+
+Commands:
+
+- `robocopy $src $dst /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /MT:16 /NP /TEE /LOG:$log`
+- `Get-ChildItem -Force -Recurse -Attributes ReparsePoint -LiteralPath $dst`
+- `.\scripts\run_python.ps1 -c "import sys, os; print(sys.executable); print(os.getcwd())"`
+- `.\scripts\run_python.ps1 scripts\check_runtime_env.py --spacy-model en_core_web_trf --require-spacy-gpu`
+- `.\scripts\run_python.ps1 -c "from pathlib import Path; import nltk, wn; from nltk.corpus import wordnet as wn30; from wn.morphy import Morphy; root=Path.cwd(); wn.config.data_directory=str(root/'resources'/'wn_data'); nltk.data.path.insert(0, str(root/'resources'/'nltk_data')); oewn=wn.Wordnet('oewn:2025+', expand=''); print(oewn.synsets('dog', pos='n')[0].id); print(Morphy(oewn)('dogs', pos='n')); print(wn30.synsets('dog', pos=wn30.NOUN)[0].name())"`
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_build_gpic_observed_object_inventory.py`
+- `.\scripts\run_python.ps1 -m compileall scripts src`
+- `git diff --check`
+
+Results:
+
+- Robocopy summary: copied 3,548 dirs, 37,672 files, 5.635 GB, failed 0.
+- New local workspace reparse count: 0.
+- Initial copied wrapper check showed `run_python.ps1` still preferred the old
+  `gpic-explainable-link` fallback when that path existed.
+- `scripts\run_python.ps1` was changed so the current repo root is used when it
+  already contains `.mamba\env\python.exe` and `src`; legacy ASCII fallback is
+  used only when the current root lacks a usable environment.
+- After the wrapper fix, `run_python.ps1` printed:
+  `C:\Users\rlath\Documents\Codex\gpic-caption-concepts-explainable\.mamba\env\python.exe`
+- Runtime smoke:
+  - Python 3.11.15 from copied `.mamba`
+  - spaCy 3.8.14
+  - `en_core_web_trf` loaded with pipes
+    `transformer, tagger, parser, attribute_ruler, lemmatizer`
+  - PyTorch CUDA available: true
+  - CuPy installed and CUDA runtime device count: 1
+  - GPU reported by runtime: NVIDIA GeForce RTX 5080 Laptop GPU
+  - OEWN `oewn:2025+` lookup worked for `dog`
+  - OEWN Morphy worked for `dogs -> dog`
+  - NLTK WordNet 3.0 lookup worked for `dog.n.01`
+- A first `check_runtime_env.py --require-spacy-gpu` run returned a transient
+  `PermissionError` during model load, but direct GPU spaCy load and a repeated
+  `check_runtime_env.py --require-spacy-gpu` run both succeeded.
+- `test_build_gpic_observed_object_inventory.py`: 3 passed.
+- `compileall scripts src`: succeeded.
+- `git diff --check`: only existing CRLF/LF warnings; no whitespace errors.
+
+Interpretation:
+
+- The copied `.mamba` environment is usable from the new local repo path.
+- There is no current need to create a fresh environment as the next step.
+
+Residual risk:
+
+- The transient first spaCy GPU model-load `PermissionError` was not root-caused.
+  If it reappears, investigate GPU/CuPy/spaCy load ordering or Windows file
+  access before recreating the environment.
+
+## 2026-07-12: Formal Mixed Sentence/Tag-list Pipeline Runner
+
+Purpose:
+
+- Replace the manual post-hoc sentence/tag-list merge with a formal runner that
+  produces one shared Stage 6 count set.
+- Preserve the existing shape-specific extraction rules: sentence rows still
+  use the sentence Stage 3 path, and tag-list rows still use the tag-list
+  segment Stage 3 path.
+
+Changed files:
+
+- `scripts/run_mixed_caption_pipeline.py`
+- `tests/test_mixed_caption_pipeline.py`
+- `docs/rules_v1.md`
+
+Implementation:
+
+- Stage 1 writes `caption_records.jsonl`, `sentence_rows.jsonl`,
+  `tag_rows.jsonl`, and `caption_rows_mixed.jsonl`.
+- Stage 3 annotates sentence and tag-list rows through their existing
+  shape-specific paths, then combines the resulting Stage 3 records back into
+  original `caption_records` order.
+- Stage 4, Stage 5, and Stage 6 run once over the combined Stage 3 / raw /
+  canonical files.
+- Stage 6 count tables are recomputed from combined canonical mentions/edges;
+  the runner does not append old count TSV files.
+
+Verification:
+
+- `.\scripts\run_python.ps1 -m compileall scripts\run_mixed_caption_pipeline.py tests\test_mixed_caption_pipeline.py`
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_mixed_caption_pipeline.py`
+
+Results:
+
+- `compileall`: succeeded.
+- `test_mixed_caption_pipeline.py`: 2 passed in 5.359 seconds.
+
+Interpretation:
+
+- The new runner has a tested ordering guard for combining sentence/tag-list
+  rows and Stage 3 records.
+- This is an execution wrapper only; it does not add a new extraction,
+  canonicalization, or count rule.
+
+## 2026-07-12: Front 1k Object Manual Resolution Applied
+
+Purpose:
+
+- Apply the user-provided 1k object manual feedback to the mixed-runner object
+  inventory.
+- Keep canonical selection owned by the pipeline, not by the feedback sheet.
+
+Inputs:
+
+- `C:\Users\rlath\Downloads\gpic_observed_object_inventory_manual_processed_synset_rule.tsv`
+- `outputs/front1000_mixed_current/inventory/gpic_observed_object_inventory.tsv`
+
+Changed files:
+
+- `scripts/apply_object_manual_resolution.py`
+- `tests/test_apply_object_manual_resolution.py`
+
+Implementation:
+
+- Added an object manual overlay script matching the attribute/action overlay
+  pattern.
+- The feedback file uses `decision_status=accepted`; the script normalizes that
+  to pipeline `decision_status=chosen`.
+- Canonical columns from the feedback file are ignored/cleared. Object canonical
+  is recalculated by `enrich_gpic_inventory_canonical.py`.
+- Extra feedback/provenance columns are preserved in the output TSV.
+
+Commands:
+
+- `.\scripts\run_python.ps1 -m compileall scripts\apply_object_manual_resolution.py tests\test_apply_object_manual_resolution.py`
+- `.\scripts\run_tests.ps1 --timeout-seconds 60 discover -s tests -p test_apply_object_manual_resolution.py`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 scripts\apply_object_manual_resolution.py --full-inventory outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory.tsv --resolved-subset C:\Users\rlath\Downloads\gpic_observed_object_inventory_manual_processed_synset_rule.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved.tsv --resolved-copy outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_processed_synset_rule_normalized.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolution_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 180 scripts\enrich_gpic_inventory_parents.py --input outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parents.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parents_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\enrich_gpic_inventory_canonical.py --input outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parents.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv --ngram-evidence resources\source_labels\google_ngram_canonical_frequency_evidence.tsv --ambiguous-output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parent_canonical_ambiguous.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parent_canonical_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\build_gpic_observed_attribute_inventory.py --input outputs\front1000_mixed_current\stage3\stage3_records.jsonl --object-inventory outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv --attribute-inventory outputs\front1000_mixed_current\prior\gpic_observed_attribute_inventory_prior_merged.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_summary.json`
+
+Results:
+
+- `compileall`: failed with `PermissionError` writing `__pycache__` `.pyc`
+  files. This was not used as the formal verification signal.
+- `test_apply_object_manual_resolution.py`: 2 passed in 0.040 seconds.
+- Object manual overlay:
+  - full rows: 1788
+  - overlaid rows: 440
+  - original status counts: `chosen=1223`, `excluded=125`,
+    `needs_manual=440`
+  - merged status counts: `chosen=1663`, `excluded=125`
+- Object parent enrichment:
+  - parent filled rows: 1663
+  - selected synset missing rows: 125
+  - parent lookup errors: 0
+- Object canonical enrichment:
+  - canonical selected rows: 1663
+  - canonical ambiguous rows: 0
+  - selected synset missing rows: 125
+- Attribute inventory for the same 1k run:
+  - inventory rows: 771
+  - status counts: `chosen=450`, `needs_manual=321`
+  - needs-manual subset written to
+    `outputs/front1000_mixed_current/inventory/gpic_observed_attribute_inventory_needs_manual.tsv`
+
+Interpretation:
+
+- The 1k object inventory is now resolved through parent and canonical.
+- The next formal blocker is the 1k attribute inventory `needs_manual=321`.
+
+## 2026-07-12: Front 1k Attribute Manual Resolution Applied
+
+Purpose:
+
+- Apply the user-provided 1k attribute manual synset feedback.
+- Keep attribute canonical selection owned by the pipeline, not by the feedback
+  sheet.
+
+Inputs:
+
+- `C:\Users\rlath\Downloads\gpic_observed_attribute_inventory_manual_processed_synset_rule.tsv`
+- `outputs/front1000_mixed_current/inventory/gpic_observed_attribute_inventory.tsv`
+
+Changed files:
+
+- `scripts/apply_attribute_manual_resolution.py`
+- `tests/test_apply_attribute_manual_resolution.py`
+
+Implementation:
+
+- `apply_attribute_manual_resolution.py` now normalizes feedback
+  `decision_status=accepted` to pipeline `decision_status=chosen`.
+- Extra feedback/provenance columns are preserved in the merged inventory.
+- Canonical columns from the feedback file are still cleared before merge, so
+  `enrich_gpic_attribute_inventory_canonical.py` remains the only canonical
+  decision step.
+
+Commands:
+
+- `.\scripts\run_tests.ps1 --timeout-seconds 60 discover -s tests -p test_apply_attribute_manual_resolution.py`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 scripts\apply_attribute_manual_resolution.py --full-inventory outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory.tsv --resolved-subset C:\Users\rlath\Downloads\gpic_observed_attribute_inventory_manual_processed_synset_rule.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_resolved.tsv --resolved-copy outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_processed_synset_rule_normalized.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_resolution_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 scripts\enrich_gpic_attribute_inventory_canonical.py --input outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_resolved.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_resolved_canonical.tsv --ambiguous-output outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_resolved_canonical_ambiguous.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_resolved_canonical_summary.json`
+
+Results:
+
+- `test_apply_attribute_manual_resolution.py`: 2 passed in 0.120 seconds.
+- Attribute manual overlay:
+  - full rows: 771
+  - overlaid rows: 321
+  - original status counts: `chosen=450`, `needs_manual=321`
+  - merged status counts: `chosen=771`
+  - selected synset rows: 692
+- Attribute canonical enrichment:
+  - canonical selected rows: 688
+  - selected synset missing rows: 79
+  - canonical ambiguous rows: 4
+  - ambiguous output:
+    `outputs/front1000_mixed_current/inventory/gpic_observed_attribute_inventory_manual_resolved_canonical_ambiguous.tsv`
+
+Canonical blockers:
+
+- `E`
+- `N`
+- `S`
+- `sautéed`
+
+Interpretation:
+
+- The 1k attribute synset inventory is resolved.
+- The next formal blocker is attribute canonical ambiguity for 4 rows.
+- Stage 4/5/6 must not run for this 1k batch until those 4 canonical rows are
+  resolved.
+
+## 2026-07-12 - Front 1k Object Corrected Manual Overlay
+
+Purpose:
+
+- Re-apply the corrected object manual feedback after the earlier joined-variant
+  false positives such as `black shirt`, `blue jacket`, and `white cap`.
+- Preserve the rule that a manual surface/head correction must be checked
+  against OEWN again before later stages.
+
+Inputs:
+
+- `C:\Users\rlath\Downloads\gpic_observed_object_inventory_manual_resolved_corrected.tsv`
+- `outputs/front1000_mixed_current/inventory/gpic_observed_object_inventory.tsv`
+
+Changed files:
+
+- `scripts/apply_object_manual_resolution.py`
+- `tests/test_apply_object_manual_resolution.py`
+
+Implementation:
+
+- `apply_object_manual_resolution.py` now detects corrected manual rows such as
+  `manual_resolution_type=canonical_head_no_selected_synset`.
+- For those rows, it runs OEWN lookup on the corrected `selected_query` instead
+  of silently accepting a blank `selected_oewn_synset`.
+- If the corrected head query still cannot be auto-selected safely, the row is
+  kept as `needs_manual`.
+
+Commands:
+
+- `.\scripts\run_tests.ps1 --timeout-seconds 60 discover -s tests -p test_apply_object_manual_resolution.py`
+- `.\scripts\run_python.ps1 -m compileall scripts\apply_object_manual_resolution.py tests\test_apply_object_manual_resolution.py`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 -- scripts\apply_object_manual_resolution.py --full-inventory outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory.tsv --resolved-subset C:\Users\rlath\Downloads\gpic_observed_object_inventory_manual_resolved_corrected.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved.tsv --resolved-copy outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_corrected_normalized.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolution_summary.json`
+
+Results:
+
+- `test_apply_object_manual_resolution.py`: 4 passed in 0.090 seconds.
+- Object manual overlay:
+  - full rows: 1788
+  - overlaid rows: 440
+  - head relookup rows: 16
+  - head relookup rows still needing manual: 2
+  - merged status counts: `chosen=1661`, `excluded=125`, `needs_manual=2`
+- Remaining object manual output:
+  `outputs/front1000_mixed_current/inventory/gpic_observed_object_inventory_corrected_remaining_needs_manual.tsv`
+
+Remaining blockers:
+
+- `round table` -> `table`: OEWN auto-selected `noun.group`, still
+  conditional/manual.
+- `star sign` -> `sign`: OEWN auto-selected `noun.communication`, still
+  conditional/manual.
+
+Interpretation:
+
+- Joined false positives such as `black shirt`, `blue jacket`, and `white cap`
+  are no longer accepted as `blackshirt`, `bluejacket`, or `whitecap`.
+- Parent/canonical enrichment and Stage 4+ must wait until the two remaining
+  object manual rows are resolved.
+
+## 2026-07-12 - Previous Object Inventory Joined/Head Audit
+
+Purpose:
+
+- Check whether the same joined-variant/head-correction mistake existed in
+  earlier 20-caption, 100-caption, or tag-list object inventories.
+
+Files checked:
+
+- `outputs/case_reports_sentence20_current/gpic_observed_object_inventory_redecided_from_manual_review.tsv`
+- `outputs/case_reports_sentence100_0101_0200_current/gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv`
+- `outputs/tag_list_current_run/inventory_prior/gpic_tag_list_object_inventory_manual_resolved_parent_canonical.tsv`
+- `outputs/tag_list_current_run/inventory/gpic_tag_list_object_inventory.tsv`
+
+Audit criteria:
+
+- Final/chosen rows with `selected_lookup_case` containing `joined_variant`.
+- Rows whose decision reason mentions joined/head/surface mismatch correction.
+- Final rows where a corrected surface/head has no selected synset.
+
+Findings:
+
+- 20-caption inventory:
+  - `seed pods -> seedpod`: likely legitimate lexicalized joined/Morphy case.
+- Tag-list inventory:
+  - `street light -> streetlight`: likely legitimate lexicalized MWE.
+  - `wine glasses -> wineglass`: likely legitimate lexicalized/Morphy case.
+- 100-caption inventory:
+  - `court house -> courthouse`: likely legitimate lexicalized MWE.
+  - `black cap -> cap`: selected synset ID is the cap artifact sense; metadata
+    still shows stale `selected_lookup_case=joined_variant` /
+    `selected_query=blackcap`.
+  - `long legs -> leg`: selected synset ID is the body-part `leg` sense;
+    metadata still has stale joined/head evidence.
+  - `white feathers -> feather`: selected synset ID is `feather`; this follows
+    the head-correction rule.
+  - `white line -> line`: selected synset ID is the shape `line` sense; review
+    if the intended object policy should keep line-like shapes.
+  - `black top -> top`: selected synset ID is `top`, but OEWN definition is
+    "platform surrounding the head of a lower mast"; this looks like a real
+    remaining manual/sense issue, not just metadata.
+
+Interpretation:
+
+- The same severe `blackshirt`/`bluejacket`/`whitecap` false-positive pattern is
+  not broadly present in the earlier tag-list or 20-caption outputs.
+- The 100-caption output has one likely semantic object issue (`black top`) and
+  several stale-provenance rows where the selected synset is already the head
+  sense but `selected_query`/`selected_lookup_case` still reflect the old joined
+  candidate.
+
+## 2026-07-12 - Reopened Ambiguous Previous Object Rows
+
+Purpose:
+
+- Reopen only the ambiguous/problematic rows found in the previous object
+  inventory audit.
+- Do not reopen lexicalized joined forms such as `street light -> streetlight`,
+  `wine glasses -> wineglass`, `court house -> courthouse`, or
+  `seed pods -> seedpod`.
+
+Changed files:
+
+- `scripts/reopen_inventory_rows.py`
+
+Updated inventory files:
+
+- `outputs/case_reports_sentence100_0101_0200_current/gpic_observed_object_inventory_manual_resolved.tsv`
+- `outputs/case_reports_sentence100_0101_0200_current/gpic_observed_object_inventory_manual_resolved_parents.tsv`
+- `outputs/case_reports_sentence100_0101_0200_current/gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv`
+
+Command:
+
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 60 -- scripts\reopen_inventory_rows.py --inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_object_inventory_manual_resolved.tsv --inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_object_inventory_manual_resolved_parents.tsv --inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv --decision "black top=reopened_after_joined_head_audit_selected_top_synset_is_mast_platform" --decision "white line=reopened_after_joined_head_audit_line_shape_policy_needs_manual" --audit-output outputs\case_reports_sentence100_0101_0200_current\gpic_observed_object_inventory_reopened_needs_manual.tsv --source 2026-07-12_joined_head_audit`
+
+Results:
+
+- Reopened rows:
+  - `black top`
+  - `white line`
+- Audit output:
+  `outputs/case_reports_sentence100_0101_0200_current/gpic_observed_object_inventory_reopened_needs_manual.tsv`
+- Final selected/query/canonical/parent fields were cleared on reopened rows.
+- Previous selected values were preserved in `previous_*` fields.
+- Readiness gate on
+  `gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv` now
+  reports exactly two blockers, both with
+  `blocker_reason=pending_manual_decision_status`.
+
+Interpretation:
+
+- The older 100-caption Stage 4+ outputs derived from this inventory should be
+  treated as stale until these two object rows are manually resolved and the
+  downstream stages are rerun.
+
+## 2026-07-12 - Final Object Manual Decisions For Reopened Rows
+
+Purpose:
+
+- Apply the final user decisions for the remaining corrected object rows.
+- Keep explicit no-synset head fallback valid only when the manual decision says
+  to remove a modifier and keep the head surface without a selected OEWN synset.
+
+Inputs:
+
+- `round table -> table`, `oewn-04386330-n`, physical furniture table sense.
+- `star sign -> sign`, `oewn-04224949-n`, physical signboard/artifact sense.
+- `black top -> top`, no selected synset; discard the `blacktop` asphalt sense.
+- `white line -> white line`, `oewn-13886392-n`, exact shape sense.
+
+Changed files:
+
+- `scripts/resolve_object_inventory_rows.py`
+- `src/gpic_concepts_v1/inventory_validation.py`
+- `scripts/enrich_gpic_inventory_canonical.py`
+- `tests/test_inventory_validation.py`
+- `tests/test_enrich_gpic_inventory_canonical.py`
+
+Implementation:
+
+- Added a small explicit manual-resolution path for no-synset head fallbacks.
+- `black top` can now remain `decision_status=chosen` with
+  `selected_query=top`, blank `selected_oewn_synset`, and
+  `canonical_surface=top`.
+- Canonical enrichment preserves that explicit fallback instead of clearing the
+  canonical surface as an unresolved no-synset row.
+- General unresolved/no-synset rows are still blocked or marked not applicable;
+  this path applies only to explicit manual head fallback rows.
+
+Commands:
+
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 -- scripts\resolve_object_inventory_rows.py --inventory outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved.tsv --decision "round table=>table=>oewn-04386330-n=>table=>manual_select_physical_table_furniture_sense" --decision "star sign=>sign=>oewn-04224949-n=>sign=>manual_select_physical_signboard_artifact_sense" --audit-output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_corrected_final_manual_decisions.tsv --source 2026-07-12_user_feedback`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 180 -- scripts\enrich_gpic_inventory_parents.py --input outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parents.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parents_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 -- scripts\enrich_gpic_inventory_canonical.py --input outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parents.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv --ngram-evidence resources\source_labels\google_ngram_canonical_frequency_evidence.tsv --ambiguous-output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parent_canonical_ambiguous.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parent_canonical_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 -- scripts\resolve_object_inventory_rows.py --inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_object_inventory_manual_resolved.tsv --inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_object_inventory_manual_resolved_parents.tsv --inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv --decision "black top=>top=>=>top=>manual_head_fallback_blacktop_synset_discarded" --decision "white line=>white line=>oewn-13886392-n=>white line=>manual_keep_exact_white_line_shape_synset" --audit-output outputs\case_reports_sentence100_0101_0200_current\gpic_observed_object_inventory_reopened_manual_resolved.tsv --source 2026-07-12_user_feedback`
+
+Results:
+
+- Front 1k object inventory:
+  - `round table`: chosen, `selected_query=table`,
+    `selected_oewn_synset=oewn-04386330-n`, `noun.artifact`,
+    `canonical_surface=table`.
+  - `star sign`: chosen, `selected_query=sign`,
+    `selected_oewn_synset=oewn-04224949-n`, `noun.artifact`,
+    `canonical_surface=sign`.
+  - Parent enrichment: `parent_filled_rows=1663`,
+    `selected_synset_missing_rows=125`, `parent_lookup_error_rows=0`.
+  - Canonical enrichment: `canonical_selected_rows=1663`,
+    `canonical_ambiguous_rows=0`, `selected_synset_missing_rows=125`.
+- Previous 100-caption object inventory:
+  - `black top`: chosen, `selected_query=top`, blank selected synset,
+    `canonical_surface=top`,
+    `manual_resolution_type=canonical_head_no_selected_synset`.
+  - `white line`: chosen, `selected_query=white line`,
+    `selected_oewn_synset=oewn-13886392-n`, `noun.shape`,
+    `canonical_surface=white line`.
+- Readiness checks:
+  - Front 1k parent/canonical inventory blockers: 0.
+  - Previous 100-caption parent/canonical inventory blockers: 0.
+
+Verification:
+
+- AST parse for changed Python files passed.
+- `test_inventory_validation.py`: 6 passed.
+- `test_enrich_gpic_inventory_canonical.py`: 5 passed.
+- `compileall` was attempted, but failed with the known `__pycache__`
+  `PermissionError` in this Windows/junction workspace. This was not treated as
+  a syntax failure because AST parse and targeted tests passed.
+
+Interpretation:
+
+- The front 1k object inventory is no longer blocked by `round table` or
+  `star sign`.
+- The previous 100-caption object inventory is no longer blocked by `black top`
+  or `white line`.
+- Downstream reruns should use these updated inventory files rather than the
+  stale pre-resolution outputs.
+
+## 2026-07-12 - Front 1k Attribute Canonical Reprocessing
+
+Purpose:
+
+- Reprocess the front 1k attribute inventory after the object correction pass.
+- Fix canonical ambiguity caused by treating `selected_query` as an observed
+  exact surface and by not applying the existing diacritic-folded canonical key
+  at the exact-surface tie-break step.
+
+Changed files:
+
+- `scripts/enrich_gpic_inventory_canonical.py`
+- `tests/test_enrich_gpic_inventory_canonical.py`
+- `docs/rules_v1.md`
+- `docs/rule_change_review_log_v1.md`
+
+Implementation:
+
+- Exact observed-surface tie breaking now uses actual observed caption surfaces
+  only: `observed_surface` and `example_surfaces`.
+- Lookup-only `selected_query` still helps candidate discovery, but it is no
+  longer treated as an observed exact surface.
+- If display exact surface does not choose one lemma, the canonical helper can
+  choose the unique selected-synset lemma whose diacritic-folded matching key
+  equals the raw observed surface key.
+
+Commands:
+
+- `.\scripts\run_python.ps1 -c "import ast, pathlib; files=['scripts/enrich_gpic_inventory_canonical.py','scripts/enrich_gpic_attribute_inventory_canonical.py','tests/test_enrich_gpic_inventory_canonical.py']; [ast.parse(pathlib.Path(f).read_text(encoding='utf-8'), filename=f) for f in files]; print('ast ok', len(files))"`
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_enrich_gpic_inventory_canonical.py`
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_enrich_gpic_attribute_inventory_canonical.py`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 -- scripts\apply_attribute_manual_resolution.py --full-inventory outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory.tsv --resolved-subset C:\Users\rlath\Downloads\gpic_observed_attribute_inventory_manual_processed_synset_rule.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_resolved.tsv --resolved-copy outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_processed_synset_rule_normalized.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_resolution_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 -- scripts\enrich_gpic_attribute_inventory_canonical.py --input outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_resolved.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_resolved_canonical.tsv --ngram-evidence resources\source_labels\google_ngram_canonical_frequency_evidence.tsv --ambiguous-output outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_resolved_canonical_ambiguous.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_resolved_canonical_summary.json`
+- `.\scripts\run_python.ps1 -c "from pathlib import Path; from scripts.run_stage5_canonicalize import _raise_if_attribute_inventory_not_ready; p=Path('outputs/front1000_mixed_current/inventory/gpic_observed_attribute_inventory_manual_resolved_canonical.tsv'); _raise_if_attribute_inventory_not_ready(p); print('attribute stage5 gate ok')"`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 -- scripts\export_attribute_stage5_lexicons.py --attribute-inventory outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_manual_resolved_canonical.tsv --output-dir outputs\front1000_mixed_current\lexicons --base-lexicon-dir resources\lexicons --summary outputs\front1000_mixed_current\inventory\attribute_stage5_lexicon_export_summary.json`
+
+Results:
+
+- AST parse passed: `ast ok 3`.
+- `test_enrich_gpic_inventory_canonical.py`: 7 passed.
+- `test_enrich_gpic_attribute_inventory_canonical.py`: 6 passed.
+- Manual overlay:
+  - full rows: 771
+  - original status counts: `chosen=450`, `needs_manual=321`
+  - merged status counts: `chosen=771`
+  - selected synset rows: 692
+- Canonical enrichment:
+  - rows: 771
+  - canonical selected rows: 692
+  - selected synset missing rows: 79
+  - canonical ambiguous rows: 0
+  - canonical lookup errors: 0
+  - `E`, `N`, and `S` now keep uppercase canonical surfaces.
+  - `sautéed` now canonicalizes to `sauteed` through the diacritic-folded
+    observed surface key.
+- Stage 5 attribute inventory gate: passed.
+- Stage 5 lexicon export:
+  - output dir: `outputs/front1000_mixed_current/lexicons`
+  - `attribute_synonym_rows=692`
+  - `chosen_synonym_rows_added=692`
+  - `attribute_type_rows=0`
+
+Interpretation:
+
+- The front 1k attribute inventory is now resolved through canonical enrichment.
+- The current blocker is no longer attribute canonical ambiguity.
+- The run has a Stage 5 lexicon bundle ready for the next formal pipeline step.
+
+## 2026-07-12 - Front 1k Attribute Rebuild After Object Corrections
+
+Purpose:
+
+- Rebuild the front 1k attribute inventory after corrected object decisions
+  changed consumed object spans and exposed additional modifiers.
+- Apply the final one-row manual attribute decision for `star`.
+- Produce a corrected-object Stage 5 attribute lexicon bundle without treating
+  the older pre-object-rebuild attribute lexicon as current.
+
+Manual decision:
+
+- `star`: select `oewn-13904301-n`, `noun.shape`; parent taxonomy label
+  `shape`.
+- The manual subset records this as an explicit user-approved decision, while
+  canonical surface is recomputed by the canonical enrichment script.
+
+Commands:
+
+- `.\scripts\run_python.ps1 -c "... write gpic_observed_attribute_inventory_rebuilt_after_object_star_manual.tsv ..."`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 -- scripts\apply_attribute_manual_resolution.py --full-inventory outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object.tsv --resolved-subset outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object_star_manual.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object_manual_resolved.tsv --resolved-copy outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object_star_manual_normalized.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object_manual_resolution_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 240 -- scripts\enrich_gpic_attribute_inventory_canonical.py --input outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object_manual_resolved.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object_manual_resolved_canonical.tsv --ngram-evidence resources\source_labels\google_ngram_canonical_frequency_evidence.tsv --ambiguous-output outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object_manual_resolved_canonical_ambiguous.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object_manual_resolved_canonical_summary.json`
+- `.\scripts\run_python.ps1 -c "from pathlib import Path; from scripts.run_stage5_canonicalize import _raise_if_attribute_inventory_not_ready; p=Path('outputs/front1000_mixed_current/inventory/gpic_observed_attribute_inventory_rebuilt_after_object_manual_resolved_canonical.tsv'); _raise_if_attribute_inventory_not_ready(p); print('attribute stage5 gate ok')"`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 -- scripts\export_attribute_stage5_lexicons.py --attribute-inventory outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object_manual_resolved_canonical.tsv --output-dir outputs\front1000_mixed_current\lexicons_after_object_rebuild --base-lexicon-dir resources\lexicons --summary outputs\front1000_mixed_current\inventory\attribute_stage5_lexicon_export_after_object_rebuild_summary.json`
+
+Results:
+
+- Rebuilt inventory before overlay:
+  - rows: 773
+  - original status counts: `chosen=772`, `needs_manual=1`
+  - only pending row: `star`
+- Manual overlay:
+  - overlaid rows: 1
+  - merged status counts: `chosen=773`
+  - selected synset rows: 694
+- Canonical enrichment:
+  - rows: 773
+  - canonical selected rows: 694
+  - selected synset missing rows: 79
+  - canonical ambiguous rows: 0
+  - canonical lookup errors: 0
+  - `star` canonical surface: `star`
+- Stage 5 attribute inventory gate: passed.
+- Stage 5 lexicon export:
+  - output dir: `outputs/front1000_mixed_current/lexicons_after_object_rebuild`
+  - `attribute_synonym_rows=694`
+  - `chosen_synonym_rows_added=694`
+  - `attribute_type_rows=0`
+
+Interpretation:
+
+- The corrected-object front 1k attribute inventory has no remaining manual or
+  canonical blockers.
+- Downstream formal runs that depend on the object-corrected attribute
+  inventory should use
+  `outputs/front1000_mixed_current/lexicons_after_object_rebuild`, not the older
+  `outputs/front1000_mixed_current/lexicons` bundle from the pre-rebuild
+  attribute inventory.
+
+## 2026-07-12 - Front 1k Preposition-MWE-Aware Action Inventory
+
+Purpose:
+
+- Continue from corrected-object/attribute Stage 3.5 into the pre-Stage4
+  action inventory preparation for the front 1k mixed caption run.
+- Apply active preposition MWE span detection before action candidate
+  generation, matching the Stage 4 R18.1/R15 ordering.
+- Reuse the latest resolved sentence-100 action canonical inventory where exact
+  span keys match, then queue only unresolved action decisions.
+
+Implementation correction:
+
+- `scripts/build_gpic_observed_action_inventory.py` first failed after the R15
+  helper signature changed to require `excluded_token_indices`.
+- The correct fix is not an empty set: the action inventory builder now detects
+  active preposition MWE spans first and passes their consumed token ids to
+  `_action_candidates_from_token_record()`.
+- This aligns the offline action inventory builder with the documented
+  Stage 4 ordering: preposition MWE span detection before phrasal action
+  candidate selection.
+
+Commands:
+
+- `.\scripts\run_python.ps1 -c "import ast, pathlib; path=pathlib.Path('scripts/build_gpic_observed_action_inventory.py'); ast.parse(path.read_text(encoding='utf-8'), filename=str(path)); print('ast ok')"`
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_build_gpic_observed_action_inventory.py"`
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_formal_inventory_gates.py"`
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_mixed_caption_pipeline.py"`
+- `.\scripts\run_python.ps1 -c "import ast, pathlib; files=['scripts/build_gpic_observed_action_inventory.py','scripts/run_stage4_extract_raw.py','scripts/run_mixed_caption_pipeline.py','tests/test_build_gpic_observed_action_inventory.py','tests/test_formal_inventory_gates.py','tests/test_mixed_caption_pipeline.py']; [ast.parse(pathlib.Path(f).read_text(encoding='utf-8'), filename=f) for f in files]; print('ast ok', len(files))"`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 300 -- scripts\build_gpic_observed_action_inventory.py --input outputs\front1000_mixed_current\stage3\stage3_records.jsonl --action-inventory outputs\case_reports_sentence100_0101_0200_current\gpic_observed_action_inventory_canonical.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory.tsv --needs-manual-output outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_needs_manual.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_summary.json`
+
+Results:
+
+- AST parse: passed for 6 files.
+- `test_build_gpic_observed_action_inventory.py`: 1 passed.
+- `test_formal_inventory_gates.py`: 9 passed.
+- `test_mixed_caption_pipeline.py`: 3 passed.
+- Action inventory:
+  - caption total: 1000
+  - verb token total: 2464
+  - preposition MWE matches before action candidate selection: 114
+  - preposition MWE consumed token ids before action candidate selection: 336
+  - inventory rows: 563
+  - decision status counts: `chosen=531`, `needs_manual=24`,
+    `raw_fallback=8`
+  - candidate type counts: `verb=474`, `verb_prep=73`, `verb_prt=15`,
+    `verb_prt_prep=1`
+  - needs-manual output:
+    `outputs/front1000_mixed_current/inventory/gpic_observed_action_inventory_needs_manual.tsv`
+
+Interpretation:
+
+- The front 1k run is now blocked at action manual resolution.
+- Formal Stage 4/5/6 should not run until the 24 action `needs_manual` rows are
+  resolved and action canonical enrichment/export is complete.
+
+## 2026-07-13 - Front 1k Action Manual Resolution To Stage 6
+
+Purpose:
+
+- Apply the user-provided action manual decision file for the current front 1k
+  mixed caption run.
+- Confirm the action manual gate and action canonical gate are clear.
+- Re-run formal Stage 4, Stage 5, and Stage 6 with the corrected action
+  inventory and action Stage 5 lexicon.
+
+Commands:
+
+- `.\scripts\run_tests.ps1 --timeout-seconds 120 discover -s tests -p "test_apply_action_manual_resolution.py"`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 -- scripts\apply_action_manual_resolution.py --full-inventory outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory.tsv --manual-decisions "C:\Users\rlath\Downloads\gpic_observed_action_inventory_manual_decisions(4).tsv" --output outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_manual_resolved.tsv --resolved-output outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_manual_resolved_subset.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_manual_resolution_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 180 -- scripts\enrich_gpic_action_inventory_canonical.py --input outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_manual_resolved.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_manual_resolved_canonical.tsv --ambiguous-output outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_manual_resolved_canonical_ambiguous.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_manual_resolved_canonical_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 -- scripts\export_attribute_stage5_lexicons.py --attribute-inventory outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object_manual_resolved_canonical.tsv --action-canonical-inventory outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_manual_resolved_canonical.tsv --output-dir outputs\front1000_mixed_current\lexicons_after_action_manual_resolved --base-lexicon-dir outputs\front1000_mixed_current\lexicons_after_object_rebuild --summary outputs\front1000_mixed_current\inventory\attribute_action_stage5_lexicon_export_after_action_manual_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 300 -- scripts\run_stage4_extract_raw.py --input outputs\front1000_mixed_current\stage3\stage3_records.jsonl --object-inventory outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv --action-inventory outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_manual_resolved.tsv --raw-mentions outputs\front1000_mixed_current\stage4_after_action_manual_resolved\raw_mentions.jsonl --raw-edges outputs\front1000_mixed_current\stage4_after_action_manual_resolved\raw_edges.jsonl --summary outputs\front1000_mixed_current\stage4_after_action_manual_resolved\summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 300 -- scripts\run_stage5_canonicalize.py --raw-mentions outputs\front1000_mixed_current\stage4_after_action_manual_resolved\raw_mentions.jsonl --raw-edges outputs\front1000_mixed_current\stage4_after_action_manual_resolved\raw_edges.jsonl --lexicon-dir outputs\front1000_mixed_current\lexicons_after_action_manual_resolved --attribute-inventory outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object_manual_resolved_canonical.tsv --canonical-mentions outputs\front1000_mixed_current\stage5_after_action_manual_resolved\canonical_mentions.jsonl --canonical-edges outputs\front1000_mixed_current\stage5_after_action_manual_resolved\canonical_edges.jsonl --summary outputs\front1000_mixed_current\stage5_after_action_manual_resolved\summary.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 300 -- scripts\run_stage6_export_counts.py --canonical-mentions outputs\front1000_mixed_current\stage5_after_action_manual_resolved\canonical_mentions.jsonl --canonical-edges outputs\front1000_mixed_current\stage5_after_action_manual_resolved\canonical_edges.jsonl --output-dir outputs\front1000_mixed_current\stage6_after_action_manual_resolved --summary outputs\front1000_mixed_current\stage6_after_action_manual_resolved\summary.jsonl`
+
+Results:
+
+- `test_apply_action_manual_resolution.py`: 3 passed.
+- Action manual overlay:
+  - full rows: 563
+  - overlaid rows: 19
+  - original status counts: `chosen=536`, `needs_manual=19`,
+    `raw_fallback=8`
+  - merged status counts: `chosen=555`, `raw_fallback=8`
+  - action inventory sidecar: `status=resolved`, `needs_manual_rows=0`,
+    `action_inventory_preposition_mwe_aware=true`
+- Action canonical enrichment:
+  - rows: 563
+  - canonical selected rows: 555
+  - raw fallback not-applicable rows: 8
+  - canonical ambiguous rows: 0
+  - canonical lookup errors: 0
+- Stage 5 lexicon export:
+  - output dir:
+    `outputs/front1000_mixed_current/lexicons_after_action_manual_resolved`
+  - action synonym rows added: 555
+  - action raw fallback rows skipped: 8
+  - attribute synonym rows: 694
+- Stage 4:
+  - total captions: 1000
+  - raw mentions: 14317
+  - raw edges: 8357
+  - mention type counts: `object=7619`, `attribute=4044`,
+    `action=2422`, `quantity=232`
+  - edge type counts: `has_attribute=3998`, `event_role=2745`,
+    `relation=1352`, `has_quantity=232`,
+    `ambiguous_relation_candidate=30`
+- Stage 5:
+  - canonical mentions: 14317
+  - canonical edges: 8357
+  - `formal_attribute_inventory_gate=true`
+  - canonical source counts: `gpic_observed_inventory=7059`,
+    `lexicon=6334`, `raw_fallback=924`
+- Stage 6:
+  - fact total: 87500
+  - action count rows: 359
+  - object count rows: 1474
+  - attribute count rows: 794
+  - relation triple rows: 1058
+  - ambiguous relation candidate rows: 9
+  - object co-occurrence pair rows: 39076
+
+Spot checks:
+
+- `shining` and `shines` count under canonical action `shine`.
+- `installed` counts under `install`.
+- `taped` counts under `tape`.
+- `sitting in`, `sits in`, and `sit in` count under `sit in`.
+
+Interpretation:
+
+- The current front 1k action manual blocker is clear.
+- The front 1k mixed caption run now has formal Stage 4/5/6 artifacts after
+  action manual resolution.
+
+## 2026-07-13 - Object/Attribute Surface-Changing Lookup Guard
+
+Purpose:
+
+- Remove automatic object/attribute prior reuse by `selected_query`.
+- Prevent observed exact surface and lemma/Morphy/normalization lookup from
+  silently choosing different synsets.
+- Rebuild the front-1000 object inventory far enough to identify new object
+  manual blockers before any new Stage 4/5/6 run.
+
+Commands:
+
+- `.\scripts\run_python.ps1 -c "import ast, pathlib; files=['src/gpic_concepts_v1/stage4_extract_raw.py','scripts/build_gpic_observed_object_inventory.py','scripts/build_gpic_observed_attribute_inventory.py','tests/test_build_gpic_observed_object_inventory.py','tests/test_build_gpic_observed_attribute_inventory.py','tests/test_stage4_extract_raw.py']; [ast.parse(pathlib.Path(f).read_text(encoding='utf-8'), filename=f) for f in files]; print('AST_OK')"`
+- `.\scripts\run_python.ps1 -m unittest tests.test_build_gpic_observed_object_inventory tests.test_build_gpic_observed_attribute_inventory tests.test_stage4_extract_raw tests.test_formal_inventory_gates`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 300 -- scripts\build_gpic_observed_object_inventory.py --input outputs\front1000_mixed_current\stage3\stage3_records.jsonl --prior-object-inventory outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_surface_conflict_guard.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_surface_conflict_guard_summary.json`
+
+Results:
+
+- AST parse: passed.
+- Focused regression tests: 75 passed.
+- Rebuilt object inventory:
+  - output:
+    `outputs/front1000_mixed_current/inventory/gpic_observed_object_inventory_surface_conflict_guard.tsv`
+  - `chosen=1626`, `excluded=125`, `needs_manual=37`
+  - all 37 pending rows have
+    `decision_reason=manual_surface_query_conflict_required`
+  - needs-manual subset:
+    `outputs/front1000_mixed_current/inventory/gpic_observed_object_inventory_surface_conflict_guard_needs_manual.tsv`
+
+Interpretation:
+
+- The previous front-1000 Stage 4/5/6 artifacts generated after action manual
+  resolution are invalid for object/attribute analysis under the current rule.
+- Do not run attribute rebuild, Stage 4, Stage 5, or Stage 6 until the 37 object
+  `needs_manual` rows are resolved and object canonical/parent enrichment is
+  regenerated.
+
+## 2026-07-13 - Corrected Front-1000 Object Inventory Source
+
+Purpose:
+
+- Replace the stale front-1000 object source inventory that contained bad
+  automatic surface-changing selections, such as `glasses -> glass`.
+- Apply the manually resolved 37 object surface-query conflict rows, then
+  regenerate parent, canonical, and selected synset metadata evidence.
+
+Commands:
+
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 scripts\apply_object_manual_resolution.py --full-inventory outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_surface_conflict_guard.tsv --resolved-subset "C:\Users\rlath\Downloads\gpic_observed_object_inventory_surface_conflict_guard_manual_resolved.tsv" --output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_surface_conflict_guard_manual_resolved.tsv --resolved-copy outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_surface_conflict_guard_manual_resolved_subset.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_surface_conflict_guard_manual_resolution_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 scripts\enrich_gpic_inventory_parents.py --input outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_surface_conflict_guard_manual_resolved.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_corrected_source_parents.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_corrected_source_parents_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 180 scripts\enrich_gpic_inventory_canonical.py --input outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_corrected_source_parents.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_corrected_source_parent_canonical.tsv --ngram-evidence resources\source_labels\google_ngram_canonical_frequency_evidence.tsv --ambiguous-output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_corrected_source_parent_canonical_ambiguous.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_corrected_source_parent_canonical_summary.json`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 scripts\enrich_gpic_inventory_synset_metadata.py --input outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_corrected_source_parent_canonical.tsv --output outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_corrected_source_parent_canonical_metadata.tsv --summary outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_corrected_source_parent_canonical_metadata_summary.json`
+- `.\scripts\run_python.ps1 -c "... m._raise_if_object_inventory_not_ready(Path('outputs/front1000_mixed_current/inventory/gpic_observed_object_inventory_corrected_source_parent_canonical_metadata.tsv')); print('OBJECT_INVENTORY_STAGE4_GATE_OK')"`
+- `.\scripts\run_tests.ps1 --timeout-seconds 30 -- discover -s tests -p test_enrich_gpic_inventory_synset_metadata.py`
+
+Results:
+
+- Manual overlay:
+  - `chosen=1663`, `excluded=125`, `needs_manual=0`
+  - overlaid rows: 37
+- Parent enrichment:
+  - parent filled rows: 1663
+  - selected synset missing rows: 125
+  - lookup errors: 0
+- Canonical enrichment:
+  - canonical selected rows: 1663
+  - canonical ambiguous rows: 0
+  - selected synset missing rows: 125
+- Selected synset metadata refresh:
+  - selected synset rows: 1663
+  - changed cells: 543
+  - lookup errors: 0
+- Final corrected object inventory:
+  - `outputs/front1000_mixed_current/inventory/gpic_observed_object_inventory_corrected_source_parent_canonical_metadata.tsv`
+  - Stage 4 object inventory gate: passed
+  - `glasses` is now `selected_query=glasses`,
+    `selected_oewn_synset=oewn-04279164-n`,
+    `selected_oewn_lexfile=noun.artifact`, `canonical_surface=glasses`
+- Metadata regression test:
+  - `test_enrich_gpic_inventory_synset_metadata.py`: 1 passed
+
+Interpretation:
+
+- The stale `gpic_observed_object_inventory_manual_resolved_parent_canonical.tsv`
+  should not be used as the front-1000 object source for new formal runs.
+- Use the corrected metadata inventory above for the next attribute rebuild and
+  any following formal Stage 4/5/6 run.
+
+## 2026-07-13 - Front-1000 Mixed Pipeline Timed Rerun With Scoped Surface-Conflict Guard
+
+Purpose:
+
+- Rerun the first 1,000 GPIC captions with the current scoped object/attribute
+  surface-conflict rule.
+- Record GPU mode and per-stage mixed pipeline timing in the output summary.
+
+GPU/runtime evidence:
+
+- `nvidia-smi` before the run: RTX 5080 Laptop GPU, driver 592.01, CUDA 13.1,
+  P8 idle, about 4W / 73W, 21 MiB used.
+- Runtime env: CuPy installed, Torch CUDA available, spaCy `prefer_gpu=true`.
+- Mixed pipeline Stage 3 summaries reported `gpu_enabled=true`.
+
+Commands:
+
+- Rehydrated the original front-1000 Stage 1 caption records into GPIC row
+  input:
+  `outputs/front1000_current_guard_scoped_input/gpic_rows_front1000.jsonl`
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 900 -- scripts\run_mixed_caption_pipeline.py --input outputs\front1000_current_guard_scoped_input\gpic_rows_front1000.jsonl --output-dir outputs\front1000_guard_scoped_timed_20260713_0300 --object-inventory outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_corrected_source_parent_canonical_metadata.tsv --attribute-inventory outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object_manual_resolved_canonical.tsv --action-inventory outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_manual_resolved.tsv --lexicon-dir outputs\front1000_mixed_current\lexicons_after_action_manual_resolved --preposition-mwe-lexicon resources\lexicons\preposition_mwes.tsv --prefer-gpu --batch-size 128`
+
+Results:
+
+- Output dir:
+  `outputs/front1000_guard_scoped_timed_20260713_0300`
+- Captions: 1,000 total = 797 sentence + 203 tag-list.
+- Wrapper wall time: 25.635 seconds.
+- Internal mixed pipeline time: 18.533390 seconds.
+- Internal throughput: 53.956670 captions/sec.
+- Stage timing:
+  - Stage 1 records: 0.045627 sec
+  - Stage 1 mixed caption rows: 0.052518 sec
+  - Stage 3 model load: 1.640845 sec
+  - Stage 3 sentence: 4.918622 sec
+  - Stage 3 tag-list: 3.482393 sec
+  - Stage 3 combine: 0.305102 sec
+  - Stage 4 lookup load: 0.057841 sec
+  - Stage 4 raw extraction: 1.965609 sec
+  - Stage 5 canonicalize: 1.496635 sec
+  - Stage 6 count export: 4.552036 sec
+- Stage 6 facts: 87,506 total.
+
+Notes:
+
+- The first attempted run used the canonical action inventory as the Stage 4
+  action inventory and was correctly blocked by pipeline state validation.
+  The successful run used
+  `gpic_observed_action_inventory_manual_resolved.tsv` for Stage 4 and the
+  action-canonical exported lexicon bundle for Stage 5.
+- `scripts/run_mixed_caption_pipeline.py` now records `timing_seconds` and
+  `timing_throughput` in `mixed_pipeline_summary.jsonl` and `pipeline_state.json`.
+
+## 2026-07-13 - Real 10K Mixed Formal Pipeline Run
+
+Purpose:
+
+- Process the GPIC train 10K shard with the current formal mixed
+  sentence/tag-list runner.
+- Confirm that tag-list captions are not accidentally excluded.
+
+Input correction:
+
+- The first 10K attempt used
+  `outputs/benchmark_real10k_train/sentence_rows_9896.jsonl.gz`.
+- That file is a sentence-only benchmark input, so Stage 1 reported
+  `sentence=9896` and `tag_list=0`.
+- The corrected run used the original mixed GPIC row shard:
+  `C:\Users\rlath\OneDrive\Desktop\PILAB\0. 연구과제\기영님 연구과제(blue maze)\caption to concept\gpic-caption-concepts\data\gpic_captions_10k_train00000_00099\train\gpic_train_00000_00099_merged_10000.jsonl.gz`.
+
+Preflight:
+
+- Stage 1 check over the corrected shard:
+  - total rows: 10,000
+  - sentence captions: 9,896
+  - tag-list captions: 104
+  - skipped rows: 0
+- `nvidia-smi` before the corrected run:
+  - RTX 5080 Laptop GPU
+  - P5
+  - about 20.34 W
+  - 890 MiB / 16,303 MiB used
+  - GPU util about 23%
+- `nvidia-smi` after the corrected run:
+  - P5
+  - about 20.94 W
+  - 897 MiB / 16,303 MiB used
+  - GPU util about 23%
+
+Command:
+
+- `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 2400 -- scripts\run_mixed_caption_pipeline.py --input "C:\Users\rlath\OneDrive\Desktop\PILAB\0. 연구과제\기영님 연구과제(blue maze)\caption to concept\gpic-caption-concepts\data\gpic_captions_10k_train00000_00099\train\gpic_train_00000_00099_merged_10000.jsonl.gz" --output-dir outputs\real10k_mixed_guard_scoped_timed_20260713_1240 --object-inventory outputs\front1000_mixed_current\inventory\gpic_observed_object_inventory_corrected_source_parent_canonical_metadata.tsv --attribute-inventory outputs\front1000_mixed_current\inventory\gpic_observed_attribute_inventory_rebuilt_after_object_manual_resolved_canonical.tsv --action-inventory outputs\front1000_mixed_current\inventory\gpic_observed_action_inventory_manual_resolved.tsv --lexicon-dir outputs\front1000_mixed_current\lexicons_after_action_manual_resolved --preposition-mwe-lexicon resources\lexicons\preposition_mwes.tsv --prefer-gpu --batch-size 128`
+
+Results:
+
+- Output dir:
+  `outputs/real10k_mixed_guard_scoped_timed_20260713_1240`
+- Pipeline status: completed.
+- Wrapper wall time: 218.999 seconds.
+- Internal mixed pipeline time: 210.686974 seconds.
+- Internal throughput: 47.463779 captions/sec.
+- Stage 1:
+  - total: 10,000
+  - sentence: 9,896
+  - tag-list: 104
+- Stage 3:
+  - sentence records written: 9,896
+  - tag-list records written: 104
+  - tag-list segments: 510
+  - Stage 3 summaries reported `gpu_enabled=true`.
+- Stage 4:
+  - raw mentions: 184,400
+  - raw edges: 109,392
+- Stage 5:
+  - canonical mentions: 184,400
+  - canonical edges: 109,392
+  - canonical sources:
+    - GPIC observed inventory: 85,420
+    - lexicon: 77,651
+    - raw fallback: 21,329
+- Stage 6:
+  - facts: 1,401,962
+  - object counts rows: 1,251
+  - attribute counts rows: 3,058
+  - action counts rows: 1,451
+  - relation triple rows: 8,112
+  - object co-occurrence pair rows: 209,902
+
+Notes:
+
+- The corrected 10K run includes tag-list captions in the same Stage 6 count
+  set as sentence captions.
+- The input file lives outside the current writable repo, but outputs were
+  written under the active local workspace.
+
+## 2026-07-13 - Real 10K Object Inventory Manual Resolution V3
+
+Purpose:
+
+- Apply the 1,791-row object manual feedback for the real 10K mixed inventory.
+- Preserve surface-rewrite rows as observed-span rows while copying the
+  replacement head span's selected synset evidence.
+- Recompute parent, canonical, and synset metadata before Stage 4 use.
+
+Manual resolution:
+
+- Input full inventory:
+  `outputs/real10k_mixed_inventory_current/inventory/gpic_observed_object_inventory.tsv`
+- Manual patch:
+  `C:\Users\rlath\Downloads\gpic_observed_object_inventory_needs_manual_v3_mixed_patch.tsv`
+- Output:
+  `outputs/real10k_mixed_inventory_current/inventory/gpic_observed_object_inventory_manual_resolved_v3.tsv`
+- Summary:
+  - full rows: 6,513
+  - resolved rows: 1,791
+  - original status counts: `chosen=3513`, `excluded=1209`, `needs_manual=1791`
+  - merged status counts: `chosen=5304`, `excluded=1209`
+  - surface rewrite rows: 26
+  - remaining surface rewrite `needs_manual` rows: 0
+
+Parent enrichment:
+
+- Output:
+  `outputs/real10k_mixed_inventory_current/inventory/gpic_observed_object_inventory_manual_resolved_v3_parents.tsv`
+- Summary:
+  - rows: 6,513
+  - selected synset missing rows: 1,209
+  - parent filled rows: 5,303
+  - parent lookup error rows: 0
+
+Canonical enrichment:
+
+- Initial canonical enrichment reached Google Ngram evidence for two rows whose
+  saved evidence was missing:
+  - `corn cobs`: candidates `corncob` and `corn cob`
+  - `golf clubs`: candidates `golfclub` and `golf club`
+- The correct handling is to query Google Ngram evidence, record the evidence
+  row, and rerun canonical enrichment. Do not manually guess canonical values
+  when the required Ngram evidence is absent.
+- Added Google Ngram evidence rows to
+  `resources/source_labels/google_ngram_canonical_frequency_evidence.tsv`
+  using corpus `26`, smoothing `0`, case-insensitive `true`, years 2000-2019.
+- Evidence result:
+  - `corncob`: mean `7.9700879977e-08`
+  - `corn cob`: mean `2.85911695753e-08`
+  - `golfclub`: mean `4.06227038136e-09`
+  - `golf club`: mean `7.6806290314e-07`
+- Rerun output:
+  `outputs/real10k_mixed_inventory_current/inventory/gpic_observed_object_inventory_manual_resolved_v3_parent_canonical.tsv`
+- Rerun summary:
+  - rows: 6,513
+  - canonical selected rows: 5,304
+  - selected synset missing rows: 1,209
+  - canonical ambiguous rows: 0
+  - canonical lookup error rows: 0
+- Verified rows:
+  - `corn cobs -> corncob`, tag `selected_by_google_ngram_frequency_unique_max`
+  - `golf clubs -> golf club`, tag `selected_by_google_ngram_frequency_unique_max`
+
+Metadata refresh and gate:
+
+- Metadata output:
+  `outputs/real10k_mixed_inventory_current/inventory/gpic_observed_object_inventory_manual_resolved_v3_parent_canonical_metadata.tsv`
+- Metadata summary:
+  - rows: 6,513
+  - selected synset rows: 5,304
+  - lookup error rows: 0
+- Stage 4 object inventory gate:
+  `OBJECT_INVENTORY_STAGE4_GATE_OK`
+
+Regression guard:
+
+- Added a guard to `scripts/resolve_object_inventory_rows.py` so a row whose
+  `canonical_selection_tag` contains `google_ngram_evidence_missing` cannot be
+  manually assigned a canonical surface.
+- This prevents repeating the mistake where missing saved Google Ngram evidence
+  was bypassed with a manual canonical guess.
+- Verification:
+  `.\scripts\run_tests.ps1 --timeout-seconds 60 discover -s tests -p test_resolve_object_inventory_rows.py`
+  passed.
+
+Attribute inventory rebuild after object V3:
+
+- Rebuilt the real 10K attribute inventory from the same mixed Stage 3 records
+  using the corrected object V3 inventory as the consumed-object span source.
+- Prior attribute inventory:
+  `outputs/front1000_mixed_current/inventory/gpic_observed_attribute_inventory_rebuilt_after_object_manual_resolved_canonical.tsv`
+- Output:
+  `outputs/real10k_mixed_inventory_current/inventory/gpic_observed_attribute_inventory_after_object_v3.tsv`
+- Needs-manual subset:
+  `outputs/real10k_mixed_inventory_current/inventory/gpic_observed_attribute_inventory_after_object_v3_needs_manual.tsv`
+- Summary:
+  - rows: 3,531
+  - attribute candidate total: 55,364
+  - prior reused rows: 649
+  - prior selected synset reused rows: 612
+  - status counts: `chosen=2037`, `needs_manual=1494`
+  - needs-manual reasons:
+    - `manual_attribute_gate_required=823`
+    - `manual_synset_required=510`
+    - `manual_surface_query_conflict_required=161`
+- Formal state:
+  - Stop here. Attribute canonical enrichment must not run until the 1,494
+    `needs_manual` attribute rows are resolved.
+
+Attribute manual resolution after object V3:
+
+- User-provided resolved subset:
+  `C:\Users\rlath\Downloads\gpic_observed_attribute_inventory_after_object_v3_manual_resolved.tsv`
+- User-provided audit:
+  `C:\Users\rlath\Downloads\gpic_observed_attribute_inventory_after_object_v3_manual_resolution_audit.tsv`
+- Overlay output:
+  `outputs/real10k_mixed_inventory_current/inventory/gpic_observed_attribute_inventory_after_object_v3_manual_resolved.tsv`
+- Summary:
+  - full rows: 3,531
+  - resolved rows: 1,494
+  - overlaid rows: 1,494
+  - original status counts: `chosen=2037`, `needs_manual=1494`
+  - merged status counts: `chosen=3531`
+
+Attribute canonical enrichment after manual resolution:
+
+- Output:
+  `outputs/real10k_mixed_inventory_current/inventory/gpic_observed_attribute_inventory_after_object_v3_manual_resolved_canonical.tsv`
+- Summary:
+  - rows: 3,531
+  - selected synset missing rows: 843
+  - canonical selected rows: 2,688
+  - canonical ambiguous rows: 0
+  - canonical lookup error rows: 0
+  - selected-synset rows missing canonical after enrichment: 0
+
+Attribute Stage 5 lexicon export:
+
+- Base lexicon bundle:
+  `outputs/front1000_mixed_current/lexicons_after_action_manual_resolved`
+- Output dir:
+  `outputs/real10k_mixed_inventory_current/lexicons_after_attribute_v3_manual_resolved`
+- Summary:
+  - inventory rows: 3,531
+  - attribute synonym rows: 2,767
+  - chosen synonym rows added: 2,073
+  - action synonym rows preserved from base bundle: 555
+
+Action inventory rebuild after 10K attribute resolution:
+
+- Input Stage 3 records:
+  `outputs/real10k_mixed_guard_scoped_timed_20260713_1240/stage3/stage3_records.jsonl`
+- Prior action inventory:
+  `outputs/front1000_mixed_current/inventory/gpic_observed_action_inventory_manual_resolved.tsv`
+- Preposition MWE lexicon:
+  `resources/lexicons/preposition_mwes.tsv`
+- Output:
+  `outputs/real10k_mixed_inventory_current/inventory/gpic_observed_action_inventory_after_attribute_v3.tsv`
+- Needs-manual subset:
+  `outputs/real10k_mixed_inventory_current/inventory/gpic_observed_action_inventory_after_attribute_v3_needs_manual.tsv`
+- Summary:
+  - rows: 1,947
+  - verb tokens scanned: 38,373
+  - relation MWE matches: 2,358
+  - relation MWE consumed tokens: 7,461
+  - candidate types: `verb=1617`, `verb_prep=273`, `verb_prt=62`, `verb_prt_prep=1`
+  - status counts: `chosen=1738`, `needs_manual=135`, `raw_fallback=74`
+  - needs-manual reasons:
+    - `manual_action_synset_required=128`
+    - `manual_action_morphy_required=7`
+- Formal state:
+  - Stop here. Action canonical enrichment and Stage 4/5/6 rerun must not
+    proceed until the 135 `needs_manual` action rows are resolved.
+
+Object inventory prior-bundle guard, 2026-07-13:
+
+- Change:
+  - `scripts/build_gpic_observed_object_inventory.py` now accepts
+    `--prior-inventory-bundle` and derives the reusable prior object inventory
+    from the bundle.
+  - If both `--prior-inventory-bundle` and `--prior-object-inventory` are
+    passed and they point to different object inventory paths, the command
+    fails with `inventory_bundle_path_mismatch`.
+- Reason:
+  - A 10K expansion was accidentally started from
+    `resources/gpic_inventory/current`, which was still the front100 published
+    bundle, while the intended prior was the verified front1000 bundle under
+    `outputs/front1000_inventory_using_front100_current/...`.
+  - The fix reduces manual path extraction and makes object prior selection
+    follow the same bundle mismatch gate used by Stage 3.5 workflow commands.
+- Verification:
+  - Command:
+    `.\scripts\run_tests.ps1 --timeout-seconds 90 discover -s tests -p test_build_gpic_observed_object_inventory.py`
+  - Result:
+    8 tests passed.
+  - Probe command:
+    `.\scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds 120 -- scripts\build_gpic_observed_object_inventory.py --input outputs\real10k_mixed_formal_after_action_v3_current\stage3\stage3_records.jsonl --prior-inventory-bundle outputs\front1000_inventory_using_front100_current\simulated_workflow_after_action_manual\inventory_bundle.json --output outputs\front10000_inventory_using_front1000_simulated_20260713\guard_probe\gpic_observed_object_inventory_limit5.tsv --summary outputs\front10000_inventory_using_front1000_simulated_20260713\guard_probe\gpic_observed_object_inventory_limit5_summary.json --limit 5`
+  - Probe result:
+    summary recorded `prior_inventory_bundle` and resolved `prior_object_inventory`
+    from that bundle, with 21 prior-reused rows in the 5-caption probe.
+- Publish state:
+  - The verified front1000 bundle was published to
+    `resources/gpic_inventory/current/inventory_bundle.json` with
+    `snapshot_label=front1000`.
+  - Published row counts:
+    `object=1788`, `attribute=773`, `action=563`,
+    `action_canonical=563`.

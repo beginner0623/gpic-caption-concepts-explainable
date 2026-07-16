@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input",
         required=True,
-        help="Input sentence_rows.jsonl from Stage 1.",
+        help="Input sentence_rows.jsonl or tag_rows.jsonl from Stage 1.",
     )
     parser.add_argument(
         "--output",
@@ -51,6 +51,22 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_STAGE3_BATCH_SIZE,
         help=f"spaCy nlp.pipe batch size. Default: {DEFAULT_STAGE3_BATCH_SIZE}",
     )
+    parser.add_argument(
+        "--caption-shape",
+        choices=("sentence", "tag_list"),
+        default="sentence",
+        help="Input row shape. Use tag_list for Stage 1 tag rows.",
+    )
+    parser.add_argument(
+        "--progress-output",
+        help="Optional JSON path updated while Stage 3 annotation runs.",
+    )
+    parser.add_argument(
+        "--progress-interval-records",
+        type=int,
+        default=5000,
+        help="Record interval for progress JSON updates. Default: 5000.",
+    )
     gpu_group = parser.add_mutually_exclusive_group()
     gpu_group.add_argument(
         "--prefer-gpu",
@@ -75,8 +91,11 @@ def main() -> None:
         model=args.model,
         limit=args.limit,
         batch_size=args.batch_size,
-        gpu_mode=gpu_mode,
-    )
+            gpu_mode=gpu_mode,
+            caption_shape=args.caption_shape,
+            progress_output=args.progress_output,
+            progress_interval_records=args.progress_interval_records,
+        )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
 
 

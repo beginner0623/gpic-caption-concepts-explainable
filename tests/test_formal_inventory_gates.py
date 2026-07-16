@@ -9,6 +9,8 @@ import tempfile
 import unittest
 import uuid
 
+from gpic_concepts_v1.pipeline_state import artifact_state_path, write_pipeline_state
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -87,6 +89,7 @@ class FormalInventoryGateTest(unittest.TestCase):
                     }
                 ],
             )
+            _write_action_state(inventory)
 
             with self.assertRaises(SystemExit) as caught:
                 self.stage4_runner._raise_if_action_inventory_not_ready(inventory)
@@ -94,6 +97,35 @@ class FormalInventoryGateTest(unittest.TestCase):
             _remove_tree(tmp_path)
 
         self.assertIn("blocked_action_inventory_before_stage4", str(caught.exception))
+
+    def test_stage4_runner_blocks_action_inventory_missing_pipeline_state(self) -> None:
+        tmp_path = _temp_base() / uuid.uuid4().hex
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        try:
+            inventory = tmp_path / "action_inventory.tsv"
+            _write_inventory(
+                inventory,
+                [
+                    {
+                        "span_key": "walk",
+                        "observed_surface": "walk",
+                        "decision_status": "raw_fallback",
+                        "decision_reason": "no_oewn_verb_synset",
+                        "selected_query": "walk",
+                        "selected_oewn_synset": "",
+                    }
+                ],
+            )
+
+            with self.assertRaises(SystemExit) as caught:
+                self.stage4_runner._raise_if_action_inventory_not_ready(inventory)
+        finally:
+            _remove_tree(tmp_path)
+
+        self.assertIn(
+            "blocked_action_inventory_pipeline_state_before_stage4",
+            str(caught.exception),
+        )
 
     def test_stage4_runner_allows_action_raw_fallback_inventory(self) -> None:
         tmp_path = _temp_base() / uuid.uuid4().hex
@@ -113,10 +145,36 @@ class FormalInventoryGateTest(unittest.TestCase):
                     }
                 ],
             )
+            _write_action_state(inventory)
 
             self.stage4_runner._raise_if_action_inventory_not_ready(inventory)
         finally:
             _remove_tree(tmp_path)
+
+    def test_stage4_main_requires_action_inventory_for_formal_run(self) -> None:
+        tmp_path = _temp_base() / uuid.uuid4().hex
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        original_argv = sys.argv[:]
+        try:
+            sys.argv = [
+                "run_stage4_extract_raw.py",
+                "--input",
+                str(tmp_path / "stage3.jsonl"),
+                "--object-inventory",
+                str(tmp_path / "object_inventory.tsv"),
+                "--raw-mentions",
+                str(tmp_path / "raw_mentions.jsonl"),
+                "--raw-edges",
+                str(tmp_path / "raw_edges.jsonl"),
+            ]
+
+            with self.assertRaises(SystemExit) as caught:
+                self.stage4_runner.main()
+        finally:
+            sys.argv = original_argv
+            _remove_tree(tmp_path)
+
+        self.assertIn("--action-inventory is required", str(caught.exception))
 
     def test_stage5_runner_blocks_pending_attribute_inventory(self) -> None:
         tmp_path = _temp_base() / uuid.uuid4().hex
@@ -258,6 +316,27 @@ def _write_inventory(path: Path, rows: list[dict[str, str]]) -> None:
     for row in rows:
         lines.append("\t".join(row.get(field, "") for field in fieldnames))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_action_state(path: Path) -> None:
+    write_pipeline_state(
+        artifact_state_path(path),
+        {
+            "artifact_type": "gpic_observed_action_inventory",
+            "stage": "3.5",
+            "status": "resolved",
+            "preview_mode": False,
+            "input": "test",
+            "output": str(path),
+            "needs_manual_output": "",
+            "action_inventory_preposition_mwe_aware": True,
+            "preposition_mwe_detection_before_action": True,
+            "relation_mwe_match_total": 0,
+            "relation_mwe_consumed_token_total": 0,
+            "decision_status_counts": {"raw_fallback": 1},
+            "needs_manual_rows": 0,
+        },
+    )
 
 
 def _temp_base() -> Path:

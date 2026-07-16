@@ -117,7 +117,12 @@ def export_count_facts(
             fact_type="event_role",
             table_key_prefix="event_role",
             value_fields=("action", "role", "target"),
-            extra_value_fields=("target_parent_concepts", "target_parent_synset_ids"),
+            extra_value_fields=(
+                "target_parent_concepts",
+                "target_parent_synset_ids",
+                "raw_role",
+                "voice_normalization",
+            ),
         ),
         "relation_triple_counts.tsv": _aggregate_facts(
             facts,
@@ -406,12 +411,20 @@ def _edge_facts(
             }
             count_key = f"has_quantity:{source.canonical}:{target.canonical}"
         elif edge.edge_type == "event_role":
+            raw_role = edge.canonical_detail.get("raw_role")
+            voice_normalization = edge.canonical_detail.get("voice_normalization")
             values = {
                 "action": source.canonical,
                 "role": edge.canonical_label,
                 "target": target.canonical,
                 "target_parent_concepts": target.parent_concepts,
                 "target_parent_synset_ids": _parent_synset_ids(target),
+                "raw_role": raw_role if isinstance(raw_role, str) and raw_role else edge.canonical_label,
+                "voice_normalization": (
+                    voice_normalization
+                    if isinstance(voice_normalization, str) and voice_normalization
+                    else "none"
+                ),
             }
             count_key = f"event_role:{source.canonical}:{edge.canonical_label}:{target.canonical}"
         elif edge.edge_type == "relation":
@@ -555,14 +568,9 @@ def _relation_component_facts(
     for edge in edges:
         if edge.edge_type != "relation":
             continue
-        components = edge.canonical_detail.get("relation_components")
-        if not isinstance(components, list):
-            continue
+        components = _relation_components(edge)
         raw_variant = _edge_raw_variant(edge)
         for index, component in enumerate(components):
-            component_text = str(component).strip().lower()
-            if not component_text:
-                continue
             facts.append(
                 _make_fact_row(
                     caption_id=edge.caption_id,
@@ -570,7 +578,7 @@ def _relation_component_facts(
                     fact_type="relation_component",
                     count_key=(
                         "relation_component:"
-                        f"{edge.canonical_label}:{index}:{component_text}"
+                        f"{edge.canonical_label}:{index}:{component}"
                     ),
                     rule_ids=_edge_only_rule_ids(edge),
                     source_mention_ids=[edge.source_mention_id, edge.target_mention_id],
@@ -578,12 +586,27 @@ def _relation_component_facts(
                     values={
                         "relation": edge.canonical_label,
                         "component_index": str(index),
-                        "component": component_text,
+                        "component": component,
                         "raw_variants": [raw_variant],
                     },
                 ),
             )
     return facts
+
+
+def _relation_components(edge: CanonicalEdge) -> list[str]:
+    components = edge.canonical_detail.get("relation_components")
+    if isinstance(components, list):
+        return [
+            str(component).strip().lower()
+            for component in components
+            if str(component).strip()
+        ]
+    return [
+        component
+        for component in edge.canonical_label.strip().lower().split()
+        if component
+    ]
 
 
 def _object_pair_facts(

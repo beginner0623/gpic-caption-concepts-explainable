@@ -195,9 +195,8 @@ class CaptionRecord(JsonRecord):
         _require_text("pipeline_version", self.pipeline_version)
         _require_string_list("rule_ids", self.rule_ids)
         _require_json_object("meta", self.meta)
-        if self.caption_shape == "tag_list":
-            if not self.skipped or self.skip_reason != "tag_list_deferred":
-                raise ValueError("tag_list captions must be skipped with tag_list_deferred")
+        if self.skipped and self.skip_reason is None:
+            raise ValueError("skipped records must include skip_reason")
 
 
 @dataclass(slots=True)

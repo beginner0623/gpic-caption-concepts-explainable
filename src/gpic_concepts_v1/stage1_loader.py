@@ -57,6 +57,7 @@ def run_stage1_records(
     *,
     caption_records_path: str | Path,
     sentence_rows_path: str | Path | None = None,
+    tag_rows_path: str | Path | None = None,
     summary_path: str | Path | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
@@ -68,14 +69,23 @@ def run_stage1_records(
         for record, row in pairs
         if record.caption_shape == "sentence" and not record.skipped
     ]
+    tag_rows = [
+        row
+        for record, row in pairs
+        if record.caption_shape == "tag_list" and not record.skipped
+    ]
     summary = build_stage1_summary(records)
     summary["caption_records_path"] = str(caption_records_path)
     if sentence_rows_path is not None:
         summary["sentence_rows_path"] = str(sentence_rows_path)
+    if tag_rows_path is not None:
+        summary["tag_rows_path"] = str(tag_rows_path)
 
     write_jsonl(caption_records_path, records)
     if sentence_rows_path is not None:
         write_jsonl(sentence_rows_path, sentence_rows)
+    if tag_rows_path is not None:
+        write_jsonl(tag_rows_path, tag_rows)
     if summary_path is not None:
         write_jsonl(summary_path, [summary])
 

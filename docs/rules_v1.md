@@ -17,6 +17,13 @@
 - attribute synset/canonical 판단은 GPIC caption에서 관측한 attribute inventory를 기준으로 offline 준비함
 - attribute type taxonomy는 아직 active Stage 5/6 output에 붙이지 않고 offline audit artifact로만 둠
 - preposition MWE는 Stage 4에서 lexicon span으로 감지하고 relation edge/count 및 ambiguous relation occurrence count에 사용함
+- tag-list caption은 comma segment별 spaCy annotation 후 object/attribute/quantity만 같은 raw schema로 추출함
+- formal mixed runner는 sentence와 tag-list를 shape별 annotation path로 처리한 뒤 원래 caption 순서의 단일 Stage 3 records 파일로 합치고, Stage 4/5/6은 그 단일 파일에서 하나의 count set을 생성함
+- Stage 3.5 inventory workflow runner는 object/attribute/action inventory 준비 상태를 판정하고, clear된 단계 다음 offline step으로 자동 진행함
+- Stage 3.5 inventory workflow가 완료되면 object/attribute/action/lexicon final paths를 묶은 inventory bundle manifest를 남기고, 다음 inventory build나 formal mixed run은 이 bundle을 단일 입력으로 사용할 수 있음
+- 현재 active inventory는 output snapshot 경로가 아니라 `resources/gpic_inventory/current/inventory_bundle.json`으로 publish된 central bundle을 기준으로 함
+- 공식 inventory promotion run은 Stage 3.5 workflow 완료 시 `--publish-current`로 central bundle publish까지 같은 workflow 안에서 수행함
+- central bundle publish는 object/attribute/action TSV, action canonical TSV, Stage 5 lexicon dir, action inventory pipeline-state sidecar를 함께 복사해야 하며, formal run은 이 central bundle을 단일 입력으로 사용함
 - COCO/LVIS/Objects365/OpenImages/Visual Genome source-label inventory는 active pipeline 입력이 아님
 - Stage 2 output은 concept output이 아니라 token/span inspection output임
 
@@ -40,11 +47,11 @@
 
 | Stage | 이름 | 입력 | 출력 | 핵심 원칙 |
 |---|---|---|---|---|
-| 1 | Caption shape 판단 | raw caption row | sentence 또는 tag-list shape label | caption 종류를 판단한다. tag-list는 v1 extraction 대상에서 제외한다. |
+| 1 | Caption shape 판단 | raw caption row | sentence 또는 tag-list shape label | caption 종류를 판단한다. tag-list는 sentence path와 분리된 tag-list path로 보낸다. |
 | 2 | spaCy preprocessing | caption text | protected spaCy Doc | tokenization 후 깨지면 안 되는 span만 merge한다. |
-| 3 | spaCy linguistic annotation | protected spaCy Doc | token, POS, TAG, MORPH, lemma, dependency, noun chunk | spaCy annotation만 한다. concept extraction은 하지 않는다. |
-| 3.5 | GPIC observed object and attribute inventories | Stage 3 records | observed object span inventory, observed attribute inventory | GPIC caption noun chunk에서 관측된 object span과 attribute modifier만 OEWN lookup하고 ambiguous는 offline으로 해결한다. |
-| 4 | Raw concept extraction | annotated Doc + GPIC object inventory | raw mentions, raw edges | GPIC inventory에서 확정된 noun chunk selected span과 dependency에서 직접 보이는 것만 추출한다. |
+| 3 | spaCy linguistic annotation | protected spaCy Doc 또는 tag-list segment Docs | token, POS, TAG, MORPH, lemma, dependency, noun chunk | spaCy annotation만 한다. tag-list는 comma segment별로 따로 annotate한다. concept extraction은 하지 않는다. |
+| 3.5 | GPIC observed inventories and relation MWE preparation | Stage 3 records, reviewed preposition MWE lexicon | observed object span inventory, observed attribute inventory, observed action inventory, relation MWE lexicon bundle | GPIC caption에서 관측된 object/attribute/action span을 OEWN lookup하고 ambiguous는 offline으로 해결한다. Action inventory 후보 생성 전에는 active preposition MWE span을 먼저 감지해 phrasal action 후보에서 제외한다. |
+| 4 | Raw concept extraction | annotated sentence Doc 또는 annotated tag-list segments + GPIC object inventory | raw mentions, raw edges | sentence는 GPIC inventory에서 확정된 noun chunk selected span과 dependency에서 직접 보이는 것만 추출한다. tag-list는 segment 내부 object/attribute/quantity만 추출한다. |
 | 5 | Canonicalization | raw mentions, raw edges | canonical labels, selected synset metadata, parent evidence | object는 GPIC observed inventory의 canonical surface, selected synset metadata, immediate hypernym parent evidence를 보존한다. inventory canonical이 없으면 raw surface로 남긴다. single ADP relation은 raw-preserving이고 preposition MWE relation은 Stage 4 lexicon canonical label을 보존한다. |
 | 6 | Count export | canonical mentions, canonical edges | count tables, fact rows | 새 해석을 하지 않고 집계만 한다. |
 
@@ -53,7 +60,7 @@
 | Rule ID | Stage | Rule 이름 | 입력 | 출력 | 도구 | 도구 유형 | Rule 유형 | Count 영향 | Known limitation |
 |---|---:|---|---|---|---|---|---|---|---|
 | R1 | 1 | Caption shape 판단 | raw GPIC caption row의 `caption_type` | `sentence` 또는 `tag_list` | custom router | custom fixed rule | baseline | 처리 path 결정 | GPIC `caption_type` 값이 알려진 집합 밖이면 처리하지 않음 |
-| R1.1 | 1 | Tag-list skip | `tag_list` caption | skipped record with reason | custom router | custom fixed rule | baseline exclusion | tag-list count 제외 | tag-list extraction은 v1에서 보류 |
+| R1.1 | 1 | Tag-list route | `tag_list` caption | tag-list row for segment annotation | custom router | custom fixed rule | baseline routing | tag-list object/attribute/quantity count 가능 | tag-list를 sentence parser path로 보내지 않음 |
 | R2 | 2 | Tokenization | caption text | spaCy tokens | `en_core_web_trf` tokenizer-only `nlp.make_doc()` | spaCy rule-based tokenizer | baseline | 직접 count 없음 | tokenizer error가 뒤로 전파됨 |
 | R3 | 2 | Quote span merge | tokenized quote span | merged quote token | custom quote detector + spaCy Retokenizer | custom fixed rule + spaCy rule-based | baseline | quote가 object로 오염되는 것을 줄임 | unmatched quote는 복구하지 않음 |
 | R4 | 2 | Reserved: no object MWE retokenization | 없음 | 없음 | 없음 | inactive | removed baseline rule | 직접 count 없음 | object MWE는 Stage 4 selected span에서 처리 |
@@ -64,19 +71,22 @@
 | R9 | 3 | POS, MORPH annotation | tagged/parsed Doc | POS, MORPH | spaCy attribute_ruler | spaCy rule-based | baseline evidence | 직접 count 없음 | spaCy model 설정에 의존 |
 | R10 | 3 | Lemmatization | annotated Doc | token lemma | spaCy lemmatizer | spaCy rule-based | baseline evidence | canonicalization 입력 | lemma는 canonical이 아님 |
 | R11 | 3 | Noun chunking | annotated Doc | noun chunks | spaCy noun_chunks | spaCy rule-based over parse | baseline evidence | object/attribute 추출 입력 | spaCy가 놓친 chunk는 v1에서 복구하지 않음 |
-| R11.1 | 3.5 | GPIC observed attribute inventory lookup | Stage 3 noun chunks, consumed object core token ids | observed attribute inventory rows | custom rule over Stage 3 records + OEWN lookup | custom fixed rule + external lexical evidence | offline inventory preparation | 직접 count 없음. Stage 4 attribute count를 위한 offline evidence | noun chunk 내부 selected object core span 밖 `amod`/`compound`/`nmod` token만 후보로 삼음 |
+| R11.1 | 3.5 | GPIC observed attribute inventory lookup | Stage 3 noun chunks, consumed object core token ids | observed attribute inventory rows | custom rule over Stage 3 records + OEWN lookup | custom fixed rule + external lexical evidence | offline inventory preparation | 직접 count 없음. Stage 4 attribute count를 위한 offline evidence | noun chunk 내부 selected object core span 밖 `amod`/`compound`/`nmod` token과, 그 token에서 같은 noun chunk 내부 `conj` chain으로 이어지는 token만 후보로 삼음 |
 | R11.2 | 3.5 | Offline attribute canonical inventory build | selected attribute synset rows | canonical attribute surface evidence | OEWN lemma evidence, WN3 count evidence, optional Google Ngram evidence | fixed policy over offline evidence | offline canonical preparation | 직접 count 없음. Stage 5 attribute canonicalization 준비 | selected synset이 없으면 canonical inventory에서는 적용 불가로 둠 |
 | R11.3 | 3.5 | Offline attribute parent taxonomy build | selected/canonical attribute inventory | offline attribute parent/type taxonomy artifact | manual taxonomy decision | explicit manual decision | offline taxonomy preparation | 직접 count 없음. active Stage 5/6에는 아직 반영하지 않음 | attribute parent/type은 OEWN hypernym이 아니라 taxonomy 방식이며 active output에서는 보류 |
 | R11.4 | 3.5 | Offline action canonical inventory build | resolved observed action inventory | canonical action surface evidence | OEWN verb lemma evidence, WN3 count evidence, optional Google Ngram evidence | fixed policy over offline evidence | offline canonical preparation | 직접 count 없음. R22 action canonicalization 준비 | `raw_fallback` action row는 selected synset이 없으므로 canonical inventory 적용 불가로 둠 |
 | R11.5 | 3.5 | Offline action canonical export | completed action canonical inventory | Stage 5 `action_synonyms.tsv` rows | generated TSV export from completed inventory | deterministic export | lexicon bundle preparation | R22 action count key에 영향 | canonical ambiguous 또는 non-chosen row는 export하지 않음 |
 | R12 | 4 | Noun chunk selected span to object | noun chunk, GPIC observed object inventory | object mention with selected span metadata | custom rule over spaCy noun chunk + GPIC inventory lookup | custom fixed rule + inventory lookup | baseline extraction | object count | inventory row가 있으면 `chosen`/`excluded` 모두 object mention으로 세며, `needs_manual` 또는 selected synset의 unresolved canonical row는 Stage 4를 중단함 |
-| R13 | 4 | Noun chunk modifier to attribute | noun chunk modifier | attribute mention, has_attribute edge | custom rule over chunk tokens | custom fixed rule | baseline extraction | attribute count, object-attribute pair count | chunk 밖 floating attribute는 붙이지 않음 |
+| R13 | 4 | Noun chunk modifier to attribute | noun chunk modifier | attribute mention, has_attribute edge | custom rule over chunk tokens | custom fixed rule | baseline extraction | attribute count, object-attribute pair count | sentence path에서는 chunk 밖 floating attribute는 붙이지 않고, `conj`는 accepted attribute modifier에서 시작하는 same-chunk conj chain 안에서만 확장함. tag-list path에서는 object가 없는 단일 attribute-like segment만 unattached attribute mention으로 보존함 |
 | R14 | 4 | Noun chunk modifier to quantity | numeric or quantity-like chunk modifier | quantity mention, has_quantity edge | custom rule + small quantity lexicon | custom fixed rule + custom lexicon lookup | baseline extraction | quantity count | ambiguous quantity는 raw로 남김 |
 | R15 | 4 | VERB or selected phrasal action span to action | VERB token, optional particle/preposition child evidence, OEWN verb lookup, relation MWE consumed token ids | action mention with selected action span metadata | custom rule over POS/dependency + OEWN verb lookup | custom fixed rule + external lexical evidence | baseline extraction | action count | no OEWN verb span이면 single VERB raw fallback. relation MWE token은 phrasal action 후보에서 제외 |
-| R16 | 4 | `nsubj` to agent | VERB token, `nsubj` child | action-agent edge | custom rule over dependency | custom fixed rule | baseline extraction | agent/patient pair count | passive voice normalize 안 함 |
+| R16 | 4 | `nsubj` to agent | VERB token, `nsubj` child | action-agent edge | custom rule over dependency | custom fixed rule | baseline extraction | agent/patient pair count | active/direct subject만 agent로 연결함 |
+| R16.1 | 4 | Action conjunct agent inheritance | action head token with `dep == "conj"`, source conjunct action with exactly one agent | inherited action-agent edge | custom rule over dependency + existing R16/R16.1 agent edges | custom fixed rule | baseline extraction | agent/patient pair count | agent만 상속하며 patient는 상속하지 않음. source action의 agent가 0개 또는 2개 이상이면 상속하지 않음. passive-like target action에는 상속하지 않음 |
+| R16.2 | 4 | Passive by-phrase to agent | passive action with object-mapped passive subject, direct `by` child and object-mapped `pobj` | passive by-agent event_role edge | custom rule over dependency | custom fixed rule | baseline extraction | agent/patient pair count | passive subject가 먼저 R17.1로 잡힌 action에서만 적용 |
 | R17 | 4 | Object dependency to patient | action head token or selected phrasal action preposition, object child | action-patient edge | custom rule over dependency + selected action span map | custom fixed rule | baseline extraction | agent/patient pair count | default `pobj`는 patient가 아니며, selected phrasal action span이 소비한 ADP의 direct `pobj`만 patient 후보로 사용 |
-| R18 | 4 | Single ADP plus direct `pobj` to relation | ADP/preposition token, direct `pobj` child | source-relation-target edge | custom rule over dependency | custom fixed rule | baseline extraction | relation triple count | selected phrasal action span 또는 relation MWE span에 소비된 ADP는 single-ADP relation에서 제외 |
-| R18.1 | 4 | Preposition MWE plus final `pobj` to relation | preposition MWE lexicon span, initial relation token head, final ADP direct `pobj` child | source-relation-target edge or ambiguous relation candidate edge with canonical relation MWE label and component metadata | custom span matcher + TSV lexicon + dependency evidence | custom fixed rule + custom lexicon lookup | baseline extraction | relation triple count, relation component count, ambiguous relation occurrence count | action-attached MWE with multiple object-mapped child source or target candidates is not disambiguated; candidate pairs are preserved separately but counted once per matched MWE occurrence |
+| R17.1 | 4 | Passive subject to patient/theme | action head token, `nsubjpass`/`csubjpass` object child | passive subject event_role patient edge | custom rule over dependency | custom fixed rule | baseline extraction | agent/patient pair count | raw_role=`theme`, voice_normalization=`passive_to_active` metadata를 남김 |
+| R18 | 4 | Single ADP plus direct `pobj` to relation | ADP/preposition token, direct `pobj` child, target-side object `conj` chain | source-relation-target edge | custom rule over dependency | custom fixed rule | baseline extraction | relation triple count | selected phrasal action span 또는 relation MWE span에 소비된 ADP는 single-ADP relation에서 제외. target-side conj만 확장하고 source conj는 확장하지 않음 |
+| R18.1 | 4 | Preposition MWE plus final `pobj` to relation | preposition MWE lexicon span, initial relation token head, final ADP direct `pobj` child, target-side object `conj` chain | source-relation-target edge or ambiguous relation candidate edge with canonical relation MWE label and component metadata | custom span matcher + TSV lexicon + dependency evidence | custom fixed rule + custom lexicon lookup | baseline extraction | relation triple count, relation component count, ambiguous relation occurrence count | action-attached MWE with multiple object-mapped child source or multiple independent target bases is not disambiguated; target conj chain from one base target is expanded into normal relation edges |
 | R19 | 5 | Object canonicalization from GPIC inventory | raw object surface, selected synset metadata, canonical surface evidence | canonical object label | GPIC observed object inventory source detail | fixed policy over offline canonical decision | baseline canonicalization | canonical object count | canonical surface가 없으면 raw surface 유지 |
 | R20 | 5 | Attribute synonym canonicalization | raw attribute surface | canonical attribute | explicit TSV lexicon | custom lexicon lookup | baseline canonicalization | canonical attribute count | attribute type은 active output에서 보류. unknown attribute는 raw surface 유지 |
 | R21 | 5 | Quantity raw-preserving canonicalization | raw quantity lemma | same quantity label | no extra tool | fixed policy | baseline canonicalization | quantity count | quantity normalization은 아직 하지 않음 |
@@ -84,6 +94,10 @@
 | R23 | 5 | Object parent concept mapping | selected OEWN synset parent evidence | object parent display labels plus synset-id evidence | GPIC object inventory source detail | fixed policy over OEWN hypernym evidence | baseline canonicalization | object parent count | selected synset이 없으면 parent는 empty. 내부 근거는 synset ID이고, 사람이 보는 parent label은 parent lemma display를 먼저 쓴다. |
 | R24 | 5 | Relation canonicalization | raw single-ADP relation label or preposition MWE label | single ADP는 raw-preserving, preposition MWE는 Stage 4 lexicon canonical relation label 유지 | no extra tool | fixed policy over Stage 4 evidence | baseline canonicalization | relation count | Stage 5에서 relation source/target 또는 label을 새로 추론하지 않음 |
 | R25 | 6 | Count export | canonical mentions and edges | count tables, fact rows | exporter | custom fixed rule | baseline export | final output | 새 linguistic interpretation 금지. relation component와 ambiguous relation candidate는 Stage 4 relation MWE metadata에서만 생성 |
+| R26 | 3.5-6 | Formal pipeline state manifest gate | generated formal pipeline artifacts and sidecar manifest | `pipeline_state.json` or artifact sidecar state plus gate pass/fail | custom manifest writer/reader | custom fixed rule | formal execution gate | 직접 count 없음. stale/preview/out-of-order artifacts가 formal Stage 4/5/6으로 들어가는 것을 차단 | manifest가 없는 legacy artifact는 formal input으로 거부되며, 필요하면 해당 artifact를 현재 runner로 재생성해야 함 |
+| R27 | 3.5-5 | Stage 3.5 inventory workflow orchestration | Stage 3 records, resolved object inventory, optional prior/manual inventory artifacts | workflow state JSON, next required step, generated attribute/action/canonical/export artifacts | custom workflow runner over existing inventory scripts | custom fixed rule | offline execution orchestration | 직접 count 없음. clear된 Stage 3.5 step 뒤의 다음 offline step을 자동 실행하고 blocker에서 중단 | extraction/canonical/count semantics를 새로 만들지 않음. legacy artifact는 명시 path로 전달해야 함 |
+| R27.1 | 3.5-6 | Inventory bundle manifest gate | completed Stage 3.5 workflow state or inventory bundle manifest | object/attribute/action inventory paths and Stage 5 lexicon bundle path used together | custom manifest reader/validator | custom fixed rule | formal execution/input selection gate | 직접 count 없음. 다음 inventory build와 formal run이 같은 resolved inventory set을 보게 함 | bundle manifest가 없으면 legacy per-path arguments는 여전히 가능하지만 mismatch를 자동으로 막지는 못함 |
+| R27.2 | 3.5-6 | Current inventory publish from complete workflow | completed Stage 3.5 workflow bundle and explicit publish request | `resources/gpic_inventory/current/inventory_bundle.json` plus copied current TSV/lexicon files | custom workflow runner + publish helper | custom fixed rule | formal input promotion gate | 직접 count 없음. complete된 snapshot을 active current inventory로 승격해 다음 run이 같은 통합 inventory를 보게 함 | guard/probe run이 current를 덮어쓰지 않도록 publish는 명시 요청이 있을 때만 수행함 |
 
 ## 3. Stage별 상세 기준
 
@@ -107,9 +121,10 @@ v1 기준:
 - `caption_type in {"short", "medium", "long"}`이면 내부 shape를 `sentence`로 둔다.
 - 그 외 `caption_type` 값은 추측하지 않고 error로 처리한다.
 - comma 개수, 문장부호, 문장 길이로 tag-list를 추정하지 않는다.
-- `tag_list`로 판정되면 v1에서는 Stage 2~6 extraction을 실행하지 않는다.
-- `tag_list` caption은 skipped record로 남기고, reason은 `tag_list_deferred`로 기록한다.
-- comma-separated segment split, segment별 object/attribute grouping, tag-list 전용 relation 추론은 v1에서 하지 않는다.
+- `tag_list`로 판정되면 sentence path로 보내지 않고 tag-list row로 따로 남긴다.
+- tag-list row는 comma segment별 annotation path로 보낸다.
+- tag-list를 문장 하나처럼 dependency parsing해서 sentence extraction을 실행하지 않는다.
+- tag-list 전용 action/relation 추론은 v1에서 하지 않는다.
 
 ### Stage 2. spaCy preprocessing
 
@@ -146,6 +161,8 @@ Stage 2 산출물:
 - attribute_ruler
 - lemmatizer
 - noun_chunks
+- tag-list caption은 comma로 segment split한 뒤 각 segment를 별도 Doc으로 annotate한다.
+- tag-list Stage 3 record는 segment별 token/noun_chunk evidence와 원 caption char offset을 보존한다.
 
 하지 않는 일:
 
@@ -161,14 +178,22 @@ Stage 2 산출물:
 
 - Stage 3 records
 - GPIC sentence captions에서 관측된 noun chunk와 token evidence
+- optional prior resolved GPIC observed object inventory TSV
 
 하는 일:
 
 - noun chunk 내부에서 root를 오른쪽 끝으로 갖는 left-expanding span을 만든다.
 - left-expanding span이 DET/ADP/PRON 같은 function-word token으로 시작하면 multiword object 후보로 보지 않는다. 예: `A man`은 `aman` lookup으로 보내지 않고 `man`을 본다.
 - 각 span을 GPIC observed surface로 보고 OEWN noun lookup을 수행한다.
-- span head가 plural common noun이면 head lemma surface를 observed exact surface보다 먼저 lookup한다. 예: `men` -> `man`, `windows` -> `window`.
-- plural common noun이 아니면 observed exact surface를 먼저 lookup한다.
+- prior resolved GPIC observed object inventory에 같은 `span_key` row가 있으면 OEWN lookup/manual status를 다시 만들지 않고 prior row의 selected synset, canonical surface, parent evidence를 재사용한다. 이때 `count`, `caption_count`, example evidence는 현재 run 기준으로 갱신한다.
+- 사용자가 manual TSV 또는 exact row decision으로 `chosen`/`excluded`를 확정한 row는 이후 pipeline에서 authoritative decision으로 취급한다. semantic audit에서 더 나은 synset 후보가 보여도 그것은 advisory finding일 뿐이며, 사용자가 그 row를 다시 열라고 명시하지 않는 한 자동으로 `needs_manual`로 되돌리거나 다른 synset으로 덮어쓰지 않는다.
+- 단, prior row가 observed `span_key`와 다른 `selected_query`를 가진 자동 surface-changing row이고 explicit manual decision evidence가 없으면 exact prior reuse 대상으로 보지 않는다. 이 row는 현재 rule로 다시 lookup해야 한다.
+- object inventory에서는 prior `selected_query` 기준 재사용을 하지 않는다. `book -> books` 같은 활용형 전파보다 `glasses -> glass`, `arms -> arm`, `works -> work` 같은 lexicalized plural 충돌 위험이 더 크기 때문이다.
+- `excluded` row는 exact `span_key`에서만 재사용하고, `selected_query` 기준으로 넓게 전파하지 않는다.
+- observed exact surface lookup이 OEWN noun synset을 찾으면 그 exact surface 결과를 우선한다.
+- 단, prior/manual inventory row가 없는 새 runtime lookup에서 observed exact surface와 lemma/Morphy/base-form query가 서로 다른 selected synset을 찾으면 자동 선택하지 않고 `needs_manual`, `decision_reason=manual_surface_query_conflict_required`로 둔다.
+- plural common noun head span은 observed exact surface가 OEWN noun synset을 찾더라도 lemma/Morphy/base-form query를 conflict check 용도로 함께 조회한다. observed exact query와 base-form query가 둘 다 OEWN noun 후보를 찾고, base-form 쪽이 exact와 같은 selected synset으로 단일 확정되지 않으면 `needs_manual`, `decision_reason=manual_surface_query_conflict_required`로 둔다.
+- observed exact surface가 실패한 경우에는 lemma/Morphy/normalization으로 surface가 바뀐 lookup query를 선택 후보로 사용한다.
 - `joined_variant`처럼 space, hyphen, underscore를 제거해서 붙인 query로만 잡힌 span은 자동 `chosen`으로 올리지 않고 `needs_manual`로 둔다. 예: `A man -> aman`, `black shirt -> blackshirt`, `black top -> blacktop`.
 - OEWN noun synset이 있는 가장 긴 span을 inventory row로 남긴다.
 - selected synset이 있는 row는 selected synset의 immediate hypernym 전체를 parent evidence로 남긴다.
@@ -177,6 +202,10 @@ Stage 2 산출물:
 - `needs_manual` row가 하나라도 남아 있으면 canonical enrichment로 넘어가지 않는다. synset 선택 또는 objectness 판단이 끝난 뒤에만 canonical surface를 선정한다.
 - manual resolution이 끝난 selected synset row는 offline canonical rule로 canonical surface를 선정한다.
 - canonical surface 선정은 selected synset lemma set, observed caption surface variants, WN3 lemma count, observed exact surface, 저장된 Google Ngram evidence 순서로 진행한다.
+- canonical 후보가 Google Ngram 단계까지 갔는데 저장된 evidence row가 없으면 manual guess로 확정하지 않는다. 동일한 Google Ngram 설정으로 evidence를 조회해서 `google_ngram_canonical_frequency_evidence.tsv`에 기록한 뒤 canonical enrichment를 다시 실행한다.
+- Stage 3.5 workflow runner는 `canonical_selection_tag`에 `google_ngram_evidence_missing`이 있고 해당 `(selected_oewn_synset, candidate surface_key)` evidence row가 없으면 `resolve_*_canonical`로 넘기지 않고 Google Ngram evidence refresh를 먼저 실행해야 한다.
+- Google Ngram evidence refresh 뒤 canonical enrichment를 다시 실행한다. 이미 evidence row가 있는데도 positive evidence가 없거나 tie가 남은 경우에만 canonical blocker/manual review로 둔다.
+- canonical row의 `canonical_selection_tag`가 `google_ngram_evidence_missing`이면 manual canonical resolver로 `canonical_surface`를 직접 채우는 것도 금지한다. 이 상태는 evidence 수집 미완료이지 manual decision 대상이 아니다.
 - canonical matching key는 `strip + lowercase`, apostrophe/hyphen normalization, underscore-to-space, whitespace normalization, diacritic folding을 적용한다. 예: `café`는 matching key에서 `cafe`로 비교한다.
 - canonical ambiguous가 남으면 `canonical_surface`를 비우고 별도 ambiguous TSV에 기록한 뒤 Stage 4로 진행하지 않는다.
 - `decision_status`는 사람이 보는 최종 queue 상태만 기록한다.
@@ -186,6 +215,8 @@ Stage 2 산출물:
 - `decision_reason`은 왜 그 queue로 갔는지만 기록한다.
   - `selected_object_compatible`: synset이 선택됐고 object-compatible lexfile이다.
   - `manual_joined_variant_required`: separator 제거로 붙인 query가 synset을 찾았으나 false positive 위험이 있어 manual 확인이 필요하다.
+  - `manual_surface_query_conflict_required`: prior/manual inventory row 없이 observed exact surface와 lemma/Morphy/base-form query가 서로 다른 selected synset을 찾아 manual 확인이 필요하다.
+    - plural common noun head span에서는 base-form query가 selected synset까지 단일 확정되지 않았더라도 OEWN noun 후보를 찾으면 surface/base 의미 충돌 가능성으로 같은 reason을 사용한다.
   - `manual_objectness_required`: synset은 선택됐지만 conditional/hard-conflict lexfile이라 objectness 판단이 필요하다.
   - `manual_synset_required`: OEWN noun 후보가 있지만 selected synset이 없다.
   - `no_oewn_noun_synset`: OEWN noun 후보가 없다.
@@ -194,6 +225,7 @@ Stage 2 산출물:
 하지 않는 일:
 
 - COCO/LVIS/Objects365/OpenImages/Visual Genome source-label inventory를 읽지 않는다.
+- prior 재사용은 GPIC observed object inventory끼리의 exact `span_key` reuse에만 적용한다. 외부 source-label inventory, semantic alias, selected-query reuse는 prior로 쓰지 않는다.
 - 외부 object dataset label을 GPIC caption span의 synonym 또는 canonical으로 쓰지 않는다.
 - `needs_manual` row와 selected synset은 있지만 canonical surface가 비어 있는 row를 extraction 중에 자동으로 fallback하지 않는다.
 
@@ -215,12 +247,21 @@ Stage 2 산출물:
 - selected object의 canonical/core surface가 lookup span의 suffix token span과 매칭되면 그 core suffix token만 consumed로 본다.
 - true MWE처럼 object core가 full phrase와 매칭되면 full phrase token이 consumed된다.
 - consumed core token을 제외한 noun chunk 내부 token 중 `dep in {"amod", "compound", "nmod"}`이면 attribute 후보로 만든다.
+- 위 attribute 후보 token에서 `conj` chain으로 이어지는 token도 같은 noun chunk 안에 있고 consumed core token이 아니면 attribute 후보로 만든다.
+- `conj` token은 독립적으로 attribute 후보가 되지 않고, 이미 accepted attribute modifier가 head일 때만 확장된다.
 - raw surface는 원문 그대로 보존한다.
 - lookup query는 raw surface를 `lowercase + strip`한 값으로 만든다.
 - OEWN 2025+에서 lookup한다.
 - 없으면 Morphy 후 다시 검색한다.
 - 그래도 없으면 selected synset은 비워 두되 `decision_status=chosen`, `decision_reason=no_oewn_attribute_synset`으로 남긴다. synset search에서는 제외하지만 count 후보에는 남긴다.
-- 통합 attribute inventory에 selected synset이 있으면 그 selected synset을 사용한다.
+- prior resolved GPIC observed attribute inventory에 같은 `span_key` row가 있으면 selected synset/canonical evidence를 재사용한다.
+- 단, prior row가 observed `span_key`와 다른 `selected_query`를 가진 자동 surface-changing row이고 explicit manual decision evidence가 없으면 exact prior reuse 대상으로 보지 않는다. 이 row는 현재 rule로 다시 lookup해야 한다.
+- attribute inventory에서는 prior `selected_query` 기준 재사용을 하지 않는다.
+- `excluded` row와 no-synset row는 exact `span_key`에서만 재사용하고, `selected_query` 기준으로 넓게 전파하지 않는다.
+- observed exact surface lookup이 OEWN attribute synset을 찾으면 그 exact surface 결과를 우선한다.
+- 단, attribute 후보 token이 plural common noun이면 exact hit가 있어도 Morphy/base-form query를 conflict check 용도로 함께 조회한다.
+- plural common noun attribute 후보에서 prior/manual inventory row가 없는 새 runtime lookup의 observed exact surface와 Morphy/base-form query가 서로 다른 selected synset을 찾으면 자동 선택하지 않고 `needs_manual`, `decision_reason=manual_surface_query_conflict_required`로 둔다.
+- plural common noun이 아닌 attribute 후보는 observed exact surface가 실패한 경우에만 Morphy로 surface가 바뀐 lookup query를 사용한다.
 - OEWN 2025+ 검색 결과 synset이 하나면 그 synset을 선택한다.
 - OEWN 2025+ 검색 결과 synset이 여러 개면 sense key 기준 WordNet 3.0 lemma count를 사용한다.
   - lemma count > 0인 attribute-compatible 항목 중 최대값이 유일하면 선택한다.
@@ -301,6 +342,9 @@ offline attribute canonical inventory build:
 
 - canonical enrichment로 넘어갈 수 있는 status는 `chosen`, `excluded`이다.
 - `needs_manual` row가 남아 있으면 canonical enrichment를 중단한다.
+- attribute synset/manual gate에서는 canonical surface 누락을 blocker로
+  세지 않는다. canonical blocker는 `needs_manual` row가 모두 해결된 뒤
+  offline canonical inventory build 단계에서만 따진다.
 - manual feedback에서 `decision_status=chosen`이어도 `selected_oewn_synset`이 비어 있으면 canonical surface를 정하지 않는다. count에는 raw surface로 남길 수 있도록 빈 selected synset evidence를 보존한다.
 - `excluded` row는 selected synset 유무와 무관하게 canonical 대상이 아니다. `canonical_surface`와 `canonical_label_key`는 비우고 `canonical_selection_tag=not_applicable_excluded`로 표시한다.
 - selected synset이 없으면 canonical surface를 정하지 않는다. `canonical_surface`와 `canonical_label_key`는 비우고 `canonical_selection_tag=not_applicable_no_selected_synset`으로 표시한다.
@@ -309,6 +353,7 @@ offline attribute canonical inventory build:
 - selected synset이 있으면 selected synset 안 WordNet/OEWN lemma를 가져온다.
 - observed caption에서 생성한 surface variants와 형태 매칭되는 lemma만 남긴다.
   - lowercase + strip
+  - canonical matching key에서 diacritic folding
   - morphy
   - space/underscore variants
   - hyphen space/underscore variants
@@ -316,6 +361,8 @@ offline attribute canonical inventory build:
 - 남은 OEWN lemma 후보가 하나면 canonical로 선택한다.
 - 남은 OEWN lemma 후보가 여러 개라면 lemma.count()를 비교하여 단독 최대를 canonical로 선택한다.
 - count가 전부 0이거나 동률이면 observed caption span surface와 동일한 lemma를 canonical로 선정한다.
+  - 이 exact observed surface 비교에는 lookup용 `selected_query`를 넣지 않는다.
+  - display surface exact match가 하나로 정해지지 않으면, diacritic-folded canonical matching key 기준 raw observed surface와 유일하게 맞는 lemma를 선택한다.
   - 동일한 lemma가 없으면 selected synset의 전체 lemma set으로 되돌린 뒤 Google Ngram 기준 frequency를 비교한다.
   - 2개 이상이 남으면 남은 항목 기준 Google Ngram(2000-2019) frequency를 비교한다.
 - 그래도 동률이면 ambiguous로 두고 manual로 결정한다.
@@ -329,6 +376,7 @@ offline attribute parent inventory build:
 - Stage 5는 typed inventory TSV를 직접 읽지 않는다. Stage 5용 lexicon bundle export는 attribute synonym만 활성화한다.
 - active lexicon export 기준:
   - `decision_status=chosen`이고 `canonical_surface`가 있으면 `attribute_synonyms.tsv`에 `raw -> canonical`을 쓴다.
+  - synonym raw key는 Morphy 후 lookup query가 아니라 caption에서 관측된 원본 surface를 기준으로 한다. `span_key`, `observed_surface`, `example_surfaces`에 있는 원본 surface variants를 모두 `raw -> canonical` row로 export한다.
   - `decision_status=excluded` row는 `attribute_synonyms.tsv`에 쓰지 않는다.
   - selected synset이 없어 canonical surface가 비어 있는 row는 `attribute_synonyms.tsv`에 쓰지 않는다.
   - `attribute_types.tsv`는 active Stage 5용으로 export하지 않는다.
@@ -364,6 +412,35 @@ offline attribute parent inventory build:
 - target object가 dependency/object mapping에서 확인되지 않으면 relation edge를 만들지 않는다.
 - source object가 직접 확인되지 않더라도 R18.1의 action-attached direct object-mapped child 후보 규칙 밖에서는 source를 복구하지 않는다.
 
+#### Stage 3.5. GPIC observed action inventory lookup
+
+Input:
+
+- Stage 3 records
+- active preposition MWE lexicon
+- optional prior resolved GPIC observed action inventory TSV
+
+Rules:
+
+- Before generating action candidates for a Stage 3 record, detect contiguous
+  preposition MWE spans with the same matcher used by Stage 4 R18.1.
+- Tokens inside selected preposition MWE spans are marked as consumed for action
+  candidate generation.
+- Action inventory candidates use VERB, VERB+particle, VERB+preposition, and
+  VERB+particle+preposition spans only after consumed preposition MWE tokens are
+  excluded.
+- If a prior resolved action inventory has the same exact `span_key` with a
+  final `chosen` or `raw_fallback` row, reuse that decision.
+- If exact `span_key` reuse does not apply, run the normal OEWN/Morphy action
+  lookup. When that lookup produces one or more normalized query candidates,
+  reuse a prior resolved action decision by `selected_query` only if the prior
+  inventory has a unique final `chosen` synset for that query. If multiple
+  prior `selected_query` matches disagree, keep the row `needs_manual`.
+- Any remaining action row with ambiguous synset or ambiguous Morphy evidence is
+  written as `needs_manual`.
+- If any `needs_manual` row remains, action canonical enrichment and formal
+  Stage 4 extraction must not proceed.
+
 #### Stage 3.5. GPIC observed action canonical inventory
 
 Input:
@@ -392,6 +469,10 @@ Rules:
   action synonym.
 - When no canonical ambiguous row remains, selected `chosen` rows may be
   exported to Stage 5 `action_synonyms.tsv`.
+- Action synonym raw keys are observed pre-Morphy caption surfaces, not only
+  lookup queries. Export includes `span_key`, `observed_surface`, and
+  `example_surfaces` variants when they map to the same resolved
+  `canonical_surface`.
 - `raw_fallback` rows are not exported because they have no selected synset and
   no canonical action surface.
 
@@ -424,7 +505,8 @@ Rules:
 세부 기준:
 
 - R12 object는 noun chunk 내부에서 root를 오른쪽 끝으로 갖는 left-expanding span을 만들고, GPIC observed object inventory에 row가 있는 가장 긴 span으로 만든다.
-- lookup query order는 Stage 3.5와 동일하게 plural common noun head에서 head lemma surface를 먼저 본다. raw object mention text는 observed surface를 유지한다.
+- tag-list path의 R12 object도 segment 내부 noun chunk에서 같은 selected span rule을 사용한다.
+- lookup 후보와 surface-changing conflict gate는 Stage 3.5와 동일하다. raw object mention text는 observed surface를 유지한다.
 - inventory에 없는 span은 object count에서 제외한다.
 - inventory row가 `decision_status=excluded`이면 object mention은 만들되 source_detail에 status/reason을 보존한다.
 - inventory row가 `decision_status=needs_manual`이면 raw fallback으로 넘기지 않고 Stage 4를 중단한다. 이 항목은 offline resolution에서 먼저 해결해야 한다.
@@ -433,8 +515,12 @@ Rules:
 - selected object core span은 inventory canonical/core surface가 lookup span의 suffix와 매칭되면 그 suffix token span이다.
 - canonical/core suffix가 lookup span 안에서 매칭되지 않으면 fallback으로 lookup span 전체를 core로 본다.
 - core span 밖 modifier token은 attribute/quantity 후보로 남긴다.
-- R13 attribute modifier는 같은 noun chunk 안에서 `dep in {"amod", "compound", "nmod"}`인 token만 사용한다.
+- R13 attribute modifier는 같은 noun chunk 안에서 `dep in {"amod", "compound", "nmod"}`인 token을 기본 후보로 사용한다.
+- R13은 기본 후보에서 `conj` chain으로 이어지는 token이 같은 noun chunk 안에 있고 consumed core token이 아니면 attribute로 확장한다.
+- R13은 `conj` token을 독립 attribute 후보로 보지 않는다.
 - R14 quantity modifier는 같은 noun chunk 안에서 `dep == "nummod"` 또는 `pos == "NUM"`인 token만 사용한다.
+- tag-list path에서 segment 내부 object가 없고 segment가 단일 attribute-like token으로만 구성되면 unattached attribute mention으로 남긴다.
+- tag-list path에서 unattached attribute mention은 `has_attribute` edge를 만들지 않는다.
 - R15 action은 `pos == "VERB"`인 token을 head로 보고, 가능한 경우 OEWN verb lookup으로 selected action span을 만든다.
 - Stage 4는 action 후보를 만들기 전에 preposition MWE lexicon span을 먼저 감지하고, 선택된 span 내부 token을 `relation_mwe_consumed`로 둔다.
 - preposition MWE span이 겹치면 longest span을 선택하고, 길이가 같으면 더 앞선 span을 선택한다.
@@ -453,18 +539,45 @@ Rules:
 - R15 valid OEWN verb 후보가 없으면 single VERB action mention을 raw fallback으로 만든다. 이 경우 selected synset이 없으므로 action inventory status는 `chosen`이 아니라 `raw_fallback`이다.
 - R15 selected action span 내부 token은 action mention으로 매핑한다.
 - R16 agent edge는 action head token의 direct child 중 `dep == "nsubj"`이고 그 child token이 selected object mapping에 있을 때만 만든다.
+- R16.1 action conjunct agent inheritance는 R16/R17 direct event role 생성 후, R18/R18.1 relation 생성 전에 수행한다.
+- R16.1 target action은 action head token의 `dep == "conj"`이고 그 token이 action head mapping에 있어야 한다.
+- R16.1 source action은 target action의 dependency head를 따라 찾은 action head이다. source action이 먼저 R16.1로 agent를 상속받은 경우도 fixed-point 반복으로 다음 conjunct action에 전달할 수 있다.
+- R16.1 target action에 이미 agent edge가 있으면 상속하지 않는다.
+- R16.1 target action에 direct child dep 중 `nsubjpass`, `auxpass`, `agent`가 있으면 passive-like target으로 보고 agent를 상속하지 않는다.
+- R16.1 source action의 agent target이 정확히 1개일 때만 target action으로 agent edge를 복사한다. source agent가 0개 또는 2개 이상이면 상속하지 않는다.
+- R16.1 inherited agent edge는 `rule_id == "R16.1"`을 쓰고 `role_source`, `source_action_i`, `target_action_i`, `conj_head_i` metadata를 남긴다.
+- R16.1은 patient를 상속하지 않는다.
+- R16.3 acl action head-object agent inheritance는 R16/R17/R17.1/R16.2 direct event role 생성 후, R16.1 action conjunct agent inheritance 전에 수행한다.
+- R16.3 target action은 action head token의 `dep == "acl"`이고 `tag == "VBG"`이며 그 token이 action head mapping에 있어야 한다.
+- R16.3 source object는 acl action의 dependency head token이다. 이 head token이 selected object mapping에 있을 때만 agent edge를 만든다.
+- R16.3 target action에 이미 agent edge가 있으면 새 agent edge를 만들지 않는다.
+- R16.3은 `tag == "VBN"`인 acl action에는 적용하지 않는다. VBN reduced relative/participial modifiers는 passive/adjectival reading이 흔하므로 agent로 복구하지 않는다.
+- R16.3 target action에 direct child dep 중 `nsubjpass`, `auxpass`, `agent`가 있으면 passive-like target으로 보고 agent를 상속하지 않는다.
+- R16.3 inherited agent edge는 `rule_id == "R16.3"`을 쓰고 `role_source == "acl_head_object_agent"`, `acl_head_i`, `action_i`, `target_i` metadata를 남긴다.
+- R16.3은 patient를 상속하지 않는다.
+- R16.3은 `relcl`, `advcl`, `xcomp`, `ccomp`, `acomp`, VBG/VBN fallback을 처리하지 않는다. relative pronoun subject resolution은 별도 rule로 남긴다.
+- R16.2 passive by-agent edge는 같은 action에서 R17.1 passive subject patient edge가 만들어진 경우에만 시도한다.
+- R16.2는 action head의 direct child 중 `lemma/text == "by"`이고 `dep in {"agent", "prep"}`인 token을 by cue로 본다.
+- R16.2 by cue의 direct child 중 `dep == "pobj"`이고 selected object mapping에 있는 token을 agent target으로 만든다.
+- R16.2 source detail에는 `raw_role == "by_agent_or_causer"`, `voice_normalization == "passive_to_active"`, `role_source == "passive_by_phrase"`를 남긴다.
 - R17 patient edge는 action head token의 direct child 중 `dep in {"obj", "dobj"}`이고 그 child token이 selected object mapping에 있을 때 만든다.
 - R17 selected phrasal action span이 ADP를 소비한 경우, 그 ADP의 direct `pobj` child가 selected object mapping에 있으면 patient edge로 만든다.
+- R17.1 passive patient edge는 action head token의 direct child 중 `dep in {"nsubjpass", "csubjpass"}`이고 그 child token이 selected object mapping에 있을 때 만든다.
+- R17.1 source detail에는 `raw_role == "theme"`, `voice_normalization == "passive_to_active"`, `role_source == "passive_subject"`를 남긴다.
 - R18.1 preposition MWE relation edge는 matched span의 initial relation token head가 source object mapping에 있고, final ADP의 direct `pobj` child가 target object mapping에 있을 때 만든다.
 - R18.1 matched span의 initial relation token head가 object가 아니고 `pos in {"VERB", "AUX"}`이면, 그 head의 direct child 중 object mapping이 있는 child를 dep label과 무관하게 relation source 후보로 본다.
-- R18.1 final ADP의 direct `pobj` child가 여러 개이고 각각 object mapping이 있으면 target 후보가 여러 개인 것으로 본다.
-- R18.1 source 후보와 target 후보가 각각 정확히 1개이고 둘 다 실제 mention이면 normal `relation` edge를 만든다.
-- R18.1 source 후보 또는 target 후보가 0개이거나 2개 이상이면 source/target을 확정하지 않고 audit용 `ambiguous_relation_candidate` edge를 만든다. 이 edge는 normal relation triple count에는 넣지 않는다.
+- R18.1 final ADP의 direct `pobj` child가 object mapping에 있으면 base target 후보로 본다.
+- R18.1 base target 후보에서 `conj` chain으로 이어지는 token이 object mapping에 있으면 같은 relation의 target으로 확장한다.
+- R18.1 target conj 확장은 target 쪽에만 적용하며 source object의 conjunct sibling은 확장하지 않는다.
+- R18.1 source 후보가 정확히 1개이고 target base 후보가 정확히 1개이면, base target과 그 conj-chain target 각각에 normal `relation` edge를 만든다.
+- R18.1 source 후보가 0개 또는 2개 이상이거나, 독립 target base 후보가 0개 또는 2개 이상이면 source/target을 확정하지 않고 audit용 `ambiguous_relation_candidate` edge를 만든다. 이 edge는 normal relation triple count에는 넣지 않는다.
 - R18.1 source 또는 target 후보가 0개인 경우에는 object mention을 새로 만들지 않고, edge endpoint에 audit-only sentinel `__missing_source__` 또는 `__missing_target__`을 둔다.
 - R18.1 ambiguous relation candidate count는 후보 pair 개수가 아니라 matched MWE occurrence 단위로 센다. 같은 caption 안 같은 matched token indices와 relation label에서 나온 후보 pair 또는 missing endpoint candidate는 Stage 6에서 하나의 ambiguous relation occurrence fact로 묶는다.
 - R18.1 relation label은 lexicon row의 canonical relation label을 쓴다.
 - R18.1 relation edge와 ambiguous candidate edge source detail에는 raw span surface, matched token indices, relation components, initial relation token index, final ADP token index, source/target candidate metadata를 보존한다.
-- R18 relation edge는 `pos == "ADP"` token의 direct child 중 `dep == "pobj"`가 target object mapping에 있고, ADP head token이 source object mapping에 있을 때만 만든다.
+- R18 relation edge는 `pos == "ADP"` token의 direct child 중 `dep == "pobj"`가 target object mapping에 있고, ADP head token이 source object mapping에 있을 때 만든다.
+- R18 target base `pobj`에서 `conj` chain으로 이어지는 token이 object mapping에 있으면 같은 source/relation에서 target relation edge를 추가로 만든다.
+- R18 target conj 확장은 target 쪽에만 적용하며 source object의 conjunct sibling은 확장하지 않는다.
 - R18 selected phrasal action span에 소비된 ADP token은 relation 후보에서 제외한다.
 - R18 preposition MWE span에 소비된 ADP token은 single-ADP relation 후보에서 제외한다.
 - Stage 4는 agent/patient/relation edge를 만들기 위해 새 object mention을 추가하지 않는다.
@@ -472,7 +585,9 @@ Rules:
 명시적 제외:
 
 - 일반 `pobj`를 action patient로 쓰지 않는다. 단, selected phrasal action span에 소비된 ADP의 direct `pobj`는 patient 후보로 쓴다.
-- passive voice를 고치지 않는다.
+- action conjunct에서 patient를 상속하지 않는다.
+- `relcl` relative pronoun subject를 head noun으로 치환하지 않는다. 이 문제는 R16.3 `acl` head-object agent와 별도이다.
+- passive voice는 direct passive subject와 passive `by` phrase만 semantic event_role로 보존한다. 그 밖의 passive 의미 추론, non-`by` causer, coreference 기반 passive agent 복원은 하지 않는다.
 - semantic relation source disambiguation을 하지 않는다. 단, R18.1 action-attached preposition MWE에서 direct object-mapped child 후보가 보이면 단일 후보는 relation으로 만들고, 다중 후보는 별도 ambiguous relation candidate로 보존한다.
 - self-edge repair를 하지 않는다.
 - pronoun/reference resolution을 하지 않는다.
@@ -482,6 +597,19 @@ Rules:
 
 정식 실행 gate:
 
+- Formal pipeline artifacts must carry a pipeline state manifest when the
+  producing runner supports it.
+- Action inventory used by formal Stage 4 must have an action-inventory sidecar
+  state proving it was built after active preposition MWE span detection.
+- Action inventory sidecar state must include
+  `action_inventory_preposition_mwe_aware == true` and
+  `preposition_mwe_detection_before_action == true`.
+- A legacy action inventory without this sidecar state is not a formal Stage 4
+  input; regenerate it with the current action inventory builder.
+- Formal Stage 4 runner는 resolved action inventory를 입력으로 받아야 한다.
+- action inventory를 입력하지 않는 runtime OEWN action lookup은 probe/debug
+  preview에서만 허용한다.
+- action inventory에 `needs_manual` row가 하나라도 있으면 Stage 4를 실행하지 않는다.
 - Stage 5 runner는 active attribute canonicalization이 필요한 run에서 attribute inventory를 입력으로 받아야 한다.
 - attribute inventory에 `needs_manual` row가 하나라도 있으면 Stage 5를 실행하지 않는다.
 - `chosen` row가 selected synset을 가졌지만 `canonical_surface`가 비어 있으면 canonical ambiguous 또는 canonical 미완료 상태로 보고 Stage 5를 실행하지 않는다.
@@ -509,6 +637,90 @@ Rules:
 - canonicalization 단계에서 새 object를 만들지 않는다.
 - canonicalization 단계에서 agent/patient를 고치지 않는다.
 - canonicalization 단계에서 relation source/target을 바꾸지 않는다.
+
+### Formal pipeline state manifest
+
+목적:
+
+- 단계 진행 상태를 대화 기억이나 파일명 추정에 맡기지 않는다.
+- formal runner가 이전 단계 산출물이 현재 rule 순서를 통과했는지 직접 확인한다.
+
+기준:
+
+- artifact-specific sidecar state는 `<artifact filename>.pipeline_state.json`
+  경로에 둔다.
+- mixed formal run의 전체 상태는 output directory의 `pipeline_state.json`에 둔다.
+- sidecar state는 최소한 아래 정보를 보존한다.
+  - `schema_version`
+  - `artifact_type`
+  - `stage`
+  - `status`
+  - `preview_mode`
+  - input/output path evidence
+- action inventory sidecar state는 추가로 아래 정보를 보존한다.
+  - `action_inventory_preposition_mwe_aware`
+  - `preposition_mwe_detection_before_action`
+  - `relation_mwe_match_total`
+  - `relation_mwe_consumed_token_total`
+  - `decision_status_counts`
+  - `needs_manual_rows`
+- formal Stage 4는 action inventory sidecar state가 없거나, 위 두 boolean
+  flag가 true가 아니면 실행하지 않는다.
+- mixed runner는 formal output directory에 `pipeline_state.json`을 쓰고,
+  `preview_mode`, inventory path, Stage 1/3/4/5/6 completion state를 남긴다.
+- preview/debug run은 `preview_mode == true`로 표시하고, formal pipeline
+  state로 취급하지 않는다.
+
+### Stage 3.5 inventory workflow state
+
+목적:
+
+- Stage 3.5 offline 준비 순서를 대화 기억이나 파일명 추정에 맡기지 않는다.
+- 이전 inventory phase가 clear되면 다음 phase로 자동 진행한다.
+- 다음 batch 또는 formal run에서 사용할 object/attribute/action/lexicon set을 한 manifest로 묶어 경로 복붙 실수를 줄인다.
+- blocker가 있으면 다음 formal step으로 넘어가지 않고, 어떤 manual 또는
+  canonical 작업이 필요한지 state file에 남긴다.
+
+기준:
+
+- workflow state는 output directory의 `stage35_workflow_state.json`에 둔다.
+- workflow가 `status == "complete"`가 되면 같은 output directory의
+  `inventory_bundle.json`에도 formal input bundle을 쓴다.
+- 공식 inventory promotion run은 workflow command에 `--publish-current`를
+  주고, `status == "complete"`일 때 같은 프로세스 안에서
+  `resources/gpic_inventory/current/inventory_bundle.json`까지 갱신한다.
+- guard/probe/simulation run은 `--publish-current`를 주지 않으면 historical
+  output snapshot으로만 남고 active current inventory를 덮어쓰지 않는다.
+- workflow state는 최소한 아래 정보를 보존한다.
+  - `schema_version`
+  - `artifact_type == "stage35_inventory_workflow"`
+  - `status`
+  - `next_required_step`
+  - object/attribute/action/canonical/export artifact path evidence
+  - blocker count와 representative examples
+  - 이번 실행에서 수행한 step 목록
+  - publish 요청 여부와 publish 결과
+- workflow runner는 새 extraction rule을 적용하지 않는다. 아래 기존 script만
+  순서대로 호출한다.
+  - observed attribute inventory build
+  - attribute manual overlay
+  - attribute canonical enrichment
+  - observed action inventory build
+  - action manual overlay
+  - action canonical enrichment
+  - Stage 5 lexicon export
+- `needs_manual` 또는 canonical ambiguous row가 하나라도 있으면 runner는
+  다음 phase를 실행하지 않고 `blocked_*` status로 중단한다.
+- action inventory build는 active preposition MWE lexicon을 입력으로 받아
+  R15 phrasal action 후보 생성 전 R18.1 relation MWE token을 제외한 상태여야 한다.
+- workflow runner가 생성한 Stage 5 lexicon bundle은 R26 state manifest gate를
+  통과할 수 있도록 action canonical export를 포함해야 한다.
+- inventory bundle manifest는 최소한 `artifact_type`, `status`,
+  `object_inventory`, `attribute_inventory`, `action_inventory`, `lexicon_dir`
+  또는 `lexicon_output_dir`를 보존한다.
+- runner가 inventory bundle과 개별 inventory path를 함께 받는 경우, 같은
+  artifact family의 경로가 서로 다르면 실행을 중단한다. 명시 override가
+  bundle을 조용히 덮어쓰지 않는다.
 
 ### Stage 6. count export
 
@@ -553,6 +765,7 @@ object co-occurrence 기준:
 - count export에서 새 rule 적용 금지
 - count export에서 누락 복구 금지
 - count export에서 semantic repair 금지
+- sentence와 tag-list가 같은 formal run에 포함된 경우, count table을 따로 붙이지 않고 combined canonical mentions/edges에서 한 번 재집계한다.
 
 ## 4. Explicitly Excluded From V1
 
@@ -563,14 +776,14 @@ object co-occurrence 기준:
 | pronoun resolution | antecedent scoring이 필요해 설명 가능성이 떨어짐 |
 | generic anaphora resolution | `the object`, `the device` 같은 표현의 antecedent 선택이 필요함 |
 | `one`, `another`, `others`, `both` splitting | subgroup과 instance modeling이 필요함 |
-| passive voice normalization | raw dependency 기준을 넘어 semantic role rewrite가 필요함 |
+| broader passive voice normalization | non-`by` causer, coreference, passive action collapse 등은 raw dependency 기준을 넘어 semantic role rewrite가 필요함 |
 | inherited agent repair | 후처리 patch가 되기 쉬움 |
 | skipped reference role recovery | 앞선 repair 실패를 다시 고치는 구조가 됨 |
 | self-edge repair | coreference/relation repair에 의존함 |
 | PP source disambiguation | relation source 선택에 semantic scoring이 필요함. R18.1의 action-attached direct object-mapped child 후보 보존은 scoring이 아니라 candidate fact 보존이므로 별도 허용 |
 | with-absolute recovery | spaCy가 놓친 object를 patch rule로 복구하는 구조가 됨 |
 | scene context fallback | object/context 분리 rule이 복잡해짐 |
-| tag-list segment-specific extraction | comma segment split과 segment별 object/attribute grouping이 새 rule을 필요로 함 |
+| tag-list action/relation extraction | comma segment만으로 event/relation source와 target을 안정적으로 설명하기 어려움 |
 | tag-list same-pipeline extraction | tag-list를 문장처럼 parsing하면 입력 형식 mismatch로 dependency/noun chunk가 흔들림 |
 | undocumented phrasal action repair | OEWN verb lookup으로 선택되지 않은 prep/particle 구조를 semantic patch로 복구하지 않음 |
 | LLM extraction | v1은 rule-based baseline |

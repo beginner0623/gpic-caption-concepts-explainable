@@ -40,6 +40,13 @@ def atomic_text_writer(
         temp_path.unlink(missing_ok=True)
         if force_fallback:
             raise
+        if os.environ.get("GPIC_ATOMIC_IO_ALLOW_AUTO_FALLBACK") != "1":
+            raise PermissionError(
+                "cannot create same-directory atomic temp file; rerun the "
+                "generated-artifact command with the correct writable workspace "
+                "or approved outside-sandbox execution instead of falling back "
+                "to a different temp directory"
+            ) from exc
         debug_log(f"same_dir_temp_permission_error error={exc!r}")
         temp_path = _new_fallback_temp_path(path)
         handle = temp_path.open("x", encoding=encoding, newline=newline)

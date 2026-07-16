@@ -20,7 +20,10 @@ from nltk.corpus import wordnet as wn30
 from wn.morphy import Morphy
 
 from gpic_concepts_v1.atomic_io import atomic_text_writer
-from gpic_concepts_v1.inventory_validation import final_manual_resolution_blockers
+from gpic_concepts_v1.inventory_validation import (
+    final_manual_resolution_blockers,
+    is_manual_no_synset_head_fallback,
+)
 from gpic_concepts_v1.stage4_extract_raw import NLTK_DATA_DIR, OEWN_SPEC, WN_DATA_DIR
 
 
@@ -66,8 +69,15 @@ def main() -> None:
     for row in rows:
         synset_id = row.get("selected_oewn_synset", "").strip()
         if not synset_id:
-            _clear_canonical_columns(row)
-            row["canonical_selection_tag"] = "not_applicable_no_selected_synset"
+            if is_manual_no_synset_head_fallback(row) and row.get("canonical_surface", "").strip():
+                row["canonical_label_key"] = _surface_key(row["canonical_surface"])
+                row["canonical_selection_tag"] = (
+                    row.get("canonical_selection_tag", "").strip()
+                    or "manual_no_synset_head_canonical"
+                )
+            else:
+                _clear_canonical_columns(row)
+                row["canonical_selection_tag"] = "not_applicable_no_selected_synset"
             missing_synset += 1
             continue
         try:
@@ -163,6 +173,7 @@ def _decide_canonical(
         candidate_lemmas=candidate_lemmas,
         count_rows=count_rows,
         observed_exact_surfaces=_observed_exact_surfaces(row),
+        observed_exact_surface_keys=_observed_exact_surface_keys(row),
         all_lemmas=all_lemmas,
         ngram_candidates=ngram_candidates,
         ngram_evidence=ngram_evidence,
@@ -189,6 +200,7 @@ def _select_canonical(
     candidate_lemmas: list[str],
     count_rows: list[tuple[str, int]],
     observed_exact_surfaces: set[str],
+    observed_exact_surface_keys: set[str],
     all_lemmas: list[str],
     ngram_candidates: list[str],
     ngram_evidence: dict[tuple[str, str], float],
@@ -217,6 +229,12 @@ def _select_canonical(
     ]
     if len(exact_matches) == 1:
         return exact_matches[0], "selected_by_unique_observed_span_surface"
+
+    normalized_exact_matches = [
+        lemma for lemma in candidate_lemmas if _surface_key(lemma) in observed_exact_surface_keys
+    ]
+    if len(normalized_exact_matches) == 1:
+        return normalized_exact_matches[0], "selected_by_unique_observed_span_surface_key"
 
     if valid_rows:
         max_count = max(count for _, count in valid_rows)
@@ -277,15 +295,24 @@ def _observed_surface_variant_keys(
 
 
 def _observed_exact_surfaces(row: dict[str, str]) -> set[str]:
-    return {_display_surface(surface) for surface in _observed_surfaces(row) if surface}
+    return {_display_surface(surface) for surface in _observed_caption_surfaces(row) if surface}
+
+
+def _observed_exact_surface_keys(row: dict[str, str]) -> set[str]:
+    return {_surface_key(surface) for surface in _observed_caption_surfaces(row) if surface}
 
 
 def _observed_surfaces(row: dict[str, str]) -> list[str]:
-    surfaces = [row.get("observed_surface", "")]
-    surfaces.extend(_split_pipe(row.get("example_surfaces", "")))
+    surfaces = _observed_caption_surfaces(row)
     selected_query = row.get("selected_query", "")
     if selected_query:
         surfaces.append(selected_query)
+    return _ordered_unique(surfaces)
+
+
+def _observed_caption_surfaces(row: dict[str, str]) -> list[str]:
+    surfaces = [row.get("observed_surface", "")]
+    surfaces.extend(_split_pipe(row.get("example_surfaces", "")))
     return _ordered_unique(surfaces)
 
 

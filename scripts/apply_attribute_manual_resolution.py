@@ -105,17 +105,21 @@ def apply_attribute_manual_resolution(
             )
         )
 
+    fieldnames = _merged_fieldnames(fieldnames, list(resolved_rows[0].keys()) if resolved_rows else [])
     merged_rows: list[dict[str, str]] = []
     for row in full_rows:
         key = row.get("span_key", "")
         if key not in resolved_by_key:
-            merged_rows.append(dict(row))
+            merged_rows.append({field: row.get(field, "") for field in fieldnames})
             continue
-        replacement = dict(row)
+        replacement = {field: row.get(field, "") for field in fieldnames}
         resolved = resolved_by_key[key]
         for field in fieldnames:
             if field in CANONICAL_FIELDS:
                 replacement[field] = ""
+                continue
+            if field == "decision_status":
+                replacement[field] = _normalize_resolved_status(resolved.get(field, ""))
                 continue
             replacement[field] = resolved.get(field, row.get(field, ""))
         merged_rows.append(replacement)
@@ -182,6 +186,15 @@ def _atomic_copy(source: Path, target: Path) -> None:
     os.replace(temp_path, target)
 
 
+def _normalize_resolved_status(value: str) -> str:
+    status = value.strip()
+    if status in {"accepted", "chosen", "selected"}:
+        return "chosen"
+    if status in {"excluded", "needs_manual"}:
+        return status
+    raise ValueError(f"unsupported resolved attribute decision_status: {value!r}")
+
+
 def _unique_by_span_key(
     rows: list[dict[str, str]],
     label: str,
@@ -198,6 +211,17 @@ def _unique_by_span_key(
     if duplicates:
         raise ValueError(f"{label} has duplicate span_key rows: {sorted(duplicates)[:20]}")
     return by_key
+
+
+def _merged_fieldnames(
+    full_fieldnames: list[str],
+    resolved_fieldnames: list[str],
+) -> list[str]:
+    fieldnames = list(full_fieldnames)
+    for field in resolved_fieldnames:
+        if field not in fieldnames:
+            fieldnames.append(field)
+    return fieldnames
 
 
 def _count_by(rows: list[dict[str, str]], field: str) -> dict[str, int]:

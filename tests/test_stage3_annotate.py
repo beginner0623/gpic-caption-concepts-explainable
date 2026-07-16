@@ -12,6 +12,7 @@ from gpic_concepts_v1.stage3_annotate import (
     Stage3DependencyError,
     Stage3Timing,
     annotate_gpic_sentence_row,
+    annotate_gpic_tag_list_row,
     annotate_text,
     iter_annotated_docs_from_rows,
     make_stage3_nlp,
@@ -57,6 +58,22 @@ class Stage3AnnotateTest(unittest.TestCase):
 
         with self.assertRaises(Stage2InputError):
             annotate_gpic_sentence_row(row, nlp=self.nlp)
+
+    def test_tag_list_row_is_annotated_by_segment(self) -> None:
+        row = {
+            "key": "k-tag",
+            "caption": "brown boot, brick wall, display",
+            "caption_type": "tag",
+        }
+
+        record = annotate_gpic_tag_list_row(row, nlp=self.nlp)
+
+        self.assertEqual(record.meta["caption_shape"], "tag_list")
+        self.assertEqual([segment["text"] for segment in record.tag_segments], ["brown boot", "brick wall", "display"])
+        self.assertEqual(record.tag_segments[0]["char_start"], 0)
+        self.assertEqual(record.tag_segments[1]["char_start"], len("brown boot, "))
+        self.assertGreater(len(record.tokens), 0)
+        self.assertGreaterEqual(len(record.noun_chunks), 1)
 
     def test_object_mwe_pos_correction_is_not_part_of_stage3(self) -> None:
         record = annotate_text(
@@ -128,6 +145,42 @@ class Stage3AnnotateTest(unittest.TestCase):
             self.assertGreater(summary["noun_chunk_total"], 0)
             self.assertEqual(len(records), 1)
             self.assertEqual(summary_rows[0]["model"], DEFAULT_STAGE3_MODEL)
+        finally:
+            for path in sorted(tmp_path.rglob("*"), reverse=True):
+                if path.is_file():
+                    path.unlink(missing_ok=True)
+                elif path.is_dir():
+                    path.rmdir()
+            tmp_path.rmdir()
+
+    def test_run_stage3_annotate_writes_tag_list_records(self) -> None:
+        rows = [
+            {
+                "key": "k1",
+                "caption": "brown boot, brick wall, display",
+                "caption_type": "tag",
+            }
+        ]
+        tmp_path = _stage3_temp_base() / uuid.uuid4().hex
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        try:
+            input_path = tmp_path / "tag_rows.jsonl"
+            output_path = tmp_path / "stage3_tag_records.jsonl"
+            summary_path = tmp_path / "summary.jsonl"
+            write_jsonl(input_path, rows)
+
+            summary = run_stage3_annotate(
+                input_path,
+                output_path=output_path,
+                summary_path=summary_path,
+                caption_shape="tag_list",
+            )
+            records = list(iter_jsonl(output_path))
+
+            self.assertEqual(summary["total"], 1)
+            self.assertEqual(summary["caption_shape"], "tag_list")
+            self.assertEqual(summary["tag_segment_total"], 3)
+            self.assertEqual(len(records[0]["tag_segments"]), 3)
         finally:
             for path in sorted(tmp_path.rglob("*"), reverse=True):
                 if path.is_file():

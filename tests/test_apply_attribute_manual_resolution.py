@@ -52,13 +52,15 @@ class ApplyAttributeManualResolutionTest(unittest.TestCase):
                     {
                         "span_key": "several",
                         "observed_surface": "Several",
-                        "decision_status": "chosen",
+                        "decision_status": "accepted",
                         "decision_reason": "manual_selected_attribute_compatible_synset",
                         "selected_oewn_synset": "oewn-several-s",
                         "canonical_surface": "several",
                         "canonical_selection_tag": "manual_surface_preserved",
+                        "manual_confidence": "medium",
                     },
                 ],
+                extra_fieldnames=["manual_confidence"],
             )
 
             summary = script.apply_attribute_manual_resolution(
@@ -76,6 +78,7 @@ class ApplyAttributeManualResolutionTest(unittest.TestCase):
             self.assertEqual(rows[1]["decision_status"], "chosen")
             self.assertEqual(rows[1]["canonical_surface"], "")
             self.assertEqual(rows[1]["canonical_selection_tag"], "")
+            self.assertEqual(rows[1]["manual_confidence"], "medium")
 
     def test_missing_needs_manual_resolution_blocks(self) -> None:
         with tempfile.TemporaryDirectory(dir=_safe_temp_base()) as tmp:
@@ -102,7 +105,12 @@ class ApplyAttributeManualResolutionTest(unittest.TestCase):
             self.assertIn("overall", str(caught.exception))
 
 
-def _write_tsv(path: Path, rows: list[dict[str, str]]) -> None:
+def _write_tsv(
+    path: Path,
+    rows: list[dict[str, str]],
+    *,
+    extra_fieldnames: list[str] | None = None,
+) -> None:
     fieldnames = [
         "span_key",
         "observed_surface",
@@ -112,6 +120,9 @@ def _write_tsv(path: Path, rows: list[dict[str, str]]) -> None:
         "canonical_surface",
         "canonical_selection_tag",
     ]
+    for field in extra_fieldnames or []:
+        if field not in fieldnames:
+            fieldnames.append(field)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
         writer.writeheader()

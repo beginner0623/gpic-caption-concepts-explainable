@@ -22,21 +22,22 @@ v1의 기준은 다음 한 문장이다.
 
 ## 2. 입력 형태 한계
 
-### 2.1 Sentence caption만 처리
+### 2.1 Tag-list caption은 제한적으로 처리
 
-v1은 일반 문장형 caption만 concept extraction 대상으로 삼는다.
+v1은 일반 문장형 caption을 주 extraction 대상으로 삼고, tag-list caption은 제한된 object/attribute/quantity extraction만 수행한다.
 
 GPIC row의 `caption_type`이 `tag`인 caption은 다음처럼 처리한다.
 
 - `caption_shape = tag_list`
-- `skipped = true`
-- `skip_reason = tag_list_deferred`
+- sentence path로 보내지 않음
+- comma segment별로 spaCy annotation
+- segment 내부 noun chunk 기반 object/attribute/quantity만 count 가능
 
-tag-list를 보류한 이유:
+tag-list 제한 이유:
 
 - comma segment가 object인지 attribute인지 context인지 문법만으로 안정적으로 판단하기 어렵다.
 - tag-list를 일반 문장처럼 spaCy parsing하면 dependency와 noun chunk가 의미 없는 경우가 많다.
-- tag-list 전용 rule은 별도 설계가 필요하다.
+- tag-list action/relation source와 target은 안정적으로 설명하기 어렵다.
 
 ### 2.2 Noise removal은 기본 적용하지 않음
 
@@ -204,22 +205,49 @@ coreference는 scoring rule과 예외 처리가 빠르게 복잡해지기 때문
 
 ## 7. Passive voice 한계
 
-v1은 passive voice를 semantic role로 고치지 않는다.
+v1은 direct passive subject와 passive `by` phrase만 semantic event_role로 보존한다.
 
 예:
 
 `The building is surrounded by trees.`
 
-v1에서 가능한 문제:
+현재 처리:
 
-- `building`이 syntactic subject로 잡힐 수 있다.
-- `trees`가 passive agent로 canonical event role에 반영되지 않을 수 있다.
+- `building`이 object로 잡히고 `nsubjpass`이면 `surround`의 `patient/theme`으로 만든다.
+- `by trees`가 같은 passive action의 direct `by` phrase이면 `trees`를 `agent/by_agent_or_causer`로 만든다.
+- 생성 edge에는 `voice_normalization=passive_to_active` metadata를 남긴다.
+
+남는 한계:
+
 - `surrounded by`를 하나의 relation/action으로 collapse하지 않는다.
+- `by`가 아닌 causer phrase는 passive agent로 복원하지 않는다.
+- passive subject나 by-object가 object mapping에 없으면 새 object를 만들지 않는다.
+- coreference가 필요한 passive agent/theme 복원은 하지 않는다.
 
 이유:
 
-- passive normalization은 raw dependency를 semantic role로 rewrite하는 단계다.
-- v1은 raw extraction과 canonicalization을 분리하고, Stage 5에서 edge 구조를 고치지 않는 원칙을 유지한다.
+- passive event role은 Stage 4 raw extraction에서 명시 edge로 만든다.
+- Stage 5는 여전히 edge 구조를 새로 고치지 않고, Stage 4가 만든 edge를 canonicalize만 한다.
+
+## 7.1 ACL/relative clause 한계
+
+v1은 `acl` action의 head noun/object를 agent로 쓰는 좁은 R16.3만 적용한다.
+
+예:
+
+`A man holding a bat.`
+
+현재 처리:
+
+- `holding.dep == acl`, `holding.tag == VBG`, `holding.head == man`이면 `holding --agent--> man`을 만든다.
+- 이미 direct `nsubj` agent가 있는 action이면 새 agent를 만들지 않는다.
+- `tag == VBN`인 acl action이나 passive-like acl action이면 새 agent를 만들지 않는다.
+
+남는 한계:
+
+- `relcl` relative pronoun subject는 아직 head noun으로 치환하지 않는다.
+- `A man who is holding a bat.`에서 `who`를 `man`으로 resolve하는 rule은 별도로 필요하다.
+- `advcl`, `xcomp`, `ccomp`, `acomp`, VBG/VBN fallback 같은 broad inheritance는 하지 않는다.
 
 ## 8. Canonicalization 한계
 
@@ -300,7 +328,7 @@ Stage 6은 count를 만든다.
 | tag-list extraction | tag-list 전용 구조 설계 필요 |
 | relation MWE | `in front of`, `on top of` 등은 유용하지만 region 표현과 충돌 가능 |
 | phrasal action | action canonicalization과 relation 분리를 먼저 정해야 함 |
-| passive normalization | semantic role rewrite가 필요 |
+| broader passive normalization | non-`by` causer, coreference, passive action collapse 등은 별도 semantic rewrite가 필요 |
 | pronoun/coreference | scoring rule과 error analysis 필요 |
 | generic anaphora | `the object`, `the device` 같은 generic noun list와 antecedent scoring 필요 |
 | scene context | object/context 분리 기준이 복잡해지기 쉬움 |

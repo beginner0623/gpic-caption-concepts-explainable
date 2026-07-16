@@ -48,6 +48,25 @@ class InventoryValidationTest(unittest.TestCase):
 
         self.assertEqual(blockers, [])
 
+    def test_manual_no_synset_head_fallback_does_not_block(self) -> None:
+        blockers = final_manual_resolution_blockers(
+            [
+                {
+                    "span_key": "black top",
+                    "observed_surface": "black top",
+                    "decision_status": "chosen",
+                    "selected_query": "top",
+                    "selected_oewn_synset": "",
+                    "canonical_surface": "top",
+                    "manual_resolution_type": "canonical_head_no_selected_synset",
+                    "canonical_selection_tag": "manual_no_synset_head_canonical",
+                }
+            ],
+            require_canonical_surface_for_selected_synset=True,
+        )
+
+        self.assertEqual(blockers, [])
+
     def test_selected_synset_without_canonical_surface_blocks_when_required(self) -> None:
         blockers = final_manual_resolution_blockers(
             [

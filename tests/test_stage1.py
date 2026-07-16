@@ -1,7 +1,7 @@
 import unittest
 
 from gpic_concepts_v1.stage1 import (
-    TAG_LIST_SKIP_REASON,
+    TAG_LIST_ROUTE_RULE_ID,
     CaptionShapeError,
     caption_shape_from_gpic_caption_type,
     caption_shape_from_gpic_row,
@@ -31,7 +31,7 @@ class Stage1Test(unittest.TestCase):
         self.assertIsNone(record.skip_reason)
         self.assertEqual(record.rule_ids, ["R1"])
 
-    def test_explicit_tag_list_record_is_skipped(self) -> None:
+    def test_explicit_tag_list_record_is_routed(self) -> None:
         record = make_caption_record(
             "c2",
             "brown boot, brick wall, display",
@@ -39,9 +39,9 @@ class Stage1Test(unittest.TestCase):
         )
 
         self.assertEqual(record.caption_shape, "tag_list")
-        self.assertTrue(record.skipped)
-        self.assertEqual(record.skip_reason, TAG_LIST_SKIP_REASON)
-        self.assertEqual(record.rule_ids, ["R1", "R1.1"])
+        self.assertFalse(record.skipped)
+        self.assertIsNone(record.skip_reason)
+        self.assertEqual(record.rule_ids, ["R1", TAG_LIST_ROUTE_RULE_ID])
 
     def test_meta_is_preserved_but_not_used_for_shape_detection(self) -> None:
         record = make_caption_record(
@@ -93,8 +93,8 @@ class Stage1Test(unittest.TestCase):
 
         self.assertEqual(record.caption_id, "def")
         self.assertEqual(record.caption_shape, "tag_list")
-        self.assertTrue(record.skipped)
-        self.assertEqual(record.skip_reason, TAG_LIST_SKIP_REASON)
+        self.assertFalse(record.skipped)
+        self.assertIsNone(record.skip_reason)
 
     def test_gpic_row_requires_caption_type(self) -> None:
         with self.assertRaises(CaptionShapeError):

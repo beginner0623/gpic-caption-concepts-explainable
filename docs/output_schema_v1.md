@@ -87,7 +87,7 @@ Schema:
 | `caption` | string | yes | 원본 caption text |
 | `caption_shape` | string | yes | `sentence` 또는 `tag_list` |
 | `skipped` | boolean | yes | extraction skip 여부 |
-| `skip_reason` | string or null | yes | 예: `tag_list_deferred` |
+| `skip_reason` | string or null | yes | skipped record의 reason. 정상 route row는 null |
 | `pipeline_version` | string | yes | 예: `v1_explainable` |
 | `rule_ids` | list[string] | yes | caption-level decision에 관여한 rule id |
 | `meta` | object | no | split, shard, source 등 optional metadata |
@@ -107,15 +107,15 @@ Schema:
 }
 ```
 
-tag-list skip 예시:
+tag-list route 예시:
 
 ```json
 {
   "caption_id": "000002",
   "caption": "brown boot, brick wall, display, indoor, large",
   "caption_shape": "tag_list",
-  "skipped": true,
-  "skip_reason": "tag_list_deferred",
+  "skipped": false,
+  "skip_reason": null,
   "pipeline_version": "v1_explainable",
   "rule_ids": ["R1", "R1.1"],
   "meta": {}
@@ -712,6 +712,9 @@ action_event:{action}
 | `role` | string | `agent` 또는 `patient` |
 | `target` | string | canonical object |
 | `target_parent_concepts` | list[string] | target parent concept |
+| `target_parent_synset_ids` | list[string] | target parent synset id evidence |
+| `raw_role` | string | raw/passive evidence role. normal active edge는 `agent`/`patient`, passive subject는 `theme`, passive by phrase는 `by_agent_or_causer` |
+| `voice_normalization` | string | `none` 또는 `passive_to_active` |
 
 `count_key`:
 
@@ -875,29 +878,30 @@ caption 내부 id:
 
 ## 13. Tag-list 처리
 
-v1에서 tag-list caption은 extraction 대상에서 제외한다.
+tag-list caption은 sentence path와 분리해서 처리한다.
 
-tag-list caption은 `caption_records.jsonl`에는 남긴다.
+Stage 1은 tag-list row를 sentence rows와 별도 tag rows로 남길 수 있다.
+Stage 3은 comma segment별 token/noun_chunk evidence를 `tag_segments` metadata에
+보존한다. Stage 4는 tag-list segment 내부 object/attribute/quantity만 같은
+`raw_mentions.jsonl` / `raw_edges.jsonl` schema로 만든다.
 
-그러나 아래 파일에는 row를 만들지 않는다.
-
-- `raw_mentions.jsonl`
-- `raw_edges.jsonl`
-- `canonical_mentions.jsonl`
-- `canonical_edges.jsonl`
-- `facts.jsonl`
-- count tables
-
-tag-list caption의 `CaptionRecord`는 다음과 같아야 한다.
+tag-list caption의 `CaptionRecord`는 다음과 같다.
 
 ```json
 {
   "caption_shape": "tag_list",
-  "skipped": true,
-  "skip_reason": "tag_list_deferred",
+  "skipped": false,
+  "skip_reason": null,
   "rule_ids": ["R1", "R1.1"]
 }
 ```
+
+tag-list path에서 만들지 않는 것:
+
+- action mention
+- event_role edge
+- relation edge
+- tag-list segment 사이의 semantic grouping
 
 ## 14. Forbidden Output Mutation
 

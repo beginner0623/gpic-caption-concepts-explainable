@@ -12,7 +12,7 @@ from typing import Any
 from gpic_concepts_v1.schema import CaptionRecord, CaptionShape
 
 
-TAG_LIST_SKIP_REASON = "tag_list_deferred"
+TAG_LIST_ROUTE_RULE_ID = "R1.1"
 GPIC_SENTENCE_CAPTION_TYPES = frozenset(("short", "medium", "long"))
 GPIC_TAG_LIST_CAPTION_TYPES = frozenset(("tag",))
 
@@ -95,9 +95,9 @@ def make_caption_record(
             caption_id=caption_id,
             caption=caption,
             caption_shape=shape,
-            skipped=True,
-            skip_reason=TAG_LIST_SKIP_REASON,
-            rule_ids=["R1", "R1.1"],
+            skipped=False,
+            skip_reason=None,
+            rule_ids=["R1", TAG_LIST_ROUTE_RULE_ID],
             meta=record_meta,
         )
 

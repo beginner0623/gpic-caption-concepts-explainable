@@ -33,6 +33,10 @@ def parse_args() -> argparse.Namespace:
         help="Optional output JSONL path for rows with caption_shape=sentence.",
     )
     parser.add_argument(
+        "--tag-rows",
+        help="Optional output JSONL path for rows with caption_shape=tag_list.",
+    )
+    parser.add_argument(
         "--summary",
         help="Optional output JSONL path for one Stage 1 summary row.",
     )
@@ -50,6 +54,7 @@ def main() -> None:
         args.input,
         caption_records_path=args.caption_records,
         sentence_rows_path=args.sentence_rows,
+        tag_rows_path=args.tag_rows,
         summary_path=args.summary,
         limit=args.limit,
     )

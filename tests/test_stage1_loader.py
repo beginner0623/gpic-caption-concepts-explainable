@@ -45,6 +45,7 @@ class Stage1LoaderTest(unittest.TestCase):
             input_path = tmp_path / "input.jsonl.gz"
             caption_records_path = tmp_path / "caption_records.jsonl"
             sentence_rows_path = tmp_path / "sentence_rows.jsonl"
+            tag_rows_path = tmp_path / "tag_rows.jsonl"
             summary_path = tmp_path / "summary.jsonl"
             write_gz_jsonl(input_path, rows)
 
@@ -52,20 +53,25 @@ class Stage1LoaderTest(unittest.TestCase):
                 [input_path],
                 caption_records_path=caption_records_path,
                 sentence_rows_path=sentence_rows_path,
+                tag_rows_path=tag_rows_path,
                 summary_path=summary_path,
             )
 
             caption_records = list(iter_jsonl(caption_records_path))
             sentence_rows = list(iter_jsonl(sentence_rows_path))
+            tag_rows = list(iter_jsonl(tag_rows_path))
             summary_rows = list(iter_jsonl(summary_path))
 
             self.assertEqual(summary["total"], 3)
             self.assertEqual(summary["caption_shape_counts"], {"sentence": 2, "tag_list": 1})
-            self.assertEqual(summary["skipped_counts"], {"tag_list_deferred": 1})
+            self.assertEqual(summary["skipped_counts"], {})
             self.assertEqual(len(caption_records), 3)
             self.assertEqual(len(sentence_rows), 2)
+            self.assertEqual(len(tag_rows), 1)
             self.assertEqual({row["key"] for row in sentence_rows}, {"k1", "k3"})
+            self.assertEqual(tag_rows[0]["key"], "k2")
             self.assertEqual(summary_rows[0]["caption_type_counts"]["tag"], 1)
+            self.assertEqual(summary_rows[0]["tag_rows_path"], str(tag_rows_path))
         finally:
             _remove_temp_tree(tmp_path)
 

@@ -92,6 +92,8 @@ def _selected_synset_missing_canonical_surface(row: Mapping[str, str]) -> bool:
 def _chosen_surface_correction_missing_synset(row: Mapping[str, str]) -> bool:
     if row.get("selected_oewn_synset", "").strip():
         return False
+    if is_manual_no_synset_head_fallback(row):
+        return False
     base_keys = {
         _surface_key(row.get("span_key", "")),
         _surface_key(row.get("observed_surface", "")),
@@ -106,6 +108,18 @@ def _chosen_surface_correction_missing_synset(row: Mapping[str, str]) -> bool:
         if key and base_keys and key not in base_keys:
             return True
     return False
+
+
+def is_manual_no_synset_head_fallback(row: Mapping[str, str]) -> bool:
+    return (
+        row.get("manual_resolution_type", "").strip() == "canonical_head_no_selected_synset"
+        or row.get("canonical_selection_tag", "").strip()
+        in {
+            "manual_modifier_removed_head_object",
+            "manual_modifier_removed_head_no_synset",
+            "manual_no_synset_head_canonical",
+        }
+    )
 
 
 def _surface_key(value: str) -> str:

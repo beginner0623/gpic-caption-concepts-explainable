@@ -1,0 +1,15 @@
+{
+  "action_canonical_exported": true,
+  "action_canonical_inventory": "outputs\\front1000000_gpic_nano_20260715\\stage35_after_object_manual\\inventory\\gpic_observed_action_inventory_stage35_workflow_manual_resolved_canonical.tsv",
+  "action_raw_fallback_rows_skipped": 2667,
+  "action_synonym_rows": 6593,
+  "action_synonym_rows_added": 2064,
+  "artifact_type": "stage5_lexicon_bundle",
+  "attribute_inventory": "outputs\\front1000000_gpic_nano_20260715\\stage35_after_object_manual\\inventory\\gpic_observed_attribute_inventory_stage35_workflow_manual_resolved_canonical.tsv",
+  "attribute_synonym_rows": 13996,
+  "output_dir": "outputs\\front1000000_gpic_nano_20260715\\stage35_after_object_manual\\lexicons_after_stage35_workflow",
+  "preview_mode": false,
+  "schema_version": 1,
+  "stage": "5",
+  "status": "ready"
+}

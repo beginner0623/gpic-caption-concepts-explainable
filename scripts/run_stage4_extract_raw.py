@@ -15,6 +15,11 @@ from gpic_concepts_v1.inventory_validation import (
     normalize_inventory_decision_status,
     read_inventory_rows,
 )
+from gpic_concepts_v1.pipeline_state import (
+    PipelineStateError,
+    artifact_state_path,
+    require_action_inventory_sidecar_state,
+)
 from gpic_concepts_v1.stage4_extract_raw import (
     _load_object_lookup_runtime,
     load_gpic_action_inventory,
@@ -81,11 +86,25 @@ def parse_args() -> argparse.Namespace:
             "instead of a GPIC observed inventory."
         ),
     )
+    parser.add_argument(
+        "--allow-runtime-action-lookup-preview",
+        action="store_true",
+        help=(
+            "Preview/debug mode only: allow Stage 4 to use live OEWN verb "
+            "lookup instead of a resolved GPIC observed action inventory."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if not args.action_inventory and not args.allow_runtime_action_lookup_preview:
+        raise SystemExit(
+            "--action-inventory is required for formal Stage 4 extraction. "
+            "Use --allow-runtime-action-lookup-preview only for OEWN "
+            "action lookup preview/debug runs."
+        )
     if args.object_inventory:
         object_inventory_path = Path(args.object_inventory)
         _raise_if_object_inventory_not_ready(object_inventory_path)
@@ -101,7 +120,7 @@ def main() -> None:
         action_inventory_path = Path(args.action_inventory)
         _raise_if_action_inventory_not_ready(action_inventory_path)
         action_lookup = load_gpic_action_inventory(action_inventory_path)
-    else:
+    elif args.allow_runtime_action_lookup_preview:
         action_lookup = _load_object_lookup_runtime()
     preposition_mwe_lookup = (
         load_preposition_mwe_lexicon(Path(args.preposition_mwe_lexicon))
@@ -145,6 +164,21 @@ def _raise_if_object_inventory_not_ready(path: Path) -> None:
 
 
 def _raise_if_action_inventory_not_ready(path: Path) -> None:
+    try:
+        action_state = require_action_inventory_sidecar_state(path)
+    except PipelineStateError as exc:
+        raise SystemExit(
+            json.dumps(
+                {
+                    "status": "blocked_action_inventory_pipeline_state_before_stage4",
+                    "action_inventory": str(path),
+                    "pipeline_state": str(artifact_state_path(path)),
+                    "blocker_reason": str(exc),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        ) from exc
     rows = read_inventory_rows(path)
     blockers: list[dict[str, str]] = []
     for row in rows:
@@ -181,6 +215,7 @@ def _raise_if_action_inventory_not_ready(path: Path) -> None:
             {
                 "status": "blocked_action_inventory_before_stage4",
                 "action_inventory": str(path),
+                "pipeline_state_status": action_state.get("status", ""),
                 "rows": len(rows),
                 "blocked_rows": len(blockers),
                 "blocked_examples": blockers[:10],

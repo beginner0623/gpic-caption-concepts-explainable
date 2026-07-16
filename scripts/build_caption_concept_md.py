@@ -106,7 +106,7 @@ def build_report(
         "- Stage 4: raw mention and edge extraction",
         "- Stage 5: canonical label and parent concept assignment",
         "- Stage 6: countable fact export",
-        "- v1 제외: coreference, passive normalization, undocumented relation MWE repair, phrasal action collapse",
+        "- v1 제외: coreference, undocumented relation MWE repair, phrasal action collapse",
         "",
         "> 주의: 이 파일은 이미 생성된 Stage 3/5/6 output을 읽어서 보여주는 rendering 결과다. 새 extraction rule은 적용하지 않는다.",
         "",

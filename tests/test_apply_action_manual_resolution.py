@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib.util
+import json
 import os
 import tempfile
 import unittest
@@ -66,6 +67,11 @@ class ApplyActionManualResolutionTest(unittest.TestCase):
                 output_path=output,
             )
             rows = _read_tsv(output)
+            state = json.loads(
+                output.with_name(f"{output.name}.pipeline_state.json").read_text(
+                    encoding="utf-8"
+                )
+            )
         finally:
             _remove_tree(tmp_path)
 
@@ -76,6 +82,11 @@ class ApplyActionManualResolutionTest(unittest.TestCase):
         self.assertEqual(rows[0]["selected_oewn_synset"], "fake-shine-v")
         self.assertEqual(rows[0]["selected_oewn_lexfile"], "verb.weather")
         self.assertEqual(rows[0]["synset_selection_tag"], "manual_select")
+        self.assertEqual(state["artifact_type"], "gpic_observed_action_inventory")
+        self.assertEqual(state["status"], "resolved")
+        self.assertEqual(state["needs_manual_rows"], 0)
+        self.assertTrue(state["manual_resolution_applied"])
+        self.assertTrue(state["preposition_mwe_detection_before_action"])
 
     def test_missing_needs_manual_resolution_blocks(self) -> None:
         tmp_path = _temp_base() / uuid.uuid4().hex
@@ -112,6 +123,63 @@ class ApplyActionManualResolutionTest(unittest.TestCase):
             _remove_tree(tmp_path)
 
         self.assertIn("manual_resolution_key_mismatch", str(caught.exception))
+
+    def test_review_style_manual_decision_selects_singular_morphy_query(self) -> None:
+        tmp_path = _temp_base() / uuid.uuid4().hex
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        try:
+            full = tmp_path / "full.tsv"
+            manual = tmp_path / "manual.tsv"
+            output = tmp_path / "resolved.tsv"
+            _write_tsv(
+                full,
+                [
+                    {
+                        "span_key": "installed",
+                        "observed_surface": "installed",
+                        "decision_status": "needs_manual",
+                        "decision_reason": "manual_action_morphy_required",
+                        "selected_lookup_case": "verb_head_morphy_ambiguous",
+                        "selected_query": "instal|install",
+                        "all_oewn_synsets": "fake-install-v|fake-other-v",
+                        "all_oewn_lexfiles": "verb.contact|verb.change",
+                        "selected_oewn_synset": "",
+                        "selected_oewn_lexfile": "",
+                        "synset_selection_tag": "ambiguous_morphy_multiple_oewn_hit_queries",
+                        "synset_lemmas": "instal|install",
+                        "wn30_lemma_counts": (
+                            "instal:x:fake-install-v:instal%2:35:00:::instal.v.01:6"
+                            "||install:x:fake-install-v:install%2:35:00:::install.v.01:28"
+                        ),
+                        "decision_basis": "gpic_observed_action_inventory",
+                    }
+                ],
+            )
+            _write_tsv(
+                manual,
+                [
+                    {
+                        "span_key": "installed",
+                        "resolved_selected_oewn_synset": "fake-install-v",
+                        "manual_note": "choose install query",
+                    }
+                ],
+            )
+
+            self.script.apply_action_manual_resolution(
+                full_inventory_path=full,
+                manual_decisions_path=manual,
+                output_path=output,
+            )
+            rows = _read_tsv(output)
+        finally:
+            _remove_tree(tmp_path)
+
+        self.assertEqual(rows[0]["decision_status"], "chosen")
+        self.assertEqual(rows[0]["selected_query"], "install")
+        self.assertEqual(rows[0]["selected_oewn_synset"], "fake-install-v")
+        self.assertEqual(rows[0]["selected_oewn_lexfile"], "verb.contact")
+        self.assertIn("manual_note=choose install query", rows[0]["wn30_lemma_counts"])
 
 
 def _write_tsv(path: Path, rows: list[dict[str, str]]) -> None:

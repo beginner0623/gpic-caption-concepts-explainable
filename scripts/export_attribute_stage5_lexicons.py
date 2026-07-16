@@ -13,6 +13,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from gpic_concepts_v1.atomic_io import atomic_text_writer
+from gpic_concepts_v1.pipeline_state import (
+    build_stage5_lexicon_bundle_state,
+    output_dir_state_path,
+    write_pipeline_state,
+)
 
 
 LEXICON_FILES = (
@@ -103,8 +108,8 @@ def export_attribute_stage5_lexicons(
         if status == "no_synset":
             status = "chosen"
             legacy_no_synset_status_rows += 1
-        raw_key = _key(row.get("span_key") or row.get("observed_surface", ""))
-        if not raw_key:
+        raw_keys = _observed_surface_keys(row)
+        if not raw_keys:
             continue
         canonical_surface = row.get("canonical_surface", "").strip()
         if row.get("attribute_type", "").strip():
@@ -114,10 +119,12 @@ def export_attribute_stage5_lexicons(
         if status == "chosen":
             if not canonical_surface:
                 if selected_synset:
-                    chosen_missing_canonical_rows.append(raw_key)
+                    chosen_missing_canonical_rows.append(raw_keys[0])
                 continue
             else:
-                if raw_key not in synonym_keys:
+                for raw_key in raw_keys:
+                    if raw_key in synonym_keys:
+                        continue
                     synonym_rows.append(
                         {
                             "raw": raw_key,
@@ -157,7 +164,7 @@ def export_attribute_stage5_lexicons(
     merged_rows["action_synonyms.tsv"] = action_synonym_rows
     _write_lexicon_bundle(output_dir, merged_rows)
 
-    return {
+    summary = {
         "attribute_inventory": str(attribute_inventory_path),
         "action_canonical_inventory": (
             str(action_canonical_inventory_path)
@@ -177,6 +184,20 @@ def export_attribute_stage5_lexicons(
         "legacy_no_synset_status_rows": legacy_no_synset_status_rows,
         "ignored_excluded_canonical_rows": ignored_excluded_canonical_rows,
     }
+    write_pipeline_state(
+        output_dir_state_path(output_dir),
+        build_stage5_lexicon_bundle_state(
+            attribute_inventory_path=str(attribute_inventory_path),
+            action_canonical_inventory_path=(
+                str(action_canonical_inventory_path)
+                if action_canonical_inventory_path is not None
+                else None
+            ),
+            output_dir=str(output_dir),
+            summary=summary,
+        ),
+    )
+    return summary
 
 
 def _append_action_synonym_rows(
@@ -191,8 +212,8 @@ def _append_action_synonym_rows(
 
     for row in action_rows:
         status = row.get("decision_status", "").strip()
-        raw_key = _key(row.get("span_key") or row.get("observed_surface", ""))
-        if not raw_key:
+        raw_keys = _observed_surface_keys(row)
+        if not raw_keys:
             continue
         selected_synset = row.get("selected_oewn_synset", "").strip()
         canonical_surface = row.get("canonical_surface", "").strip()
@@ -201,13 +222,15 @@ def _append_action_synonym_rows(
             raw_fallback_skipped += 1
             continue
         if status != "chosen":
-            blocked_rows.append(f"{raw_key}: status={status or '<empty>'}")
+            blocked_rows.append(f"{raw_keys[0]}: status={status or '<empty>'}")
             continue
         if not selected_synset or not canonical_surface:
-            blocked_rows.append(f"{raw_key}: missing selected synset or canonical")
+            blocked_rows.append(f"{raw_keys[0]}: missing selected synset or canonical")
             continue
 
-        if raw_key not in action_synonym_keys:
+        for raw_key in raw_keys:
+            if raw_key in action_synonym_keys:
+                continue
             action_synonym_rows.append(
                 {
                     "raw": raw_key,
@@ -280,6 +303,25 @@ def _read_tsv(path: Path) -> list[dict[str, str]]:
 
 def _key(value: str) -> str:
     return " ".join(value.strip().lower().split())
+
+
+def _observed_surface_keys(row: Mapping[str, str]) -> tuple[str, ...]:
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw in (
+        row.get("span_key", ""),
+        row.get("observed_surface", ""),
+        *_split_pipe(row.get("example_surfaces", "")),
+    ):
+        key = _key(raw)
+        if key and key not in seen:
+            keys.append(key)
+            seen.add(key)
+    return tuple(keys)
+
+
+def _split_pipe(value: str) -> list[str]:
+    return [part for part in value.split("|") if part]
 
 
 if __name__ == "__main__":

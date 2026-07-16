@@ -1,0 +1,17 @@
+{
+  "action_canonical_inventory": "C:\\Users\\rlath\\Documents\\Codex\\gpic-caption-concepts-explainable\\resources\\gpic_inventory\\current\\inventory\\action_canonical_inventory.tsv",
+  "action_inventory": "C:\\Users\\rlath\\Documents\\Codex\\gpic-caption-concepts-explainable\\resources\\gpic_inventory\\current\\inventory\\action_inventory.tsv",
+  "artifact_type": "gpic_inventory_bundle",
+  "attribute_inventory": "C:\\Users\\rlath\\Documents\\Codex\\gpic-caption-concepts-explainable\\resources\\gpic_inventory\\current\\inventory\\attribute_inventory.tsv",
+  "lexicon_dir": "C:\\Users\\rlath\\Documents\\Codex\\gpic-caption-concepts-explainable\\resources\\gpic_inventory\\current\\lexicons",
+  "object_inventory": "C:\\Users\\rlath\\Documents\\Codex\\gpic-caption-concepts-explainable\\resources\\gpic_inventory\\current\\inventory\\object_inventory.tsv",
+  "preview_mode": false,
+  "published_at_utc": "2026-07-16T04:20:14+00:00",
+  "published_from_bundle": "outputs\\front1000000_gpic_nano_20260715\\stage35_after_object_manual\\inventory_bundle.json",
+  "schema_version": 1,
+  "snapshot_label": "front1m_gpic_nano_20260715",
+  "source_stage3_records": "outputs\\front1000000_gpic_nano_20260715\\stage3\\stage3_records.jsonl",
+  "source_workflow_state": "outputs\\front1000000_gpic_nano_20260715\\stage35_after_object_manual\\inventory_bundle.json",
+  "stage": "3.5-6",
+  "status": "complete"
+}

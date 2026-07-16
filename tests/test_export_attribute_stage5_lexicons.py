@@ -1,5 +1,6 @@
 import csv
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -31,7 +32,8 @@ class ExportAttributeStage5LexiconsTest(unittest.TestCase):
                 [
                     {
                         "span_key": "scarlet",
-                        "observed_surface": "scarlet",
+                        "observed_surface": "Scarlet",
+                        "example_surfaces": "Scarlet|ruby red",
                         "decision_status": "chosen",
                         "decision_reason": "selected_attribute_compatible",
                         "canonical_surface": "red",
@@ -72,7 +74,7 @@ class ExportAttributeStage5LexiconsTest(unittest.TestCase):
             synonyms = _read_tsv(output_dir / "attribute_synonyms.tsv")
             types = _read_tsv(output_dir / "attribute_types.tsv")
 
-            self.assertEqual(summary["chosen_synonym_rows_added"], 1)
+            self.assertEqual(summary["chosen_synonym_rows_added"], 2)
             self.assertEqual(summary["ignored_excluded_canonical_rows"], 1)
             self.assertEqual(summary["attribute_type_rows"], 0)
             self.assertEqual(summary["attribute_type_rows_deferred"], 3)
@@ -81,6 +83,17 @@ class ExportAttributeStage5LexiconsTest(unittest.TestCase):
                 [
                     {
                         "raw": "scarlet",
+                        "canonical": "red",
+                        "source": "gpic_observed_attribute_inventory",
+                        "notes": (
+                            "export_tag=chosen_canonical_synonym; "
+                            "decision_status=chosen; "
+                            "canonical_selection_tag=selected_by_wn30; "
+                            "decision_reason=selected_attribute_compatible"
+                        ),
+                    },
+                    {
+                        "raw": "ruby red",
                         "canonical": "red",
                         "source": "gpic_observed_attribute_inventory",
                         "notes": (
@@ -107,6 +120,7 @@ class ExportAttributeStage5LexiconsTest(unittest.TestCase):
                     {
                         "span_key": "shining",
                         "observed_surface": "shining",
+                        "example_surfaces": "shining|shines",
                         "decision_status": "chosen",
                         "decision_reason": "manual_action_synset_selected",
                         "selected_oewn_synset": "oewn-02771882-v",
@@ -134,13 +148,28 @@ class ExportAttributeStage5LexiconsTest(unittest.TestCase):
 
             actions = _read_tsv(output_dir / "action_synonyms.tsv")
 
-            self.assertEqual(summary["action_synonym_rows_added"], 1)
+            self.assertEqual(summary["action_synonym_rows_added"], 2)
             self.assertEqual(summary["action_raw_fallback_rows_skipped"], 1)
+            state = json.loads((output_dir / "pipeline_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["artifact_type"], "stage5_lexicon_bundle")
+            self.assertTrue(state["action_canonical_exported"])
+            self.assertEqual(state["action_synonym_rows_added"], 2)
             self.assertEqual(
                 actions,
                 [
                     {
                         "raw": "shining",
+                        "canonical": "shine",
+                        "source": "gpic_observed_action_inventory",
+                        "notes": (
+                            "export_tag=chosen_action_canonical_synonym; "
+                            "decision_status=chosen; "
+                            "canonical_selection_tag=selected_single_observed_variant_matched_synset_lemma; "
+                            "decision_reason=manual_action_synset_selected"
+                        ),
+                    },
+                    {
+                        "raw": "shines",
                         "canonical": "shine",
                         "source": "gpic_observed_action_inventory",
                         "notes": (
@@ -158,6 +187,7 @@ def _write_inventory(path: Path, rows: list[dict[str, str]]) -> None:
     fieldnames = [
         "span_key",
         "observed_surface",
+        "example_surfaces",
         "decision_status",
         "decision_reason",
         "canonical_surface",
@@ -176,6 +206,7 @@ def _write_action_inventory(path: Path, rows: list[dict[str, str]]) -> None:
     fieldnames = [
         "span_key",
         "observed_surface",
+        "example_surfaces",
         "decision_status",
         "decision_reason",
         "selected_oewn_synset",

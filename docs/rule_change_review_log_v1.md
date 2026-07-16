@@ -2,6 +2,692 @@
 
 이 문서는 v1 pipeline에서 rule 또는 lexicon을 추가하기 전에 부작용을 검토한 기록을 남기는 곳이다.
 
+## 2026-07-13: Stage 3.5 Workflow Publish-Current Integration
+
+Proposed rule or lexicon change:
+
+- Let `scripts/run_stage35_inventory_workflow.py` publish a completed workflow
+  bundle to the managed current inventory path when `--publish-current` is
+  explicitly requested.
+- Keep guard/probe/simulation runs unpublished unless they opt in.
+
+Rule generality classification:
+
+- General process/orchestration rule.
+- This is not a caption-specific rescue, semantic fallback, or lexicon entry.
+
+Target stage and rule id:
+
+- Stage 3.5-6 R27.2 current inventory publish from complete workflow.
+
+Existing rules affected:
+
+- Extends R27 Stage 3.5 workflow orchestration and R27.1 inventory bundle
+  manifest gate.
+- Does not change object, attribute, action, relation, canonical, or count
+  semantics.
+
+Expected count-table impact:
+
+- No direct count change for the same formal inventory bundle.
+- Reduces stale-inventory mistakes by promoting the completed bundle to the
+  active current location in the same workflow command.
+
+False positive risk:
+
+- None for extraction.
+- Operational risk is accidental overwrite of current by a probe run; mitigated
+  by requiring explicit `--publish-current`.
+
+False negative risk:
+
+- None for extraction.
+
+Reversibility:
+
+- Reversible by republishing another completed bundle to the same current path.
+- Historical output snapshots remain unchanged.
+
+Verification plan:
+
+- Add a workflow unit test that reaches complete and publishes to a temp current
+  directory.
+- Run bounded Stage 3.5 workflow and publish tests.
+
+Decision status:
+
+- Approved by user request on 2026-07-13: "캡션 돌려서 needs_manual 해결하고 canonical gate까지 통과해서 새로운 lexicon 추출하면 당연히 통합 inventory에 업데이트 해야하는거 아니야?"
+
+## 2026-07-13: Central Current Inventory Publish Path
+
+Proposed rule or lexicon change:
+
+- Add a stable current inventory publish step at
+  `resources/gpic_inventory/current/inventory_bundle.json`.
+- The publish step copies the completed object, attribute, action, optional
+  action-canonical inventories, Stage 5 lexicon bundle, and action inventory
+  pipeline-state sidecar from a completed Stage 3.5 snapshot.
+- The current bundle is the intended input for later inventory reuse and formal
+  mixed runs. Output snapshot paths remain run history, not the managed current
+  inventory location.
+
+Rule generality classification:
+
+- General process/orchestration rule.
+- This is not a caption-specific rescue, semantic fallback, or source-specific
+  lexicon rule.
+
+Target stage and rule id:
+
+- Stage 3.5-6 R27.2 central current inventory publish path.
+
+Existing rules affected:
+
+- Extends R27.1 inventory bundle manifest gate.
+- Does not change object, attribute, action, relation, canonical, or count
+  semantics.
+
+Expected count-table impact:
+
+- No direct count change for a fixed set of inventory inputs.
+- Prevents accidental reuse of stale output-snapshot paths when moving from
+  100-caption inventory checks to 1K/10K formal runs.
+
+False positive risk:
+
+- None for extraction.
+- Operationally, publish now fails when the action inventory sidecar is missing
+  instead of producing a formally unusable current bundle.
+
+False negative risk:
+
+- None for extraction.
+- A central bundle built from only 100 captions will naturally cover only that
+  inventory scope; larger formal runs may fall back for unseen terms until a
+  larger inventory is promoted.
+
+Reversibility:
+
+- Reversible by publishing a different completed bundle to the same central
+  path or by using an explicit snapshot bundle for a one-off run.
+
+Verification plan:
+
+- Add publish-script unit tests.
+- Publish a first-100-caption bundle into the central current path.
+- Run a 1K formal mixed pipeline using only the central current bundle and
+  confirm it completes with no preview mode.
+
+Decision status:
+
+- Approved by user request on 2026-07-13: "똑바로 보완해라. 그리고 일단 tsv 파일 내부는 처음 100 caption 기준으로만 채워놔."
+
+## 2026-07-13: Inventory Bundle Manifest Gate
+
+Proposed rule or lexicon change:
+
+- Add a formal inventory bundle manifest that groups the completed object,
+  attribute, action, and Stage 5 lexicon paths from a Stage 3.5 workflow.
+- Allow the Stage 3.5 workflow runner and formal mixed pipeline runner to accept
+  this bundle as a single input.
+- If a bundle and a per-family path are both supplied, fail when the paths
+  disagree instead of silently mixing inventory snapshots.
+
+Rule generality classification:
+
+- General process/orchestration rule.
+- This is not a source-specific evidence rule, one-off patch, or semantic
+  fallback.
+
+Target stage and rule id:
+
+- Stage 3.5-6 R27.1 inventory bundle manifest gate.
+
+Existing rules affected:
+
+- Complements R26 formal pipeline state manifest gate.
+- Complements R27 Stage 3.5 inventory workflow orchestration.
+- Does not change R11.1-R25 extraction, canonicalization, or count semantics.
+
+Expected count-table impact:
+
+- No direct count change.
+- Reduces the chance that a later large run accidentally uses stale object,
+  attribute, action, or lexicon inputs from different inventory snapshots.
+
+False positive risk:
+
+- None for concept extraction.
+- Operationally, a command can now fail if it supplies a bundle and a mismatched
+  explicit path. This is intended because mixed inventory snapshots are unsafe.
+
+False negative risk:
+
+- None for concept extraction.
+- Legacy per-path commands still work, but they do not get the same mismatch
+  protection unless a bundle is supplied.
+
+Reversibility:
+
+- Reversible by running legacy per-path arguments without a bundle.
+- The bundle is sidecar metadata and does not change inventory TSV contents.
+
+Verification plan:
+
+- Add unit tests for bundle loading and mismatch detection.
+- Add workflow tests confirming a complete workflow writes `inventory_bundle.json`.
+- Add mixed runner tests confirming bundle paths are applied.
+
+Decision status:
+
+- Approved by user request on 2026-07-13: "겁나 불안하게 하고 있었네; 보완해."
+
+## 2026-07-13: Stage 3.5 Inventory Workflow Orchestrator
+
+Proposed rule or lexicon change:
+
+- Add an explicit Stage 3.5 workflow runner that inspects inventory artifacts,
+  writes a workflow state file, and advances to the next offline preparation
+  step when the previous step is clear.
+- The runner must stop at object, attribute, action, or canonical blockers and
+  record the exact next required manual action instead of relying on chat memory.
+- The runner calls existing build/apply/canonical/export scripts; it does not
+  add new extraction, synset, canonical, or count semantics.
+
+Rule generality classification:
+
+- General process/orchestration rule.
+- This is not a one-off patch, source-label rescue, or semantic fallback.
+
+Target stage and rule id:
+
+- Stage 3.5-5 R27 inventory workflow orchestration.
+
+Existing rules affected:
+
+- Complements R26 formal pipeline state manifests.
+- Does not change R11.1-R11.5, R12-R25 extraction/canonical/count behavior.
+- Turns the existing negative gates into an explicit positive next-step runner.
+
+Expected count-table impact:
+
+- No direct count change.
+- Prevents formal Stage 4/5/6 from being run from stale or half-prepared
+  inventory artifacts.
+- Reduces repeated assistant/operator mistakes where a cleared Stage 3.5 phase
+  did not automatically proceed to the next required phase.
+
+False positive risk:
+
+- None for concept extraction.
+- Operationally, the runner may block if required paths are missing or state is
+  incomplete; this is preferable to silently skipping a Stage 3.5 phase.
+
+False negative risk:
+
+- None for concept extraction.
+- Operationally, a correctly prepared legacy artifact may need to be passed as
+  an explicit path if it was not created by the workflow's default naming.
+
+Reversibility:
+
+- Reversible by not using the workflow runner. Generated workflow state is
+  sidecar metadata and does not alter inventory TSV semantics.
+
+Verification plan:
+
+- Add unit tests for workflow next-step decisions.
+- Run bounded tests for the workflow planner.
+- Run the workflow on the current 10K inventory directory and confirm it stops
+  at the existing action `needs_manual` blocker rather than moving to canonical
+  or Stage 4.
+
+Decision status:
+
+- Approved by user request on 2026-07-13: "이전 단계가 clear되면 내가 따로 지시 안해도 다음 단계로 넘어가도록 해놔".
+
+## 2026-07-13: Scope Object/Attribute Surface-Conflict Guard To New Runtime Lookup
+
+Proposed rule or lexicon change:
+
+- Remove the overly broad behavior where exact user/manual inventory decisions
+  could be reopened merely because a lemma/Morphy/surface-changing query selected
+  a different synset.
+- Keep a scoped safety guard for fresh runtime lookup: if there is no reusable
+  prior/manual inventory row and observed exact surface and lemma/Morphy/base-form
+  query select different synsets, leave the row `needs_manual` with
+  `decision_reason=manual_surface_query_conflict_required`.
+- Object and attribute runtime lookup still prefers observed exact surface when
+  there is no conflicting selected fallback synset, and falls back to
+  lemma/Morphy/normalization only when observed exact lookup has no hit.
+- Keep the stale-prior hygiene rule that refuses to reuse old automatic
+  surface-changing prior rows without explicit manual evidence.
+
+Rule generality classification:
+
+- General lookup-order clarification.
+- This is not a surface-specific rescue mapping; it defines when manual
+  inventory authority wins and when a new unreviewed lookup conflict must be
+  manually reviewed.
+
+Target stage and rule id:
+
+- Stage 3.5 GPIC observed object inventory.
+- Stage 3.5 GPIC observed attribute inventory.
+- Stage 4 R12 object extraction runtime lookup helper.
+
+Existing rules affected:
+
+- Narrows the earlier object/attribute surface-changing conflict guard.
+- Does not change explicit manual decision authority: user-provided manual TSV
+  decisions remain authoritative.
+- Does not change joined-variant manual handling.
+
+Expected count-table impact:
+
+- User-approved object/attribute rows should not be reopened solely because exact
+  surface and Morphy/base-form candidates differ.
+- New, unreviewed object/attribute rows with exact-vs-Morphy/base-form selected
+  synset conflict still stop in the manual queue.
+- Existing user-approved manual rows remain valid unless the user explicitly
+  reopens them.
+
+False positive risk:
+
+- Exact surface OEWN senses may be accepted for manual inventory rows even when a
+  base-form/Morphy sense would be better in a particular caption.
+- This is accepted for v1 because exact observed surface is less surprising
+  than hidden surface-changing conflict blockers after the user has reviewed the
+  row.
+
+False negative risk:
+
+- Some runtime conflicts may still require manual review even when the exact
+  surface would have been acceptable.
+
+Reversibility:
+
+- Remove the scoped conflict helper functions and tests if the user later wants
+  exact surface to always win even for new unreviewed rows.
+
+Verification plan:
+
+- Update object, attribute, and Stage 4 regression tests so prior/manual
+  inventory rows win, but new runtime exact-vs-Morphy/base-form conflicts become
+  `needs_manual`.
+- Delete stale `surface_conflict_guard*` generated artifacts from the current
+  front-1000 inventory directory.
+- Run bounded unit tests for the changed lookup behavior.
+
+Decision status:
+
+- Revised by user in chat on 2026-07-13: the broad guard was patchy, but a scoped
+  guard is reasonable when no lexicon/manual row exists.
+
+## 2026-07-13: Object/Attribute Selected-Query Prior Reuse And Observed-Surface Lexicon Export
+
+Proposed rule or lexicon change:
+
+- Extend GPIC observed object and attribute prior reuse from exact `span_key`
+  only to exact `span_key` first, then unique final `chosen` `selected_query`.
+- Reuse by `selected_query` only after the current runtime OEWN lookup confirms
+  that the prior selected synset is still one of the current candidates.
+- Keep `excluded` and no-synset rows exact-span-only; do not propagate them by
+  `selected_query`.
+- Stage 5 synonym lexicon export must include original observed caption
+  surfaces from `span_key`, `observed_surface`, and `example_surfaces`, not only
+  Morphy/lookup-normalized query strings.
+
+Rule generality classification:
+
+- General inventory reuse and lexicon export rule.
+
+Target stage and rule id:
+
+- Stage 3.5 GPIC observed object inventory.
+- Stage 3.5 GPIC observed attribute inventory.
+- Stage 3.5-to-5 attribute/action synonym lexicon export.
+
+Existing rules affected:
+
+- Object and attribute inventory builders now avoid repeated manual decisions
+  for inflectional or Morphy-normalized variants whose selected query was
+  already resolved uniquely.
+- R20/R22 active synonym lexicons get observed pre-Morphy surface variants so
+  Stage 5 can canonicalize the forms that actually appeared in captions.
+
+Expected count-table impact:
+
+- No new extraction pattern is added.
+- Object/attribute inventory `needs_manual` rows may decrease when the same
+  normalized selected query was already resolved.
+- Attribute/action canonical count keys can become more stable because raw
+  observed variants such as inflected or diacritic surfaces are exported as
+  synonyms.
+
+False positive risk:
+
+- Low to moderate. `selected_query` reuse can propagate one prior sense to a
+  new observed surface. The current-candidate membership check and unique prior
+  selected synset guard reduce this risk.
+- Excluded/no-synset rows intentionally remain exact-only to avoid broad
+  negative propagation.
+
+False negative risk:
+
+- Low. Rows remain unresolved or `needs_manual` if prior selected-query evidence
+  is absent, conflicting, or not present in the current runtime candidate list.
+
+Reversibility:
+
+- Remove selected-query prior indexes from object/attribute builders.
+- Revert synonym export to one raw key per inventory row.
+
+Verification plan:
+
+- Add unit tests for object and attribute selected-query reuse and conflict/no
+  propagation behavior.
+- Add export tests proving `example_surfaces` variants are emitted as synonym
+  raw keys for attribute and action canonical rows.
+
+Decision status:
+
+- Approved by user request: "그래 그렇게 해. 그리고 매번 이렇게 다시 찾지 않도록 Morphy 전 원본 surface는 lexicon에 추가하도록 해."
+
+## 2026-07-13: Action Inventory Selected-Query Prior Reuse
+
+Proposed rule or lexicon change:
+
+- Extend Stage 3.5 action inventory prior reuse from exact `span_key` only to
+  exact `span_key` first, then resolved `selected_query`.
+- If a new observed action surface normalizes through OEWN/Morphy to a
+  `selected_query` that already has a unique final chosen synset in the prior
+  action inventory, reuse that synset instead of queuing the row as
+  `needs_manual`.
+- If prior rows for the same `selected_query` disagree, keep the new row
+  `needs_manual`.
+
+Rule generality classification:
+
+- General rule.
+
+Target stage and rule id:
+
+- Stage 3.5 action inventory preparation feeding R15.
+
+Existing rules affected:
+
+- R15 action span selection and Stage 3.5 action inventory lookup.
+- R11.4/R11.5 downstream action canonical inventory/export benefit from fewer
+  duplicate manual decisions.
+
+Expected count-table impact:
+
+- No new action extraction pattern is added.
+- Some inflectional variants that already resolve to a previously selected
+  action query, such as `sitting in -> sit in` or `mark -> mark`, can now become
+  `chosen` automatically.
+- Final action count keys may change only after the formal action canonical
+  export is regenerated from the resolved inventory.
+
+False positive risk:
+
+- Low to moderate. Reusing by `selected_query` can propagate a prior manual
+  sense to a new surface form. The conflict guard prevents reuse when prior
+  rows for that query disagree.
+
+False negative risk:
+
+- Low. Rows remain `needs_manual` when there is no unique prior chosen synset.
+
+Reversibility:
+
+- Revert the selected-query reuse index and lookup fallback. Exact `span_key`
+  reuse remains unchanged.
+
+Verification plan:
+
+- Add a unit test where prior `marked -> selected_query=mark` resolves a new
+  `mark` row by selected-query reuse.
+- Add a unit test where conflicting prior `selected_query=mark` rows do not get
+  reused.
+- Run the action inventory builder unit tests and relevant formal gate tests.
+
+Decision status:
+
+- Approved by user request: "보완해".
+
+## 2026-07-13: R26 Formal Pipeline State Manifest Gate
+
+Proposed rule or lexicon change:
+
+- Add artifact-level pipeline state manifests so formal runners no longer infer
+  stage readiness from filenames, chat memory, or partial summaries.
+- The action inventory builder writes a sidecar state file next to the generated
+  action inventory TSV.
+- Formal Stage 4 requires that action inventory sidecar state to prove action
+  candidates were built after active preposition MWE span detection.
+- The mixed formal runner writes an output-directory `pipeline_state.json`
+  recording preview/formal mode and stage completion state.
+
+Rule generality classification:
+
+- General formal pipeline execution gate.
+- This is not a semantic extraction rule, lexicon expansion, or one-off rescue
+  mapping.
+
+Target stage and rule id:
+
+- Stage 3.5-6 R26 formal pipeline state manifest gate.
+
+Existing rules affected:
+
+- R15/R18.1 extraction order is unchanged.
+- R11.4/R15 action inventory and extraction now require manifest evidence that
+  preposition MWE detection happened before action candidate generation.
+- Formal Stage 4 action inventory readiness now checks both TSV row status and
+  sidecar manifest state.
+- Preview/debug runtime action lookup remains possible only through explicit
+  preview flags.
+
+Expected count-table impact:
+
+- No direct count change.
+- Prevents count tables from being generated from stale, preview, or
+  out-of-order artifacts.
+
+False positive risk:
+
+- None for concept extraction, because no extraction behavior changes.
+- Operationally, a valid legacy artifact without sidecar state will be rejected
+  as formal input and must be regenerated with the current runner.
+
+False negative risk:
+
+- None for concept extraction.
+- Operationally, a missing or stale sidecar can block a run until regenerated.
+
+Reversibility:
+
+- Reversible by removing the R26 manifest gate and sidecar state checks.
+- Sidecar state files are non-destructive metadata and can be ignored by older
+  scripts.
+
+Verification plan:
+
+- Add unit tests for reading/writing pipeline state and rejecting missing or
+  stale action-inventory sidecars.
+- Update Stage 4 gate tests so formal Stage 4 rejects action inventory without
+  preposition-MWE-aware sidecar state.
+- Update mixed runner tests so a successful stubbed run writes formal
+  `pipeline_state.json`.
+- Run bounded tests for pipeline state, formal gates, mixed pipeline, and action
+  inventory builder.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-13 after repeated stage-order mistakes
+  showed that chat memory and filename conventions were insufficient.
+
+## 2026-07-12: R16.3 ACL Action Head-Object Agent Inheritance
+
+Proposed rule or lexicon change:
+
+- Add agent-only event-role inheritance for active `acl` actions.
+- After direct R16/R17/R17.1/R16.2 event role extraction, if an action head has
+  `dep == "acl"` and `tag == "VBG"`, has no existing agent, and its dependency
+  head is already a selected object, create an agent edge from the action to
+  that head object.
+- Do not apply this rule to `relcl`, `advcl`, `xcomp`, `ccomp`, `acomp`, or
+  generic VBG/VBN actions.
+- Do not inherit patients.
+
+Rule generality classification:
+
+- General dependency-evidence recall rule.
+- This is not coreference or relative-pronoun resolution. It only uses the
+  direct `acl -> head noun` dependency already present in the parse.
+
+Target stage and rule id:
+
+- Stage 4 R16.3 ACL action head-object agent inheritance.
+
+Existing rules affected:
+
+- R16 direct `nsubj` agent extraction remains unchanged.
+- R16.2/R17.1 passive handling remains unchanged.
+- R16.3 runs after direct event role extraction and before R16.1 conjunct
+  action agent inheritance, so a recovered acl agent may serve as the source
+  for a following conjunct action.
+- R16.1 remains limited to `conj` actions.
+
+Expected count-table impact:
+
+- Agent/patient pair count may increase for reduced relative/participial noun
+  modifiers such as `a man holding a bat`.
+- Action count should not change.
+- Patient count should not change from this rule.
+
+False positive risk:
+
+- Low to medium. Parser errors can attach an action as `acl` to the wrong noun.
+- The risk is bounded by requiring the acl head to already be an object and by
+  refusing to add an agent when the action already has one.
+- VBN acl actions are excluded because reduced past-participle modifiers often
+  have passive/adjectival readings such as `bicycles parked` or `sign mounted`.
+- Passive-like acl actions are also excluded when direct children include
+  `nsubjpass`, `auxpass`, or `agent`.
+
+False negative risk:
+
+- Still misses `relcl` cases such as `a man who is holding a bat`.
+- Still misses acl cases where the head noun is not selected as an object.
+- Does not recover patient/object roles beyond existing R17.
+
+Rejected scope:
+
+- `relcl` relative-pronoun subject replacement is intentionally excluded.
+- Broad old-code inheritance over `advcl`, `xcomp`, `ccomp`, `acomp`, and
+  VBG/VBN fallback is intentionally excluded.
+
+Reversibility:
+
+- Reversible by removing the R16.3 pass after direct event role extraction.
+- Added edges preserve `role_source=acl_head_object_agent` and `acl_head_i`
+  metadata.
+
+Verification plan:
+
+- Add a Stage 4 regression test where an acl action receives its head object as
+  agent.
+- Add a negative regression test proving R16.3 does not add an agent when a
+  direct R16 agent already exists.
+- Add a negative regression test proving passive-like acl actions do not get
+  an R16.3 agent.
+- Add a negative regression test proving VBN acl modifiers do not get an R16.3
+  agent even without an explicit `by` phrase.
+- Run bounded Stage 4 tests, then re-run the current 100-caption sample and
+  inspect added R16.3 edges.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-12.
+
+## 2026-07-12: Tag-list Segment Object/Attribute/Quantity Extraction
+
+Proposed rule or lexicon change:
+
+- Change tag-list handling from `tag_list_deferred` skip to a separate tag-list
+  path.
+- Stage 1 writes tag-list GPIC rows separately from sentence rows.
+- Stage 3 annotates each comma-separated tag segment as its own spaCy Doc and
+  preserves segment token/noun_chunk evidence.
+- Stage 4 extracts only object, attribute, and quantity mentions/edges from
+  tag-list segment noun chunks using the same GPIC object inventory and R12/R13/R14
+  rules as sentence captions.
+- If a tag-list segment has no extracted object and is a single attribute-like
+  token, Stage 4 preserves it as an unattached attribute mention.
+- Stage 4 does not create tag-list actions, event roles, relations, or
+  cross-segment semantic links.
+
+Rule generality classification:
+
+- General input-shape routing and segment extraction rule.
+- Not a source-specific rescue mapping or one-off patch.
+
+Target stage and rule id:
+
+- Stage 1 R1.1 tag-list route.
+- Stage 3 R6-R11 segment annotation evidence.
+- Stage 4 R12/R13/R14 tag-list object/attribute/quantity extraction.
+
+Existing rules affected:
+
+- R1.1 no longer means skip; it means tag-list route.
+- R12/R13/R14 are reused on tag-list segment noun chunks.
+- R15-R18 are not run for tag-list rows.
+- Stage 5/6 consume tag-list raw mentions/edges without new interpretation.
+
+Expected count-table impact:
+
+- Tag-list rows can now add object, object parent, attribute, quantity,
+  object-attribute, object-quantity, and object co-occurrence facts.
+- Tag-list rows do not add action, event-role, relation, relation-component, or
+  ambiguous-relation facts.
+
+False positive risk:
+
+- Medium. Short comma segments can be visually meaningful labels but may also be
+  context/noise. The risk is bounded by requiring the same GPIC observed object
+  inventory for object extraction.
+- Unattached single-token attribute mentions may include non-visual labels, but
+  they do not attach to objects.
+
+False negative risk:
+
+- Tag-list multi-token floating attributes and context phrases may be missed.
+- Tag-list action/relation information is intentionally not extracted.
+- Segment-to-segment grouping such as `red, shirt` is intentionally not inferred.
+
+Reversibility:
+
+- Reversible by routing tag-list rows back to `tag_list_deferred` and removing
+  the tag-list branch in Stage 3/4.
+- Tag-list output rows preserve `caption_shape=tag_list`,
+  `tag_segment_id`, and segment offsets in metadata.
+
+Verification plan:
+
+- Update schema/Stage 1 tests for non-skipped tag-list records and tag rows.
+- Add Stage 3 test for comma segment annotation metadata.
+- Add Stage 4 tests for tag-list object/attribute/quantity extraction and
+  single-token floating attribute preservation.
+- Run bounded tests for schema, Stage 1, Stage 3, and Stage 4.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-12.
+
 ## 2026-07-11: R18.1 Missing Endpoint Ambiguous Occurrences
 
 Proposed rule or lexicon change:
@@ -5428,3 +6114,864 @@ Verification plan:
 Decision status:
 
 - Approved by user in chat on 2026-07-11.
+
+## 2026-07-11: R13 Attribute Conjunct Expansion
+
+Proposed rule or lexicon change:
+
+- Extend R11.1/R13 attribute modifier detection so a token with `dep == "conj"`
+  becomes an attribute candidate only when it is reachable through a same-noun-
+  chunk `conj` chain rooted at an already accepted attribute modifier.
+- Keep the existing base attribute modifier deps as `amod`, `compound`, and
+  `nmod`.
+
+Rule generality classification:
+
+- General dependency-evidence recall rule.
+- This is not a semantic repair rule and does not globally treat every `conj`
+  token as an attribute. The `conj` token inherits candidacy only through a
+  chain rooted at an already accepted noun-chunk attribute modifier.
+
+Target stage and rule id:
+
+- Stage 3.5 R11.1 GPIC observed attribute inventory lookup.
+- Stage 4 R13 noun chunk modifier to attribute.
+
+Existing rules affected:
+
+- R11.1/R13 attribute candidate detection gains direct conjunct expansion.
+- Object core token consumption remains unchanged.
+- Quantity detection remains unchanged and still has precedence over attribute
+  detection.
+- Stage 5/Stage 6 canonicalization and count aggregation are not changed by
+  this rule; they simply receive additional R13 attribute mentions when the
+  dependency evidence exists.
+
+Expected count-table impact:
+
+- Attribute count and object-attribute pair count may increase for coordinated
+  modifiers such as `maroon and yellow jerseys`.
+- Existing base modifier counts should not decrease.
+
+False positive risk:
+
+- Low to medium. A parser may attach a non-attribute conjunct under an accepted
+  modifier.
+- The risk is bounded because expansion is limited to `conj` chains in the same
+  noun chunk and does not cross chunk boundaries.
+
+False negative risk:
+
+- Still misses floating predicate attributes, cross-chunk coordination, and
+  conjuncts not reachable from an accepted attribute modifier through a
+  same-noun-chunk `conj` chain.
+
+Reversibility:
+
+- Reversible by removing the direct conjunct expansion helper and keeping only
+  the base `amod`/`compound`/`nmod` checks.
+- Conj-expanded mentions preserve `modifier_source=conj_of_attribute_modifier`
+  metadata and the immediate `conj_head_i` for audit.
+
+Verification plan:
+
+- Add a Stage 4 regression test for `maroon and yellow jerseys` where `maroon`
+  is `nmod` and `yellow` is `conj`.
+- Add a Stage 4 regression test for a chained coordination such as `blue, white,
+  and yellow planes`.
+- Verify both record-based and doc-direct Stage 4 extraction paths keep the same
+  behavior where applicable.
+- Run bounded Stage 4 tests and a compile check.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-11.
+
+## 2026-07-12: R18/R18.1 Relation Target Conj Expansion
+
+Proposed rule or lexicon change:
+
+- Extend relation target detection so a confirmed target object reached through
+  `dep == "pobj"` can distribute the same relation to object-mapped tokens
+  reachable through a target-side `conj` chain.
+- Apply this to both single-ADP R18 relations and preposition-MWE R18.1
+  relations.
+- Do not expand source-side conjuncts in this rule.
+
+Rule generality classification:
+
+- General dependency-evidence recall rule.
+- This is not semantic relation source disambiguation and not a label-specific
+  rescue. It only follows explicit dependency coordination from an already
+  accepted target object.
+
+Target stage and rule id:
+
+- Stage 4 R18 single ADP relation extraction.
+- Stage 4 R18.1 preposition MWE relation extraction.
+
+Existing rules affected:
+
+- R18 gains target-side object `conj` expansion after a direct `pobj` target is
+  found.
+- R18.1 gains target-side object `conj` expansion after a final-ADP direct
+  `pobj` target is found.
+- R18.1 still treats multiple independent target bases as ambiguous.
+- R18.1 with one source candidate and one target base creates normal relation
+  edges for the base target and each coordinated target.
+- Stage 5 R24 and Stage 6 counting rules remain unchanged; they consume the
+  extra Stage 4 relation edges.
+
+Expected count-table impact:
+
+- Relation triple count may increase for coordinated targets such as
+  `next to a wall and a door` or `in front of a wall and a banner`.
+- Ambiguous relation candidate count should not increase for target conjunction
+  alone when there is one source candidate and one target base.
+- Existing ambiguous cases with multiple independent target bases remain
+  ambiguous relation candidates.
+
+False positive risk:
+
+- Low to medium. A parser may attach a non-target object as a conjunct of the
+  target object.
+- The risk is bounded because expansion starts only from an object-mapped
+  direct `pobj` target and follows only object-mapped `conj` chains.
+
+False negative risk:
+
+- Still misses target objects not connected by dependency `conj`, targets in
+  appositive/list structures, target objects hidden behind pronouns, and source
+  conjunct expansion.
+
+Reversibility:
+
+- Reversible by removing the target-conj expansion helper and restoring direct
+  `pobj` target candidates only.
+- Edge metadata records `target_resolution`, `target_base_i`, and immediate
+  `conj_head_i` for expanded targets.
+
+Verification plan:
+
+- Add a Stage 4 test where R18 `on` creates relation edges to both a base
+  target and a coordinated target.
+- Add a Stage 4 test where R18.1 `in front of` creates normal relation edges to
+  both a base target and a coordinated target when the source is resolved.
+- Keep the existing R18.1 multiple-independent-target test ambiguous.
+- Run bounded Stage 4 and Stage 6 tests plus syntax check.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-12.
+
+## 2026-07-12: R16.2/R17.1 Passive Voice Event Role Normalization
+
+Proposed rule:
+
+- Add Stage 4 R17.1: if an action head has a direct object-mapped
+  `nsubjpass` or `csubjpass` child, create an `event_role` edge with label
+  `patient`.
+- Add Stage 4 R16.2: if that same action has already produced an R17.1
+  passive subject edge, and the action has a direct `by` child with
+  `dep in {"agent", "prep"}` whose direct `pobj` child is object-mapped,
+  create an `event_role` edge with label `agent`.
+- Preserve passive evidence in metadata:
+  - R17.1: `raw_role=theme`, `voice_normalization=passive_to_active`,
+    `role_source=passive_subject`.
+  - R16.2: `raw_role=by_agent_or_causer`,
+    `voice_normalization=passive_to_active`,
+    `role_source=passive_by_phrase`.
+- Stage 6 keeps count keys unchanged but adds `raw_role` and
+  `voice_normalization` as explanatory aggregate fields for
+  `agent_patient_pair_counts.tsv`.
+
+Rule generality classification:
+
+- General dependency-evidence semantic-role normalization.
+- This is not a caption-specific patch. It uses standard passive dependency
+  evidence and object mapping.
+- R16.2 is gated on R17.1, so active `walk by a river`-style uses of `by` do
+  not become passive agents.
+
+Target stage and rule id:
+
+- Stage 4 R17.1 passive subject to patient/theme.
+- Stage 4 R16.2 passive by-phrase to agent/by-agent-or-causer.
+
+Existing rules affected:
+
+- R16 remains direct active `nsubj -> agent`.
+- R16.1 still blocks passive-like conjunct targets; it does not infer passive
+  roles.
+- R17 remains direct `obj/dobj` and selected phrasal-action ADP `pobj`
+  patient extraction.
+- R18/R18.1 relation extraction is unchanged.
+- Stage 5 remains graph-shape preserving; passive role edges are created
+  before canonicalization.
+
+Expected count-table impact:
+
+- Passive subjects can increase `event_role:*:patient:*` counts.
+- Passive `by` phrases can increase `event_role:*:agent:*` counts.
+- Existing active event role count keys keep their old meaning.
+- Additional `raw_role` and `voice_normalization` columns explain whether a row
+  came from passive normalization.
+
+False positive risk:
+
+- Low to medium. Parser errors around `by` attachment could still create a
+  passive agent, but the rule requires a passive subject on the same action.
+
+False negative risk:
+
+- No non-`by` passive causer recovery.
+- No passive role recovery when the passive subject or by-object is not
+  object-mapped.
+- No coreference-based passive agent/theme recovery.
+- No action collapse such as treating `surrounded by` as a phrasal action.
+
+Rejected scope:
+
+- Do not perform passive repair in Stage 5.
+- Do not infer passive agents from arbitrary relations or prepositions.
+- Do not create new object mentions to satisfy passive roles.
+
+Verification plan:
+
+- Add failing Stage 4 tests for `nsubjpass -> patient`, passive `by` agent,
+  and active `by` non-passive negative case.
+- Add Stage 6 test that passive metadata survives into fact/table output.
+- Run bounded Stage 4 and Stage 6 tests, then re-run the current 100-caption
+  sample and inspect added R16.2/R17.1 edges.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-12.
+
+## 2026-07-12: R16.1 Action Conjunct Agent Inheritance
+
+Proposed rule or lexicon change:
+
+- Add agent-only event-role inheritance for conjunct actions.
+- After direct R16/R17 event role extraction, if an action head has
+  `dep == "conj"`, has no existing agent, and its dependency head is another
+  action with exactly one agent, copy that agent to the conjunct action.
+- Do not inherit into passive-like target actions whose direct children include
+  `nsubjpass`, `auxpass`, or `agent`.
+- Do not inherit patients.
+
+Rule generality classification:
+
+- General dependency-evidence recall rule.
+- This is not semantic role inference. It only transfers an already observed
+  agent across explicit action coordination.
+
+Target stage and rule id:
+
+- Stage 4 R16.1 action conjunct agent inheritance.
+
+Existing rules affected:
+
+- R16 direct `nsubj` agent extraction remains unchanged.
+- R17 patient extraction remains unchanged.
+- R16.1 runs after direct R16/R17 role creation and before R18/R18.1 relation
+  extraction.
+- Stage 5 and Stage 6 consume the additional raw `event_role` agent edges
+  without adding new interpretation.
+- Passive-like target actions are excluded because their surface subject is
+  already patient-like or their agent may be expressed by a `by` phrase.
+
+Expected count-table impact:
+
+- Agent/patient pair count may increase for coordinated actions such as
+  `dogs standing and moving`.
+- Action count should not change.
+- Patient count should not change from this rule.
+
+False positive risk:
+
+- Low to medium. A parser may attach two actions as conjuncts even when the
+  agent should not be shared.
+- The risk is bounded by requiring the source action to have exactly one agent
+  and the target action to have no existing agent.
+- A 100-caption self-review found false positives such as active action
+  `stand` sharing its agent into passive-like `parked/framed`; the
+  `nsubjpass`/`auxpass`/`agent` target gate was added as a general syntax
+  safety rule.
+
+False negative risk:
+
+- Still misses shared agents when actions are not linked by `conj`, when the
+  source action has no extracted agent, or when the source action has multiple
+  candidate agents.
+- Does not recover passive/semantic agents.
+
+Rejected scope:
+
+- Patient inheritance is intentionally excluded. Structures such as
+  `standing and holding a bat` show why copying patient roles across conjunct
+  actions would be unsafe.
+
+Reversibility:
+
+- Reversible by removing the R16.1 inheritance pass after direct event role
+  extraction.
+- Inherited edges preserve `role_source=conj_agent_inheritance`,
+  `source_action_i`, `target_action_i`, and `conj_head_i` metadata.
+
+Verification plan:
+
+- Add a Stage 4 regression test where a conjunct action inherits one agent from
+  a source action.
+- Add a chained-conj regression test to confirm fixed-point inheritance.
+- Add a negative regression test proving patient roles are not inherited.
+- Add a negative regression test proving passive-like conjunct targets do not
+  inherit active agents.
+- Run bounded Stage 4 tests and Stage 6 count tests.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-12.
+
+## 2026-07-12: GPIC Observed Object Inventory Prior Reuse
+
+Proposed rule or lexicon change:
+
+- Add an optional prior GPIC observed object inventory input to the object inventory builder.
+- When a current observed object span has the same exact `span_key` as a final prior GPIC inventory row, reuse the prior row's selected synset, canonical surface, and parent evidence.
+- Refresh only current-run evidence fields: `count`, `caption_count`, `example_caption_ids`, and `example_surfaces`.
+- Do not reuse unresolved prior rows. A prior row is reusable only when the shared final-inventory gate has no blockers, including selected-synset rows missing canonical surface.
+
+Rule generality classification:
+
+- General offline inventory reuse rule over exact GPIC observed span keys.
+- This is not a semantic synonym rule, not an external dataset fallback, and not a tag-list-specific patch.
+
+Target stage and rule id:
+
+- Stage 3.5 GPIC observed object inventory builder.
+- Supports R12 by preventing already resolved GPIC spans from re-entering the manual queue.
+
+Existing rules affected:
+
+- Stage 3.5 object lookup still builds rows from observed GPIC noun chunks.
+- OEWN lookup remains the fallback for spans not found in the prior GPIC inventory.
+- Stage 4 inventory readiness gates remain unchanged.
+- COCO/LVIS/Objects365/OpenImages/Visual Genome source-label inventories remain inactive for this pipeline.
+
+Expected count-table impact:
+
+- No direct count-table change by itself.
+- Current run counts/examples are recalculated, but reused rows preserve prior semantic decisions so sentence and tag-list batches can be accumulated without repeating manual work.
+
+False positive risk:
+
+- Low for exact `span_key` reuse. Risk is stale or wrong prior decisions being carried forward.
+- This is bounded by using only final prior rows and recording `prior_gpic_observed_object_inventory` in `decision_basis`.
+
+False negative risk:
+
+- Spans with different surface keys still require normal lookup/manual resolution.
+- No alias, synonym, or external source-label matching is attempted.
+
+Reversibility:
+
+- Remove `--prior-object-inventory` usage or ignore rows whose `decision_basis` contains `prior_gpic_observed_object_inventory`.
+
+Verification plan:
+
+- Add unit tests for exact prior reuse, unreusable pending prior rows, and prior MWE span precedence before OEWN probing.
+- Rebuild the tag-list object inventory with the sentence100 resolved object inventory as prior and compare `needs_manual` count.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-12 after tag-list object inventory repeated already resolved GPIC spans as `needs_manual`.
+
+## 2026-07-12: Attribute Canonical Exact Surface Matching Correction
+
+Proposed rule or lexicon change:
+
+- Correct the existing offline canonical surface implementation so exact
+  observed-surface tie breaking uses actual observed caption surfaces, not the
+  lookup-only `selected_query`.
+- Preserve the existing canonical matching-key diacritic folding when a raw
+  observed surface uniquely matches one selected-synset lemma after folding.
+
+Rule generality classification:
+
+- General implementation correction for the documented R11.2 canonical rule.
+- This is not an attribute-specific rescue mapping and not a semantic alias.
+
+Target stage and rule id:
+
+- Stage 3.5 offline attribute canonical inventory build.
+- Shared canonical helper used by R11.2 and object canonical enrichment.
+
+Existing rules affected:
+
+- Existing rule already says canonical tie-breaking uses the observed caption
+  span surface.
+- Existing canonical matching key already folds diacritics, introduced for
+  cases such as `café -> cafe`.
+- This change prevents `selected_query` from acting like an observed exact
+  surface in canonical tie-breaking.
+
+Expected count-table impact:
+
+- No new raw extraction rows.
+- Canonical labels may change only for rows previously blocked as canonical
+  ambiguous because of display-case or diacritic matching:
+  - letter-like attributes such as `E`, `N`, `S`
+  - accented surfaces whose OEWN lemma omits the accent, such as `sautéed`
+
+False positive risk:
+
+- Low. Candidate lemmas still must belong to the selected OEWN synset.
+- Diacritic-folded exact matching selects only when exactly one lemma matches
+  the raw observed surface key.
+
+False negative risk:
+
+- Low. If more than one lemma matches the observed key, the row remains in the
+  existing count/ngram/manual path.
+
+Reversibility:
+
+- Revert the canonical helper changes and remove the regression tests.
+- Affected rows preserve `canonical_selection_tag` evidence.
+
+Verification plan:
+
+- Add regression tests for:
+  - `observed_surface=E`, `selected_query=e`, selected synset lemmas `E|e`
+    choosing `E`.
+  - `observed_surface=sautéed`, selected synset lemmas `saute|sauteed`
+    choosing `sauteed`.
+- Re-run the 1k attribute canonical enrichment and confirm
+  `canonical_ambiguous_rows=0`.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-12 as part of reprocessing the attribute
+  inventory after the object correction pass.
+
+## 2026-07-12: Manual Attribute Synset Decision For `star`
+
+Proposed rule or lexicon change:
+
+- Apply the explicit manual attribute decision for observed attribute surface
+  `star` in the corrected front-1000 GPIC attribute inventory.
+- Change the selected synset from the celestial-body noun sense
+  `oewn-09467004-n` (`noun.object`) to the shape sense
+  `oewn-13904301-n` (`noun.shape`).
+- Let the canonical enrichment step recompute the canonical surface from the
+  selected synset instead of trusting a hand-entered canonical field.
+
+Rule generality classification:
+
+- Explicit user-approved manual decision.
+- This is not a new automatic fallback rule.
+
+Target stage and rule id:
+
+- Stage 3.5 R11.1 GPIC observed attribute inventory lookup.
+- Stage 3.5 R11.2 offline attribute canonical inventory build.
+
+Existing rules affected:
+
+- R11.1 remains unchanged; this only resolves one pending manual attribute row.
+- R11.2 remains the owner of canonical surface selection.
+
+Expected count-table impact:
+
+- The `star` attribute row can proceed through canonicalization and Stage 5.
+- Attribute extraction row count is unchanged.
+- Canonical attribute count may include `star` instead of blocking the run.
+
+False positive risk:
+
+- Low for this run because the user explicitly selected the shape sense for the
+  observed `star` modifier in `yellow star sign`.
+
+False negative risk:
+
+- None introduced for automatic extraction; this manual decision only resolves
+  the current observed row.
+
+Reversibility:
+
+- Reversible by changing the `star` row in the manual resolved attribute TSV
+  back to `needs_manual` or selecting another OEWN synset.
+- The selected synset and selection tag remain visible in the inventory row.
+
+Verification plan:
+
+- Overlay the one-row manual decision on
+  `gpic_observed_attribute_inventory_rebuilt_after_object.tsv`.
+- Re-run attribute canonical enrichment and require
+  `canonical_ambiguous_rows=0`.
+- Run the Stage 5 attribute inventory readiness gate.
+- Export the Stage 5 attribute lexicon bundle from the corrected inventory.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-12.
+
+## 2026-07-12: Formal Stage 4 Action Inventory Gate
+
+Proposed rule or lexicon change:
+
+- Require a resolved GPIC observed action inventory before formal Stage 4 raw
+  extraction.
+- Keep runtime OEWN action lookup available only through an explicit
+  preview/debug flag, so formal runs cannot accidentally skip Stage 3.6 action
+  inventory preparation.
+
+Rule generality classification:
+
+- General formal pipeline gate.
+- This is not an extraction rule or semantic rescue mapping.
+
+Target stage and rule id:
+
+- Stage 3.6 action inventory preparation.
+- Stage 4 R15 action extraction gate.
+
+Existing rules affected:
+
+- R15 action extraction remains unchanged once Stage 4 begins.
+- `run_stage4_extract_raw.py` and `run_mixed_caption_pipeline.py` must refuse
+  formal execution without `--action-inventory`.
+- Runtime OEWN action lookup is still allowed for explicitly marked preview or
+  probe runs only.
+- The offline action inventory builder must use the same preposition MWE span
+  detection as Stage 4 before building action candidates, so relation MWE tokens
+  cannot become phrasal action tokens during inventory preparation.
+
+Expected count-table impact:
+
+- No direct count change from the gate itself.
+- Prevents formal Stage 4/5/6 outputs from being created before action
+  `needs_manual` rows are resolved.
+
+False positive risk:
+
+- None for extraction behavior.
+
+False negative risk:
+
+- None for extraction behavior.
+- Operationally, users must now provide action inventory before formal Stage 4.
+
+Reversibility:
+
+- Reversible by restoring optional action inventory in the runners.
+- Preview flag keeps a narrow escape hatch for diagnostics.
+
+Verification plan:
+
+- Add runner tests that Stage 4 refuses missing action inventory unless the
+  explicit preview flag is present.
+- Add mixed runner test that formal `run_mixed_caption_pipeline()` refuses
+  missing action inventory.
+- Add action inventory builder test proving relation MWE consumed tokens are
+  excluded before phrasal action candidate selection.
+- Run bounded tests for formal gates and mixed pipeline helpers.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-12 after the front-1k run attempted to
+  move past Stage 3.5 without enforcing Stage 3.6.
+
+## 2026-07-13: Object/Attribute Surface-Changing Lookup Conflict Gate
+
+Proposed rule or lexicon change:
+
+- Remove automatic prior `selected_query` reuse from GPIC observed object and
+  attribute inventories.
+- Keep exact `span_key` prior reuse, but reject old automatic surface-changing
+  prior rows when the row has `span_key != selected_query` and no explicit
+  manual-decision evidence.
+- During object runtime lookup, compare observed exact-surface hits with
+  surface-changing lookup hits from lemma/Morphy/normalization.
+- During attribute runtime lookup, run the same exact-vs-base conflict check
+  only when the observed attribute token is a plural common noun.
+- If both routes find OEWN candidates and select different synsets, mark the row
+  `needs_manual` instead of accepting the first lookup hit.
+- Keep prior `selected_query` reuse for action inventory only, where the target
+  behavior is verb inflection reuse such as `rides -> ride` and `sitting in ->
+  sit in`.
+
+Rule generality classification:
+
+- General rule.
+- This is not a one-off mapping for `glasses`; `glasses -> glass`,
+  `arms -> arm`, `works -> work`, and similar lexicalized plural/lemma conflicts
+  are all handled by the same gate.
+
+Target stage and rule id:
+
+- Stage 3.5 GPIC observed object inventory.
+- Stage 3.5 R11.1 GPIC observed attribute inventory lookup.
+- Stage 4 R12 object extraction uses the same object lookup helper.
+
+Existing rules affected:
+
+- Replaces the older object rule that plural common noun heads looked up the
+  head lemma before observed exact surface.
+- Replaces object/attribute unique selected-query prior reuse with exact
+  `span_key` prior reuse only.
+- Does not change R15 action selected-query reuse.
+
+Expected count-table impact:
+
+- Previously accepted object rows, and plural common noun attribute rows, may
+  move back to `needs_manual`
+  when observed exact and changed-query lookup disagree.
+- Front-1000 outputs generated before this rule are invalid for object/attribute
+  canonical/count analysis until the inventories are rebuilt and pending rows
+  are resolved.
+- Stage 4/5/6 should block if the rebuilt object or attribute inventory has
+  pending `needs_manual` rows.
+
+False positive risk:
+
+- Lower for object/attribute because lexicalized plural and surface-changing
+  conflicts no longer silently select the lemma/base-form sense.
+
+False negative risk:
+
+- Medium operationally: some spans that could have been automatically resolved
+  by lemma/Morphy will now require manual resolution when the observed exact
+  surface also has a competing OEWN sense.
+
+Reversibility:
+
+- Reversible by restoring selected-query reuse and lemma-first lookup order.
+- The generated inventories preserve `span_key`, `observed_surface`,
+  `selected_query`, `all_oewn_synsets`, `all_oewn_lexfiles`,
+  `synset_selection_tag`, and `decision_reason`, so reopened rows can be audited.
+
+Verification plan:
+
+- Add object unit tests for lexicalized plural conflict and for no object
+  selected-query prior reuse.
+- Add attribute unit tests for observed exact vs Morphy conflict and for no
+  attribute selected-query prior reuse.
+- Run bounded object and attribute inventory tests.
+- Rebuild the front-1000 object and attribute inventories before running formal
+  Stage 4/5/6 again.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-13 after the `glasses -> glass` issue was
+  traced to broad selected-query/lemma reuse.
+
+## 2026-07-13: Plural Object Exact-Vs-Base Candidate Conflict Gate
+
+Proposed rule or lexicon change:
+
+- Strengthen the object surface-changing lookup conflict gate only for plural
+  common noun head spans.
+- If a plural common noun exact observed surface has an OEWN noun hit, still
+  probe the lemma/Morphy/base-form query for conflict evidence.
+- If exact plural and base-form queries both have OEWN noun candidates, keep
+  automatic selection only when the base-form hit resolves to the same selected
+  synset as the exact plural hit.
+- If the base-form hit has candidates but no selected synset, or resolves to a
+  different selected synset, mark the row `needs_manual` with
+  `decision_reason=manual_surface_query_conflict_required`.
+- Do not make every plural row manual: plural rows with no competing base-form
+  hit, or with exact/base agreement on one selected synset, can still be
+  automatic.
+
+Rule generality classification:
+
+- General rule.
+- This covers lexicalized plural and plural/base sense conflicts such as
+  `glasses/glass`, `colors/color`, `pants/pant`, `trunks/trunk`, and
+  `rings/ring` without adding label-specific mappings.
+
+Target stage and rule id:
+
+- Stage 3.5 GPIC observed object inventory.
+- Stage 4 R12 object extraction uses the same object lookup helper.
+
+Existing rules affected:
+
+- Narrows and strengthens the earlier surface-changing lookup conflict gate for
+  plural common nouns.
+- Keeps exact `span_key` prior reuse authoritative. Already resolved/manual
+  rows are not reopened unless the user filters or removes them from the prior.
+- Does not affect attribute or action selected-query reuse rules.
+
+Expected count-table impact:
+
+- New plural object rows that were previously auto-selected from exact plural
+  surface evidence may become `needs_manual` when their base-form query also
+  has OEWN noun candidates.
+- Formal Stage 4/5/6 should block until those newly pending plural object rows
+  are manually resolved.
+- Existing non-plural object rows should be unchanged.
+
+False positive risk:
+
+- Lower for plural lexicalization because exact plural and base-form candidate
+  conflicts no longer silently choose one side.
+
+False negative risk:
+
+- Medium operationally: some plural rows with harmless base-form ambiguity will
+  require manual review.
+
+Reversibility:
+
+- Reversible by removing the plural-specific strict conflict flag from object
+  lookup.
+- Generated rows preserve `span_key`, `selected_query`, `all_oewn_synsets`,
+  `all_oewn_lexfiles`, `synset_selection_tag`, and `wn30_lemma_counts`.
+
+Verification plan:
+
+- Add unit tests where plural exact is selected but base-form has unresolved
+  OEWN candidates and the row becomes `needs_manual`.
+- Run bounded object inventory and Stage 4 tests.
+- Build a filtered-prior 10K object inventory with plural-head prior rows
+  removed, then inspect the new plural `needs_manual` output.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-13: "이 rule 기준으로 다시 해야겠다.
+  object lexicon에서 plural이었던거 싹 다 지워버리고 need manual 다시 뽑아보자."
+
+## 2026-07-13: User Manual Decision Authority Over Semantic Audit
+
+Proposed rule or lexicon change:
+
+- Clarify that explicit user-provided manual TSV rows and exact row decisions
+  are authoritative pipeline decisions.
+- A later semantic audit may flag a selected synset as questionable, but that
+  audit is advisory only. It must not automatically reopen, override, or block
+  a row that the user manually marked as `chosen` or `excluded`.
+
+Rule generality classification:
+
+- General decision-management rule.
+- This is not a label-specific rescue mapping or automatic lookup rule.
+
+Target stage and rule id:
+
+- Stage 3.5 GPIC observed object/attribute/action inventories.
+- Stage 4/5/6 formal gates that consume resolved inventories.
+
+Existing rules affected:
+
+- Clarifies the manual resolution gate after object/attribute/action
+  `needs_manual` rows are resolved.
+- Does not change OEWN lookup, canonicalization, parent enrichment, or count
+  export logic.
+
+Expected count-table impact:
+
+- None for already resolved inventories.
+- Future semantic audits will report advisory findings without invalidating
+  user-approved manual decisions unless the user explicitly asks to revise them.
+
+False positive risk:
+
+- The pipeline may preserve a user-approved synset that a later audit considers
+  semantically suboptimal.
+
+False negative risk:
+
+- Lower operational churn: manually approved rows are not repeatedly reopened by
+  advisory audits.
+
+Reversibility:
+
+- Reversible by reopening specific rows with an explicit user request and a
+  new manual decision TSV.
+- Existing row metadata preserves `decision_status`, `decision_reason`,
+  `selected_query`, `selected_oewn_synset`, and manual-resolution fields.
+
+Verification plan:
+
+- Treat manual overlay outputs as resolved when `needs_manual=0`.
+- Report semantic audit concerns separately from formal blocker status.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-13: even if a manual row appears wrong,
+  follow the user's manual decision.
+
+## 2026-07-14: Stage 3.5 Google Ngram Evidence Missing Must Refresh Before Canonical Manual Block
+
+Proposed rule or lexicon change:
+
+- When attribute/action canonical enrichment produces a
+  `canonical_selection_tag` containing `google_ngram_evidence_missing`, the
+  workflow must treat it as missing evidence, not as a manual canonical
+  decision.
+- The workflow now checks whether the required
+  `(selected_oewn_synset, google_ngram_candidate surface_key)` rows exist in
+  `resources/source_labels/google_ngram_canonical_frequency_evidence.tsv`.
+- If any required evidence row is absent, the workflow runs a Google Ngram
+  evidence refresh script, appends/updates the evidence TSV, and reruns the
+  canonical enrichment step.
+- Only after the evidence rows exist and canonical still cannot be selected
+  may the row remain as a canonical blocker/manual review item.
+
+Rule generality classification:
+
+- General workflow guard.
+- This is not a term-specific rescue rule; the `de-icing -> de-ice/deice`
+  case exposed the missing guard.
+
+Target stage and rule id:
+
+- Stage 3.5 offline attribute/action canonical inventory build.
+- Affects the workflow orchestration rule that advances inventory build steps.
+
+Existing rules affected:
+
+- Enforces the existing canonical rule that missing Google Ngram evidence must
+  be queried before manual canonical resolution.
+- Does not change canonical selection order after evidence is available.
+
+Expected count-table impact:
+
+- No direct Stage 6 count semantics change.
+- Prevents rows from being incorrectly sent to manual canonical review before
+  Google Ngram evidence has been collected.
+
+False positive risk:
+
+- Google Books Ngram may prefer a surface that is more frequent in books than
+  in visual captions, but this is already the accepted fallback criterion.
+
+False negative risk:
+
+- If Google Ngram API returns no record, a status row is still written; the
+  workflow will not repeatedly query the same missing pair and will then leave
+  the row as a real canonical blocker.
+
+Reversibility:
+
+- Reversible by removing the refresh action from
+  `scripts/run_stage35_inventory_workflow.py` and deleting the appended
+  evidence rows.
+
+Verification plan:
+
+- Unit tests assert that missing evidence triggers
+  `refresh_attribute_google_ngram_evidence` instead of
+  `blocked_attribute_canonical`.
+- Unit tests assert that an already queried missing evidence row blocks without
+  an infinite refresh loop.
+- Unit tests assert that the refresh action reruns attribute canonical
+  enrichment.
+
+Decision status:
+
+- Approved by user in chat on 2026-07-14 after repeated missing-evidence
+  failures: local evidence TSV misses must trigger a fresh Google Ngram query.

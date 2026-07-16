@@ -19,12 +19,11 @@ v1 구현의 목표는 high recall이 아니다.
 - 각 mention과 edge가 어떤 Rule ID에서 나왔는지 추적 가능해야 한다.
 - count export 단계에서는 새 linguistic interpretation을 하지 않아야 한다.
 - 누락된 정보는 patch하지 않고 limitation으로 남겨야 한다.
-- 문서화되지 않은 relation MWE repair, pronoun resolution, passive normalization은 v1에서 구현하지 않는다.
+- 문서화되지 않은 relation MWE repair와 pronoun resolution은 v1에서 구현하지 않는다.
+- passive voice는 Stage 4의 문서화된 direct passive subject/by-phrase rule만 적용하고, Stage 5/6에서 새 semantic rewrite를 하지 않는다.
 - 이전 prototype의 repair logic을 복사하지 않는다.
-- tag-list caption은 v1에서 별도 segment parser를 쓰지 않는다.
-- tag-list caption은 v1 extraction 대상에서 제외한다.
-- tag-list caption은 skipped record로 남기고, reason은 `tag_list_deferred`로 기록한다.
-- comma split, segment별 object/attribute grouping, tag-list 전용 추론은 v1에서 하지 않는다.
+- tag-list caption은 sentence path와 분리하고, comma segment별 object/attribute/quantity extraction만 수행한다.
+- tag-list action/relation extraction과 cross-segment semantic grouping은 v1에서 하지 않는다.
 
 ## 1. 최종 디렉토리 구조 계획
 
@@ -123,7 +122,7 @@ gpic-caption-concepts-explainable/
 대상 rule:
 
 - R1 Caption shape 판단
-- R1.1 Tag-list skip
+- R1.1 Tag-list route
 
 작업:
 
@@ -132,13 +131,14 @@ gpic-caption-concepts-explainable/
 3. `caption_type == "tag"`이면 내부 shape를 `tag_list`로 매핑
 4. `caption_type in {"short", "medium", "long"}`이면 내부 shape를 `sentence`로 매핑
 5. 알려지지 않은 `caption_type`은 fallback rule 없이 에러로 처리
-6. `tag_list`로 판정되면 Stage 2~6을 호출하지 않음
-7. `tag_list` row는 `skipped=true`, `skip_reason=tag_list_deferred`로 기록
+6. `tag_list`로 판정되면 sentence rows가 아니라 tag rows로 기록
+7. tag rows는 comma segment별 Stage 3 annotation path로 전달
 
 산출물:
 
 - caption shape record
-- skipped record for tag-list rows
+- sentence rows
+- tag rows
 
 검증:
 
@@ -150,8 +150,8 @@ gpic-caption-concepts-explainable/
 
 - Stage 1에서 concept extraction이 일어나지 않음
 - `tag_list` 여부가 이후 report와 output metadata에 남음
-- `tag_list`가 별도 comma segment extraction으로 빠지지 않음
 - `tag_list`가 sentence pipeline으로도 들어가지 않음
+- `tag_list`가 comma segment annotation/extraction path로 분리됨
 
 ## 4. Milestone 3: Stage 2 구현
 
@@ -235,20 +235,23 @@ gpic-caption-concepts-explainable/
 2. noun chunk 내부에서 root를 오른쪽 끝으로 갖는 left-expanding span 생성
 3. DET/ADP/PRON 같은 function-word로 시작하는 multiword span은 OEWN probe 전에 제외
 4. 각 span을 OEWN noun lookup으로 probe
-5. span head가 plural common noun이면 head lemma surface를 observed exact surface보다 먼저 lookup
-6. plural common noun이 아니면 observed exact surface를 먼저 lookup
-7. separator 제거로 붙인 `joined_variant` lookup hit는 false positive 위험이 있으므로 automatic `chosen`으로 올리지 않고 `needs_manual`로 기록
-8. OEWN noun synset이 있는 가장 긴 span을 observed inventory row로 기록
-9. 사람이 보는 main queue 상태와 원인을 TSV에 기록
+5. observed exact surface lookup이 OEWN noun synset을 찾으면 exact surface 결과를 우선
+6. plural common noun head span은 exact hit가 있어도 lemma/Morphy/base-form query를 conflict check 용도로 함께 조회
+   - prior/manual inventory row가 없는 새 row에서 observed exact surface와 lemma/Morphy/base-form query가 서로 다른 selected synset을 찾으면 `needs_manual`, `decision_reason=manual_surface_query_conflict_required`로 기록
+   - plural common noun head span에서는 base-form query가 selected synset까지 단일 확정되지 않았더라도 OEWN noun 후보를 찾으면 같은 reason으로 기록
+7. observed exact surface가 실패한 경우에만 lemma/Morphy/normalization으로 surface가 바뀐 lookup query 사용
+8. separator 제거로 붙인 `joined_variant` lookup hit는 false positive 위험이 있으므로 automatic `chosen`으로 올리지 않고 `needs_manual`로 기록
+9. OEWN noun synset이 있는 가장 긴 span을 observed inventory row로 기록
+10. 사람이 보는 main queue 상태와 원인을 TSV에 기록
    - `decision_status`: `chosen`, `needs_manual`, `excluded`
    - `decision_reason`: `selected_object_compatible`, `manual_joined_variant_required`, `manual_objectness_required`, `manual_synset_required`, `no_oewn_noun_synset`
    - `objectness_gate`: reason 설명용 evidence
-10. `decision_status=needs_manual` row는 runtime extraction과 canonical enrichment에서 자동으로 해결하지 않음
-11. `needs_manual` row가 하나라도 남아 있으면 canonical enrichment command를 실패 처리함
-12. manual resolution이 끝난 inventory에 대해 selected synset의 immediate hypernym 전체를 parent evidence로 기록
-13. manual resolution이 끝난 inventory에 대해 offline canonical rule로 canonical surface를 기록
-14. canonical surface 선정은 selected synset lemma set, observed caption surface variants, WN3 lemma count, observed exact surface, 저장된 Google Ngram evidence 순서로 진행
-15. canonical ambiguous row가 남으면 ambiguous TSV와 summary를 남기고 canonical enrichment command를 실패 처리함
+11. `decision_status=needs_manual` row는 runtime extraction과 canonical enrichment에서 자동으로 해결하지 않음
+12. `needs_manual` row가 하나라도 남아 있으면 canonical enrichment command를 실패 처리함
+13. manual resolution이 끝난 inventory에 대해 selected synset의 immediate hypernym 전체를 parent evidence로 기록
+14. manual resolution이 끝난 inventory에 대해 offline canonical rule로 canonical surface를 기록
+15. canonical surface 선정은 selected synset lemma set, observed caption surface variants, WN3 lemma count, observed exact surface, 저장된 Google Ngram evidence 순서로 진행
+16. canonical ambiguous row가 남으면 ambiguous TSV와 summary를 남기고 canonical enrichment command를 실패 처리함
 
 산출물:
 
@@ -263,7 +266,7 @@ gpic-caption-concepts-explainable/
 
 - generated TSV가 GPIC Stage 3 records만 입력으로 쓰는지 확인
 - `decision_status`와 `decision_reason` row count를 확인
-- plural common noun exact lookup pollution이 head lemma lookup으로 줄어드는지 확인
+- observed exact surface와 lemma/Morphy/base-form selected synset이 충돌하는 새 row가 `needs_manual`로 남는지 확인
 - function-word-start span이 joined false positive로 가지 않고 root object로 내려가는지 확인
 - `joined_variant` lookup hit가 자동 `chosen`으로 올라가지 않는지 확인
 - `needs_manual` row가 남아 있으면 Stage 4 extraction 전에 해결해야 함
@@ -310,10 +313,13 @@ gpic-caption-concepts-explainable/
 - GPIC observed inventory row가 `decision_status=excluded`여도 status metadata를 보존한 object mention으로 세는지 확인
 - GPIC observed inventory row가 `decision_status=needs_manual`이면 Stage 4가 중단되는지 확인
 - GPIC observed inventory row에 selected synset이 있는데 `canonical_surface`가 비어 있으면 Stage 4가 중단되는지 확인
-- plural common noun lookup이 head lemma query로 선택되어도 raw mention text는 observed surface로 유지되는지 확인
+- lemma/Morphy/base-form lookup이 사용되어도 raw mention text는 observed surface로 유지되는지 확인
 - selected span 내부 token이 attribute/quantity로 중복 추출되지 않는지 확인
 - `pobj`가 action patient로 들어가지 않는지 확인
-- passive voice rewrite가 일어나지 않는지 확인
+- Stage 5/6에서 passive voice rewrite가 새로 일어나지 않는지 확인
+- Stage 4에서 direct passive subject/by-phrase rule만 적용되는지 확인
+- R16.3 acl action head-object agent inheritance가 `acl`에만 적용되고
+  `relcl` relative-pronoun resolution으로 확장되지 않는지 확인
 - pronoun resolution이 일어나지 않는지 확인
 - preposition MWE relation은 문서화된 R18.1과 lexicon metadata로만 생성되는지 확인
 - tag-list 전용 segment grouping이 일어나지 않는지 확인
@@ -453,13 +459,13 @@ gpic-caption-concepts-explainable/
 - quote는 object로 count되지 않음
 - Stage 2/3에서 object MWE merge 또는 POS correction이 일어나지 않음
 - Stage 4에서 noun chunk 내부 selected span 기준으로 object span이 결정됨
-- tag-list caption이 comma segment extractor로 빠지지 않음
+- tag-list caption이 comma segment extractor로 분리됨
 - tag-list caption이 sentence pipeline으로도 들어가지 않음
-- tag-list caption이 `tag_list_deferred`로 skip됨
+- tag-list caption이 action/relation extraction으로 들어가지 않음
 - preposition MWE relation은 문서화된 R18.1 경로로만 생성됨
 - `pobj`는 action patient로 들어가지 않음
 - pronoun resolution이 일어나지 않음
-- passive voice normalization이 일어나지 않음
+- passive voice normalization은 Stage 4의 direct passive subject/by-phrase rule로만 일어남
 - count export에서 새 interpretation이 일어나지 않음
 
 완료 기준:
@@ -512,7 +518,7 @@ gpic-caption-concepts-explainable/
 
 - pronoun을 antecedent에 연결하고 싶어짐
 - `the object`, `the device`를 앞 object와 merge하고 싶어짐
-- passive voice를 active role로 바꾸고 싶어짐
+- 문서화된 R16.2/R17.1 밖에서 passive voice를 active role로 바꾸고 싶어짐
 - `in front of`, `on top of`를 하나의 relation으로 collapse하고 싶어짐
 - `look at`, `pick up` 같은 phrasal action을 collapse하고 싶어짐
 - self-edge를 repair하고 싶어짐

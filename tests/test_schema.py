@@ -31,16 +31,18 @@ class SchemaTest(unittest.TestCase):
         self.assertEqual(record.to_dict()["caption_shape"], "sentence")
         self.assertEqual(json.loads(record.to_json())["caption_id"], "000001")
 
-    def test_caption_record_tag_list_must_be_skipped(self) -> None:
-        with self.assertRaises(ValueError):
-            CaptionRecord(
-                caption_id="000002",
-                caption="brown boot, brick wall, display",
-                caption_shape="tag_list",
-                skipped=False,
-                skip_reason=None,
-                rule_ids=["R1"],
-            )
+    def test_caption_record_tag_list_can_be_routed(self) -> None:
+        record = CaptionRecord(
+            caption_id="000002",
+            caption="brown boot, brick wall, display",
+            caption_shape="tag_list",
+            skipped=False,
+            skip_reason=None,
+            rule_ids=["R1", "R1.1"],
+        )
+
+        self.assertEqual(record.caption_shape, "tag_list")
+        self.assertFalse(record.skipped)
 
     def test_raw_records(self) -> None:
         mention = RawMention(
