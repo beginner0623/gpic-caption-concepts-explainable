@@ -176,15 +176,30 @@ it crossed an arbitrary elapsed-time boundary. Use progress heartbeat monitoring
 and checkpoint/resume; set child-script wall-clock timeout to `0` unless a
 specific short diagnostic command needs a bounded timeout.
 
-The current formal Stage 4/5/6 implementation is monolithic: Stage 4 writes
-after collecting raw mentions/edges, Stage 5 reads raw mentions/edges into
-memory, and Stage 6 reads canonical mentions/edges and builds facts/count
-tables in memory. It has been usable for smaller report runs, but it is not the
-safe path for million-scale caption export. Do not run 1M+ captions through the
-monolithic mixed pipeline unless a chunked/streaming Stage 4/5/6 runner has been
-implemented and verified. `run_mixed_caption_pipeline.py` has a fail-fast guard
-for this; do not disable it except for a deliberately bounded diagnostic on a
-machine sized for the run.
+The current formal Stage 4/5/6 scripts are memory-guarded. They share the same
+RSS safety contract:
+
+- try to read the active Linux cgroup memory limit when no explicit
+  `--memory-limit-gib` is provided
+- compute `max_rss_gib = min(memory_limit_gib * rss_limit_fraction,
+  memory_limit_gib - rss_reserve_gib)` unless `--max-rss-gib` explicitly
+  overrides it
+- write a single progress JSON by atomic replace when `--progress` or the mixed
+  pipeline's stage-specific progress paths are provided
+- raise `MemoryError` before the pod is OOMKilled when RSS crosses the computed
+  guard
+
+Do not add memory safety to only one of Stage 4, Stage 5, or Stage 6. If a
+memory/process failure pattern is discovered in one formal stage, inspect the
+other formal stages for the same pattern and add or update a cross-stage test
+when possible. `tests/test_formal_stage_memory_safety.py` is the contract test
+that keeps the shared memory/progress surface from drifting across stages.
+
+The implementation is not fully disk-backed: Stage 4 still holds the raw graph
+until writing, Stage 5 keeps canonical mentions as the edge lookup table, and
+Stage 6 keeps count accumulators while streaming fact rows. If a formal
+production run trips the RSS guard, do not raise the limit and rerun blindly.
+Change that stage to a chunked, streaming, or disk-backed implementation first.
 
 Do not wrap formal Stage 4/5/6 scripts in `run_script_with_timeout.py` for
 production-scale work. That wrapper uses a hard `os._exit` kill and Stage 4/5/6

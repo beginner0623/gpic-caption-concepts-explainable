@@ -14,6 +14,7 @@ from gpic_concepts_v1.inventory_validation import (
     final_manual_resolution_blockers,
     read_inventory_rows,
 )
+from gpic_concepts_v1.cli_memory import add_memory_safety_args, memory_safety_kwargs
 from gpic_concepts_v1.io_jsonl import write_jsonl
 from gpic_concepts_v1.stage5_canonicalize import run_stage5_canonicalize
 
@@ -53,6 +54,7 @@ def parse_args() -> argparse.Namespace:
             "attribute inventory gate. Output must not be treated as formal."
         ),
     )
+    add_memory_safety_args(parser, stage_name="Stage 5")
     return parser.parse_args()
 
 
@@ -75,6 +77,7 @@ def main() -> None:
         canonical_mentions_path=Path(args.canonical_mentions),
         canonical_edges_path=Path(args.canonical_edges),
         summary_path=None,
+        **memory_safety_kwargs(args),
     )
     summary["formal_attribute_inventory_gate"] = not preview_mode
     if preview_mode:

@@ -23,10 +23,12 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import csv
+import json
 from pathlib import Path
 from typing import Any
 
-from gpic_concepts_v1.io_jsonl import iter_jsonl, write_jsonl
+from gpic_concepts_v1.io_jsonl import iter_jsonl, open_text, to_jsonable, write_jsonl
+from gpic_concepts_v1.runtime_memory import MemorySafetyConfig, ProgressWriter
 from gpic_concepts_v1.schema import (
     CanonicalEdge,
     CanonicalMention,
@@ -118,45 +120,182 @@ def run_stage5_canonicalize(
     canonical_mentions_path: str | Path,
     canonical_edges_path: str | Path,
     summary_path: str | Path | None = None,
+    max_rss_gib: float | None = None,
+    memory_limit_gib: float | None = None,
+    rss_limit_fraction: float = 0.75,
+    rss_reserve_gib: float = 16.0,
+    progress_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run Stage 5 over Stage 4 JSONL files."""
     lexicons = load_stage5_lexicons(lexicon_dir)
-    raw_mentions = list(iter_jsonl(raw_mentions_path))
-    raw_edges = list(iter_jsonl(raw_edges_path))
-    result = canonicalize_raw_graph(
-        raw_mentions,
-        raw_edges,
-        lexicons=lexicons,
+    canonical_mentions_output = Path(canonical_mentions_path)
+    canonical_edges_output = Path(canonical_edges_path)
+    canonical_mentions_output.parent.mkdir(parents=True, exist_ok=True)
+    canonical_edges_output.parent.mkdir(parents=True, exist_ok=True)
+    memory_config = MemorySafetyConfig(
+        max_rss_gib=max_rss_gib,
+        memory_limit_gib=memory_limit_gib,
+        rss_limit_fraction=rss_limit_fraction,
+        rss_reserve_gib=rss_reserve_gib,
+    )
+    progress = ProgressWriter(
+        progress_path,
+        stage_name="stage5",
+        memory_config=memory_config,
+    )
+    canonical_by_key: dict[tuple[str, str], CanonicalMention] = {}
+    mention_counts: Counter[str] = Counter()
+    edge_counts: Counter[str] = Counter()
+    canonical_source_counts: Counter[str] = Counter()
+    parent_filled_counts: Counter[str] = Counter()
+    canonical_mention_total = 0
+    canonical_edge_total = 0
+    progress.write(
+        status="running",
+        phase="stage5_canonicalize_mentions",
+        note="started",
+        metrics={
+            "canonical_mention_total": canonical_mention_total,
+            "canonical_edge_total": canonical_edge_total,
+            "mention_type_counts": dict(sorted(mention_counts.items())),
+            "edge_type_counts": dict(sorted(edge_counts.items())),
+        },
+        outputs={
+            "canonical_mentions": canonical_mentions_output,
+            "canonical_edges": canonical_edges_output,
+        },
     )
 
-    write_jsonl(canonical_mentions_path, result.canonical_mentions)
-    write_jsonl(canonical_edges_path, result.canonical_edges)
+    try:
+        with open_text(canonical_mentions_output, "wt") as handle:
+            for raw_record in iter_jsonl(raw_mentions_path):
+                progress.check_memory(
+                    phase="stage5_canonicalize_mentions",
+                    metrics={"canonical_mention_total": canonical_mention_total},
+                )
+                raw_mention = _coerce_raw_mention(raw_record)
+                mention = _canonicalize_mention(raw_mention, lexicons=lexicons)
+                handle.write(json.dumps(to_jsonable(mention), ensure_ascii=False, sort_keys=True))
+                handle.write("\n")
+                canonical_by_key[(mention.caption_id, mention.mention_id)] = mention
+                canonical_mention_total += 1
+                mention_counts[mention.mention_type] += 1
+                canonical_source_counts[mention.canonical_source] += 1
+                parent_filled_counts[
+                    "with_parent" if mention.parent_concepts else "without_parent"
+                ] += 1
+                if canonical_mention_total % 1000 == 0:
+                    progress.write(
+                        status="running",
+                        phase="stage5_canonicalize_mentions",
+                        note="canonicalizing_mentions",
+                        metrics={
+                            "canonical_mention_total": canonical_mention_total,
+                            "canonical_edge_total": canonical_edge_total,
+                            "mention_type_counts": dict(sorted(mention_counts.items())),
+                            "edge_type_counts": dict(sorted(edge_counts.items())),
+                        },
+                        outputs={
+                            "canonical_mentions": canonical_mentions_output,
+                            "canonical_edges": canonical_edges_output,
+                        },
+                    )
+        progress.write(
+            status="running",
+            phase="stage5_canonicalize_edges",
+            note="mentions_complete",
+            metrics={
+                "canonical_mention_total": canonical_mention_total,
+                "canonical_edge_total": canonical_edge_total,
+                "mention_type_counts": dict(sorted(mention_counts.items())),
+                "edge_type_counts": dict(sorted(edge_counts.items())),
+            },
+            outputs={
+                "canonical_mentions": canonical_mentions_output,
+                "canonical_edges": canonical_edges_output,
+            },
+        )
+        with open_text(canonical_edges_output, "wt") as handle:
+            for raw_record in iter_jsonl(raw_edges_path):
+                progress.check_memory(
+                    phase="stage5_canonicalize_edges",
+                    metrics={"canonical_edge_total": canonical_edge_total},
+                )
+                raw_edge = _coerce_raw_edge(raw_record)
+                edge = _canonicalize_edge(raw_edge, canonical_by_key=canonical_by_key)
+                handle.write(json.dumps(to_jsonable(edge), ensure_ascii=False, sort_keys=True))
+                handle.write("\n")
+                canonical_edge_total += 1
+                edge_counts[edge.edge_type] += 1
+                if canonical_edge_total % 1000 == 0:
+                    progress.write(
+                        status="running",
+                        phase="stage5_canonicalize_edges",
+                        note="canonicalizing_edges",
+                        metrics={
+                            "canonical_mention_total": canonical_mention_total,
+                            "canonical_edge_total": canonical_edge_total,
+                            "mention_type_counts": dict(sorted(mention_counts.items())),
+                            "edge_type_counts": dict(sorted(edge_counts.items())),
+                        },
+                        outputs={
+                            "canonical_mentions": canonical_mentions_output,
+                            "canonical_edges": canonical_edges_output,
+                        },
+                    )
+    except Exception as exc:
+        progress.write(
+            status="failed",
+            phase="stage5_canonicalize",
+            note=f"{type(exc).__name__}: {exc}",
+            metrics={
+                "canonical_mention_total": canonical_mention_total,
+                "canonical_edge_total": canonical_edge_total,
+                "mention_type_counts": dict(sorted(mention_counts.items())),
+                "edge_type_counts": dict(sorted(edge_counts.items())),
+            },
+            outputs={
+                "canonical_mentions": canonical_mentions_output,
+                "canonical_edges": canonical_edges_output,
+            },
+        )
+        raise
 
-    mention_counts: Counter[str] = Counter(
-        mention.mention_type for mention in result.canonical_mentions
-    )
-    edge_counts: Counter[str] = Counter(edge.edge_type for edge in result.canonical_edges)
-    canonical_source_counts: Counter[str] = Counter(
-        mention.canonical_source for mention in result.canonical_mentions
-    )
-    parent_filled_counts: Counter[str] = Counter(
-        "with_parent" if mention.parent_concepts else "without_parent"
-        for mention in result.canonical_mentions
-    )
     summary = {
         "raw_mentions_path": str(raw_mentions_path),
         "raw_edges_path": str(raw_edges_path),
-        "canonical_mentions_path": str(canonical_mentions_path),
-        "canonical_edges_path": str(canonical_edges_path),
-        "canonical_mention_total": len(result.canonical_mentions),
-        "canonical_edge_total": len(result.canonical_edges),
+        "canonical_mentions_path": str(canonical_mentions_output),
+        "canonical_edges_path": str(canonical_edges_output),
+        "canonical_mention_total": canonical_mention_total,
+        "canonical_edge_total": canonical_edge_total,
         "mention_type_counts": dict(sorted(mention_counts.items())),
         "edge_type_counts": dict(sorted(edge_counts.items())),
         "canonical_source_counts": dict(sorted(canonical_source_counts.items())),
         "parent_filled_counts": dict(sorted(parent_filled_counts.items())),
+        "memory_limit_gib": memory_config.resolved_memory_limit_gib,
+        "memory_limit_source": memory_config.memory_limit_source,
+        "rss_limit_fraction": rss_limit_fraction,
+        "rss_reserve_gib": rss_reserve_gib,
+        "max_rss_gib": memory_config.effective_max_rss_gib,
     }
     if summary_path is not None:
         write_jsonl(summary_path, [summary])
+    progress.write(
+        status="complete",
+        phase="stage5_complete",
+        note="complete",
+        metrics={
+            "canonical_mention_total": canonical_mention_total,
+            "canonical_edge_total": canonical_edge_total,
+            "mention_type_counts": dict(sorted(mention_counts.items())),
+            "edge_type_counts": dict(sorted(edge_counts.items())),
+        },
+        outputs={
+            "canonical_mentions": canonical_mentions_output,
+            "canonical_edges": canonical_edges_output,
+        },
+        summary=summary,
+    )
     return summary
 
 

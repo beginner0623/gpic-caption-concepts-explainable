@@ -23,6 +23,7 @@ from gpic_concepts_v1.inventory_validation import (
 )
 from gpic_concepts_v1.schema import JsonObject, RawEdge, RawMention, make_local_id
 from gpic_concepts_v1.schema import MISSING_SOURCE_MENTION_ID, MISSING_TARGET_MENTION_ID
+from gpic_concepts_v1.runtime_memory import MemorySafetyConfig, ProgressWriter
 
 try:  # pragma: no cover - exercised when runtime OEWN dependencies exist.
     import nltk
@@ -668,6 +669,11 @@ def run_stage4_extract_raw(
     object_lookup: Any | None = None,
     action_lookup: Any | None = None,
     preposition_mwe_lookup: _PrepositionMweIndex | Sequence[_PrepositionMweEntry] | None = None,
+    max_rss_gib: float | None = None,
+    memory_limit_gib: float | None = None,
+    rss_limit_fraction: float = 0.75,
+    rss_reserve_gib: float = 16.0,
+    progress_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run Stage 4 over Stage 3 JSONL records."""
     if object_lookup is None:
@@ -683,21 +689,105 @@ def run_stage4_extract_raw(
     mention_counts: Counter[str] = Counter()
     edge_counts: Counter[str] = Counter()
     total = 0
+    memory_config = MemorySafetyConfig(
+        max_rss_gib=max_rss_gib,
+        memory_limit_gib=memory_limit_gib,
+        rss_limit_fraction=rss_limit_fraction,
+        rss_reserve_gib=rss_reserve_gib,
+    )
+    progress = ProgressWriter(
+        progress_path,
+        stage_name="stage4",
+        memory_config=memory_config,
+    )
+    progress.write(
+        status="running",
+        phase="stage4_extract_raw",
+        note="started",
+        metrics={
+            "records_processed": total,
+            "raw_mention_total": len(all_mentions),
+            "raw_edge_total": len(all_edges),
+            "mention_type_counts": dict(sorted(mention_counts.items())),
+            "edge_type_counts": dict(sorted(edge_counts.items())),
+        },
+        outputs={
+            "raw_mentions": raw_mentions_path,
+            "raw_edges": raw_edges_path,
+        },
+    )
 
-    for index, record in enumerate(iter_jsonl(input_path)):
-        if limit is not None and index >= limit:
-            break
-        result = extract_raw_concepts_from_stage3_record(
-            record,
-            object_lookup=object_lookup,
-            action_lookup=action_lookup,
-            preposition_mwe_lookup=preposition_mwe_lookup,
+    try:
+        for index, record in enumerate(iter_jsonl(input_path)):
+            if limit is not None and index >= limit:
+                break
+            progress.check_memory(
+                phase="stage4_extract_raw",
+                metrics={"records_processed": total},
+            )
+            result = extract_raw_concepts_from_stage3_record(
+                record,
+                object_lookup=object_lookup,
+                action_lookup=action_lookup,
+                preposition_mwe_lookup=preposition_mwe_lookup,
+            )
+            total += 1
+            all_mentions.extend(result.raw_mentions)
+            all_edges.extend(result.raw_edges)
+            mention_counts.update(mention.mention_type for mention in result.raw_mentions)
+            edge_counts.update(edge.edge_type for edge in result.raw_edges)
+            if total % 1000 == 0:
+                progress.write(
+                    status="running",
+                    phase="stage4_extract_raw",
+                    note="extracting_raw_graph",
+                    metrics={
+                        "records_processed": total,
+                        "raw_mention_total": len(all_mentions),
+                        "raw_edge_total": len(all_edges),
+                        "mention_type_counts": dict(sorted(mention_counts.items())),
+                        "edge_type_counts": dict(sorted(edge_counts.items())),
+                    },
+                    outputs={
+                        "raw_mentions": raw_mentions_path,
+                        "raw_edges": raw_edges_path,
+                    },
+                )
+    except Exception as exc:
+        progress.write(
+            status="failed",
+            phase="stage4_extract_raw",
+            note=f"{type(exc).__name__}: {exc}",
+            metrics={
+                "records_processed": total,
+                "raw_mention_total": len(all_mentions),
+                "raw_edge_total": len(all_edges),
+                "mention_type_counts": dict(sorted(mention_counts.items())),
+                "edge_type_counts": dict(sorted(edge_counts.items())),
+            },
+            outputs={
+                "raw_mentions": raw_mentions_path,
+                "raw_edges": raw_edges_path,
+            },
         )
-        total += 1
-        all_mentions.extend(result.raw_mentions)
-        all_edges.extend(result.raw_edges)
-        mention_counts.update(mention.mention_type for mention in result.raw_mentions)
-        edge_counts.update(edge.edge_type for edge in result.raw_edges)
+        raise
+
+    progress.write(
+        status="running",
+        phase="stage4_writing_outputs",
+        note="extraction_complete",
+        metrics={
+            "records_processed": total,
+            "raw_mention_total": len(all_mentions),
+            "raw_edge_total": len(all_edges),
+            "mention_type_counts": dict(sorted(mention_counts.items())),
+            "edge_type_counts": dict(sorted(edge_counts.items())),
+        },
+        outputs={
+            "raw_mentions": raw_mentions_path,
+            "raw_edges": raw_edges_path,
+        },
+    )
 
     write_jsonl(raw_mentions_path, all_mentions)
     write_jsonl(raw_edges_path, all_edges)
@@ -709,9 +799,31 @@ def run_stage4_extract_raw(
         "raw_edge_total": len(all_edges),
         "mention_type_counts": dict(sorted(mention_counts.items())),
         "edge_type_counts": dict(sorted(edge_counts.items())),
+        "memory_limit_gib": memory_config.resolved_memory_limit_gib,
+        "memory_limit_source": memory_config.memory_limit_source,
+        "rss_limit_fraction": rss_limit_fraction,
+        "rss_reserve_gib": rss_reserve_gib,
+        "max_rss_gib": memory_config.effective_max_rss_gib,
     }
     if summary_path is not None:
         write_jsonl(summary_path, [summary])
+    progress.write(
+        status="complete",
+        phase="stage4_complete",
+        note="complete",
+        metrics={
+            "records_processed": total,
+            "raw_mention_total": len(all_mentions),
+            "raw_edge_total": len(all_edges),
+            "mention_type_counts": dict(sorted(mention_counts.items())),
+            "edge_type_counts": dict(sorted(edge_counts.items())),
+        },
+        outputs={
+            "raw_mentions": raw_mentions_path,
+            "raw_edges": raw_edges_path,
+        },
+        summary=summary,
+    )
     return summary
 
 

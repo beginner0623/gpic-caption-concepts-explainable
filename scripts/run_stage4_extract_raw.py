@@ -15,6 +15,7 @@ from gpic_concepts_v1.inventory_validation import (
     normalize_inventory_decision_status,
     read_inventory_rows,
 )
+from gpic_concepts_v1.cli_memory import add_memory_safety_args, memory_safety_kwargs
 from gpic_concepts_v1.pipeline_state import (
     PipelineStateError,
     artifact_state_path,
@@ -94,6 +95,7 @@ def parse_args() -> argparse.Namespace:
             "lookup instead of a resolved GPIC observed action inventory."
         ),
     )
+    add_memory_safety_args(parser, stage_name="Stage 4")
     return parser.parse_args()
 
 
@@ -136,6 +138,7 @@ def main() -> None:
         object_lookup=object_lookup,
         action_lookup=action_lookup,
         preposition_mwe_lookup=preposition_mwe_lookup,
+        **memory_safety_kwargs(args),
     )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
 

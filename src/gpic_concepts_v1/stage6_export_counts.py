@@ -16,6 +16,7 @@ from typing import Any
 
 from gpic_concepts_v1.atomic_io import atomic_text_writer
 from gpic_concepts_v1.io_jsonl import iter_jsonl, open_text, to_jsonable, write_jsonl
+from gpic_concepts_v1.runtime_memory import MemorySafetyConfig, ProgressWriter
 from gpic_concepts_v1.schema import (
     CanonicalEdge,
     CanonicalMention,
@@ -294,6 +295,11 @@ def run_stage6_export_counts(
     *,
     output_dir: str | Path,
     summary_path: str | Path | None = None,
+    max_rss_gib: float | None = None,
+    memory_limit_gib: float | None = None,
+    rss_limit_fraction: float = 0.75,
+    rss_reserve_gib: float = 16.0,
+    progress_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run Stage 6 and write facts plus TSV count tables.
 
@@ -308,30 +314,98 @@ def run_stage6_export_counts(
     table_buckets = _new_count_table_buckets()
     fact_type_counts: dict[str, int] = defaultdict(int)
     fact_total = 0
+    caption_group_total = 0
+    memory_config = MemorySafetyConfig(
+        max_rss_gib=max_rss_gib,
+        memory_limit_gib=memory_limit_gib,
+        rss_limit_fraction=rss_limit_fraction,
+        rss_reserve_gib=rss_reserve_gib,
+    )
+    progress = ProgressWriter(
+        progress_path,
+        stage_name="stage6",
+        memory_config=memory_config,
+    )
+    progress.write(
+        status="running",
+        phase="stage6_streaming",
+        note="started",
+        metrics={
+            "caption_groups_processed": caption_group_total,
+            "fact_total": fact_total,
+            "fact_type_counts": dict(fact_type_counts),
+        },
+        outputs={"facts": facts_path, "output_dir": output_root},
+    )
     mention_groups = _iter_caption_groups(canonical_mentions_path, _coerce_canonical_mention)
     edge_groups = _CaptionGroupReader(canonical_edges_path, _coerce_canonical_edge)
 
-    with open_text(facts_path, "wt") as facts_handle:
-        for caption_id, mentions in mention_groups:
-            edges = edge_groups.take_if_caption(caption_id)
-            facts = _caption_facts(
-                mentions,
-                edges,
-                start_index=fact_total,
-            )
-            for fact in facts:
-                facts_handle.write(json.dumps(to_jsonable(fact), ensure_ascii=False, sort_keys=True))
-                facts_handle.write("\n")
-                _accumulate_count_fact(table_buckets, fact)
-                fact_type_counts[fact.fact_type] += 1
-                fact_total += 1
+    try:
+        with open_text(facts_path, "wt") as facts_handle:
+            for caption_id, mentions in mention_groups:
+                progress.check_memory(
+                    phase="stage6_streaming",
+                    metrics={"caption_groups_processed": caption_group_total},
+                )
+                edges = edge_groups.take_if_caption(caption_id)
+                facts = _caption_facts(
+                    mentions,
+                    edges,
+                    start_index=fact_total,
+                )
+                for fact in facts:
+                    facts_handle.write(
+                        json.dumps(to_jsonable(fact), ensure_ascii=False, sort_keys=True),
+                    )
+                    facts_handle.write("\n")
+                    _accumulate_count_fact(table_buckets, fact)
+                    fact_type_counts[fact.fact_type] += 1
+                    fact_total += 1
+                caption_group_total += 1
+                if caption_group_total % 1000 == 0:
+                    progress.write(
+                        status="running",
+                        phase="stage6_streaming",
+                        note="streaming_facts",
+                        metrics={
+                            "caption_groups_processed": caption_group_total,
+                            "fact_total": fact_total,
+                            "fact_type_counts": dict(fact_type_counts),
+                        },
+                        outputs={"facts": facts_path, "output_dir": output_root},
+                    )
 
-        leftover_caption = edge_groups.peek_caption()
-        if leftover_caption is not None:
-            raise ValueError(
-                "canonical_edges contains a caption with no matching canonical_mentions "
-                f"group or the files are not in the same caption order: {leftover_caption!r}",
-            )
+            leftover_caption = edge_groups.peek_caption()
+            if leftover_caption is not None:
+                raise ValueError(
+                    "canonical_edges contains a caption with no matching canonical_mentions "
+                    f"group or the files are not in the same caption order: {leftover_caption!r}",
+                )
+    except Exception as exc:
+        progress.write(
+            status="failed",
+            phase="stage6_streaming",
+            note=f"{type(exc).__name__}: {exc}",
+            metrics={
+                "caption_groups_processed": caption_group_total,
+                "fact_total": fact_total,
+                "fact_type_counts": dict(fact_type_counts),
+            },
+            outputs={"facts": facts_path, "output_dir": output_root},
+        )
+        raise
+
+    progress.write(
+        status="running",
+        phase="stage6_writing_tables",
+        note="facts_complete",
+        metrics={
+            "caption_groups_processed": caption_group_total,
+            "fact_total": fact_total,
+            "fact_type_counts": dict(fact_type_counts),
+        },
+        outputs={"facts": facts_path, "output_dir": output_root},
+    )
 
     table_paths: dict[str, str] = {}
     table_row_counts: dict[str, int] = {}
@@ -352,9 +426,26 @@ def run_stage6_export_counts(
         "table_paths": table_paths,
         "table_row_counts": dict(sorted(table_row_counts.items())),
         "export_mode": "streaming_count_accumulator",
+        "memory_limit_gib": memory_config.resolved_memory_limit_gib,
+        "memory_limit_source": memory_config.memory_limit_source,
+        "rss_limit_fraction": rss_limit_fraction,
+        "rss_reserve_gib": rss_reserve_gib,
+        "max_rss_gib": memory_config.effective_max_rss_gib,
     }
     if summary_path is not None:
         write_jsonl(summary_path, [summary])
+    progress.write(
+        status="complete",
+        phase="stage6_complete",
+        note="complete",
+        metrics={
+            "caption_groups_processed": caption_group_total,
+            "fact_total": fact_total,
+            "fact_type_counts": dict(fact_type_counts),
+        },
+        outputs={"facts": facts_path, "output_dir": output_root},
+        summary=summary,
+    )
     return summary
 
 

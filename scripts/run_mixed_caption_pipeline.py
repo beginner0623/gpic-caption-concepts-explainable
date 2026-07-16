@@ -471,6 +471,7 @@ def run_mixed_caption_pipeline(
         object_lookup=object_lookup,
         action_lookup=action_lookup,
         preposition_mwe_lookup=preposition_mwe_lookup,
+        progress_path=stage4_dir / "progress.json",
     )
     mark_timing("stage4_extract_raw", stage_start)
     write_progress("stage4_extract_raw_complete", stage4=stage4_summary)
@@ -485,6 +486,7 @@ def run_mixed_caption_pipeline(
         canonical_mentions_path=stage5_dir / "canonical_mentions.jsonl",
         canonical_edges_path=stage5_dir / "canonical_edges.jsonl",
         summary_path=None,
+        progress_path=stage5_dir / "progress.json",
     )
     stage5_summary["formal_attribute_inventory_gate"] = True
     write_jsonl(stage5_dir / "summary.jsonl", [stage5_summary])
@@ -498,6 +500,7 @@ def run_mixed_caption_pipeline(
         stage5_dir / "canonical_edges.jsonl",
         output_dir=stage6_dir,
         summary_path=stage6_dir / "summary.jsonl",
+        progress_path=stage6_dir / "progress.json",
     )
     mark_timing("stage6_export_counts", stage_start)
     write_progress("stage6_export_counts_complete", stage6=stage6_summary)
