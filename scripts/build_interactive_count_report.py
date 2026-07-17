@@ -308,6 +308,7 @@ def build_report_rows_from_stage6(
     It is intentionally aggregate-first: row caption panels use
     example_caption_ids from the count tables.
     """
+    _require_stage6_report_inputs(stage6_dir)
     lookups = _load_stage6_entity_lookups(stage6_dir)
 
     def object_rows() -> Iterable[dict[str, Any]]:
@@ -469,6 +470,34 @@ def build_report_rows_from_stage6(
     }
 
 
+def _require_stage6_report_inputs(stage6_dir: Path) -> None:
+    required_files = [
+        "object_counts.tsv",
+        "attribute_counts.tsv",
+        "action_counts.tsv",
+        "relation_triple_counts.tsv",
+        "object_cooccurrence_pair_counts.tsv",
+        "object_attribute_pair_counts.tsv",
+        "agent_patient_pair_counts.tsv",
+        "relation_component_counts.tsv",
+        "patient_action_agent_triple_counts.tsv",
+    ]
+    missing = [name for name in required_files if not (stage6_dir / name).exists()]
+    if missing:
+        message = (
+            "stage6-tsv report input is incomplete; refusing to build a report "
+            "with silently empty views. Missing required TSV(s): "
+            + ", ".join(missing)
+        )
+        if "patient_action_agent_triple_counts.tsv" in missing:
+            message += (
+                ". Build it first with "
+                "scripts/build_patient_action_agent_triples_from_facts.py "
+                "using the Stage 6 facts.jsonl."
+            )
+        raise FileNotFoundError(message)
+
+
 def _load_stage6_entity_lookups(stage6_dir: Path) -> dict[str, dict[str, dict[str, str]]]:
     lookups: dict[str, dict[str, dict[str, str]]] = {
         "objects": {},
@@ -540,7 +569,7 @@ def _stage6_tsv_rows(
 
 def _iter_tsv(path: Path) -> Iterable[dict[str, str]]:
     if not path.exists():
-        return
+        raise FileNotFoundError(f"missing required TSV: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         for row in reader:
