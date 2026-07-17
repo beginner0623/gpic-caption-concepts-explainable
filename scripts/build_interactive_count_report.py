@@ -209,8 +209,9 @@ def main(argv: Iterable[str] = sys.argv[1:]) -> int:
                 "show the Stage 6 example_caption_ids, not every caption occurrence."
             ),
             (
-                "patient_action_agent_triples is unavailable from aggregate TSVs "
-                "without re-reading fact-level rows, so this view is empty in this mode."
+                "patient_action_agent_triples is loaded from "
+                "patient_action_agent_triple_counts.tsv when that Stage 6 helper "
+                "table is available."
             ),
         ]
 
@@ -427,6 +428,23 @@ def build_report_rows_from_stage6(
             },
         )
 
+    def patient_action_agent_triple_rows() -> Iterable[dict[str, Any]]:
+        yield from _stage6_tsv_rows(
+            stage6_dir / "patient_action_agent_triple_counts.tsv",
+            lambda row: {
+                "patient_object": row.get("patient_object", ""),
+                "patient_object_raw_surfaces": _lookup_raw_surface(lookups["objects"], row.get("patient_object", "")),
+                "action": row.get("action", ""),
+                "action_raw_surfaces": _lookup_raw_surface(lookups["actions"], row.get("action", "")),
+                "agent_object": row.get("agent_object", ""),
+                "agent_object_raw_surfaces": _lookup_raw_surface(lookups["objects"], row.get("agent_object", "")),
+                "count": row.get("count", 0),
+                "caption_count": row.get("caption_count", 0),
+                "example_caption_ids": row.get("example_caption_ids", ""),
+                "_caption_ids": row.get("example_caption_ids", ""),
+            },
+        )
+
     return {
         "objects": object_rows(),
         "attributes": attribute_rows(),
@@ -446,7 +464,7 @@ def build_report_rows_from_stage6(
             "agent_object_raw_surfaces",
             "agent_parent_concepts",
         ),
-        "patient_action_agent_triples": iter(()),
+        "patient_action_agent_triples": patient_action_agent_triple_rows(),
         "relation_components": relation_component_rows(),
     }
 
