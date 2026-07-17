@@ -92,12 +92,29 @@ inline command path failed.
 During the 1M full-caption report index build, progress slowed sharply after
 roughly 140M Stage 6 fact rows. The first explanation given was that SQLite
 primary-key duplicate checks became expensive after crossing 100M indexed rows.
+The follow-up explanation then overcorrected and implied that Lustre/DDN sync
+I/O was the direct cause.
 
 ### Why It Happened
 
 That explanation was too narrow and was stated before checking process wait
 state and I/O counters. The slowdown was not proven to be only SQLite B-tree
-growth.
+growth. The later storage comparison probe was also invalid: both the supposed
+NVMe and DDN test DBs were written under the same `/mnt/nvme/...` work
+directory, so it did not compare different filesystems at all.
+
+The valid evidence from the live run was narrower:
+
+- the process was alive and continued to consume CPU
+- `/proc/<pid>/wchan` showed `cl_sync_io_wait` at one sampled moment
+- `/proc/<pid>/io` showed continued read/write progress
+- the slowdown occurred after the report DB and primary-key index were already
+  very large
+
+This proves that I/O wait happened during the slowdown. It does not distinguish
+between DDN shared load, Linux dirty-page writeback throttling, SQLite
+write-amplification/cache spill, primary-key duplicate-check cost, fact-type
+distribution changes, or a combination of those factors.
 
 ### Durable Guard
 
@@ -111,9 +128,23 @@ Before diagnosing a long-running MLXP/SQLite slowdown, collect process evidence:
 Do not label the bottleneck as CPU, SQLite, B-tree, network filesystem, or lock
 contention until those checks have been read.
 
+For storage comparisons, prove the target files are on different filesystems
+with `df -hT`, `stat -f`, and resolved absolute paths. If both probes write to
+the same mount, record the comparison as invalid.
+
+For report-index performance probes, do not use an empty/small DB to explain
+production-scale behavior. A diagnostic probe must reproduce the relevant
+shape, including a large existing DB, a large primary-key index, `INSERT OR
+IGNORE`, comparable batch size, and the target filesystem. Otherwise it is only
+a smoke test.
+
 ### Verification
 
 For the active 1M caption-index build, `/proc/<pid>/wchan` reported
 `cl_sync_io_wait`, and `/proc/<pid>/io` showed continued write progress over a
-10-second interval. The safer diagnosis is that Lustre/DDN synchronous I/O wait
-is a major contributor, while SQLite index growth may still be secondary.
+10-second interval. The only safe conclusion is:
+
+> I/O wait was observed during the slowdown, but the root cause was not fully
+> isolated.
+
+The invalid NVMe/DDN probe result must not be reused as evidence.

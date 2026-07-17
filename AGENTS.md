@@ -116,6 +116,43 @@ node-level available memory. If a previous phase has approached the limit, do
 not rerun the same memory shape. Change the implementation to streaming,
 chunked, or disk-backed processing first.
 
+## Storage And I/O Diagnosis Guard
+
+Do not claim an NVMe-vs-DDN/Lustre comparison unless command output proves the
+tested files are on different filesystems. Before drawing a storage conclusion,
+print and inspect all of:
+
+- absolute path for each tested DB/file
+- `df -hT <path>` for each tested DB/file
+- `stat -f -c '%T %m' <path>` when available
+- `readlink -f <path>` when symlinks or generated paths may be involved
+
+If both test files are under the same mount, the comparison is invalid. Record
+that as an invalid probe, not as evidence.
+
+For SQLite/report performance, small empty-DB probes do not reproduce a
+production-sized primary-key index. Label them only as connectivity or basic
+write smoke tests. Do not use them to explain million-scale behavior unless the
+probe reproduces the relevant shape: existing DB size, index cardinality,
+primary-key/unique constraints, `INSERT OR IGNORE`, batch size, and target
+filesystem.
+
+When diagnosing sudden slowdown, separate observed facts from inferred causes:
+
+- observed: process state, CPU, RSS, `wchan`, `/proc/<pid>/io` deltas, DB size,
+  progress deltas, fact type around the slowdown
+- inferred: SQLite index growth, dirty-page writeback, filesystem contention,
+  cache spill, fact-type distribution, or lock contention
+
+Do not state an inferred cause as the direct cause until the evidence
+distinguishes it from the alternatives.
+
+When polling a remote long-running job, avoid launching overlapping sleep-based
+pollers from the same conversation. If a poll command uses `Start-Sleep`, wait
+for that tool call to finish before starting another poll. If duplicate pollers
+are suspected, identify them as pollers, not worker jobs, and confirm the main
+worker PID separately.
+
 ## Long-Running Process Guard
 
 Long-running pipeline jobs must not be launched with ad hoc PowerShell
