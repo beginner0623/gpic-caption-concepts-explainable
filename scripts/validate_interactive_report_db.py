@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Any
+
+
+def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Validate structural invariants of an interactive count report DB.",
+    )
+    parser.add_argument("--report-db", required=True, type=Path)
+    parser.add_argument("--summary-json", type=Path)
+    parser.add_argument("--require-caption-index", action="store_true")
+    parser.add_argument("--check-top-caption-counts", type=int, default=0)
+    parser.add_argument("--min-patient-action-agent-triples", type=int, default=0)
+    return parser.parse_args(list(argv) if argv is not None else None)
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    args = parse_args(argv)
+    if not args.report_db.exists():
+        raise SystemExit(f"missing report DB: {args.report_db}")
+    errors: list[str] = []
+    with sqlite3.connect(args.report_db) as conn:
+        conn.row_factory = sqlite3.Row
+        views = _load_views(conn)
+        for view in views:
+            name = str(view["name"])
+            expected = int(view.get("row_count") or 0)
+            if not _table_exists(conn, name):
+                errors.append(f"missing view table: {name}")
+                continue
+            actual = int(
+                conn.execute(f"SELECT COUNT(*) FROM {_q(name)}").fetchone()[0],
+            )
+            if actual != expected:
+                errors.append(f"{name}: metadata row_count={expected}, actual={actual}")
+
+        if args.summary_json and args.summary_json.exists():
+            summary = json.loads(args.summary_json.read_text(encoding="utf-8"))
+            summary_counts = summary.get("view_row_counts", {})
+            for name, expected in sorted(summary_counts.items()):
+                if not _table_exists(conn, str(name)):
+                    errors.append(f"summary lists missing table: {name}")
+                    continue
+                actual = int(
+                    conn.execute(f"SELECT COUNT(*) FROM {_q(str(name))}").fetchone()[0],
+                )
+                if actual != int(expected):
+                    errors.append(
+                        f"{name}: summary row_count={expected}, actual={actual}",
+                    )
+
+        has_caption_index = _table_exists(conn, "report_caption_index")
+        if args.require_caption_index and not has_caption_index:
+            errors.append("report_caption_index is required but missing")
+
+        if args.min_patient_action_agent_triples:
+            if not _table_exists(conn, "patient_action_agent_triples"):
+                errors.append("patient_action_agent_triples table is missing")
+            else:
+                triple_rows = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM patient_action_agent_triples",
+                    ).fetchone()[0],
+                )
+                if triple_rows < args.min_patient_action_agent_triples:
+                    errors.append(
+                        "patient_action_agent_triples row_count="
+                        f"{triple_rows}, expected >= "
+                        f"{args.min_patient_action_agent_triples}",
+                    )
+
+        caption_mismatches: list[dict[str, Any]] = []
+        if has_caption_index and args.check_top_caption_counts > 0:
+            caption_mismatches = _check_top_caption_counts(
+                conn,
+                views=views,
+                limit=args.check_top_caption_counts,
+            )
+            for mismatch in caption_mismatches:
+                errors.append(
+                    "{view} row_id={row_id}: caption_count={caption_count}, "
+                    "index_count={index_count}".format(**mismatch),
+                )
+
+        result = {
+            "report_db": str(args.report_db),
+            "view_count": len(views),
+            "has_caption_index": has_caption_index,
+            "caption_mismatch_count": len(caption_mismatches),
+            "errors": errors,
+        }
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    if errors:
+        raise SystemExit(1)
+    return 0
+
+
+def _load_views(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    row = conn.execute("SELECT value FROM metadata WHERE key = 'views'").fetchone()
+    if row is None:
+        raise SystemExit("metadata key 'views' is missing")
+    payload = json.loads(str(row[0]))
+    if not isinstance(payload, list):
+        raise SystemExit("metadata key 'views' is not a list")
+    return [dict(item) for item in payload if isinstance(item, dict)]
+
+
+def _check_top_caption_counts(
+    conn: sqlite3.Connection,
+    *,
+    views: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    mismatches: list[dict[str, Any]] = []
+    for view in views:
+        name = str(view["name"])
+        if not _table_exists(conn, name):
+            continue
+        rows = conn.execute(
+            f"SELECT _row_id, caption_count FROM {_q(name)} "
+            "ORDER BY caption_count DESC, _row_id ASC LIMIT ?",
+            [limit],
+        ).fetchall()
+        for row in rows:
+            row_id = int(row["_row_id"])
+            caption_count = int(row["caption_count"] or 0)
+            index_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM report_caption_index "
+                    "WHERE view_name = ? AND row_id = ?",
+                    [name, row_id],
+                ).fetchone()[0],
+            )
+            if caption_count != index_count:
+                mismatches.append(
+                    {
+                        "view": name,
+                        "row_id": row_id,
+                        "caption_count": caption_count,
+                        "index_count": index_count,
+                    },
+                )
+    return mismatches
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            [table],
+        ).fetchone()
+        is not None
+    )
+
+
+def _q(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
