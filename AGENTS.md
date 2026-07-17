@@ -62,6 +62,11 @@ Preferred remote execution patterns:
 
 - use direct argv commands:
   `kubectl -n <ns> exec <pod> -- git -C /root/work/repo status --short`
+- from this Windows/Codex desktop workspace, use
+  `scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds <N> -- scripts\run_mlxp_bash.py <script.sh>`
+  for any multi-step MLXP command. The local `<script.sh>` must be written with
+  ASCII or UTF-8 without BOM. Do not pipe ad hoc PowerShell here-strings
+  directly into `wsl ... kubectl exec ... bash`.
 - for multi-step remote work, create a checked script file with LF line endings
   and no BOM, copy it to the pod, then execute that script explicitly
 - if stdin script execution is used, first verify no BOM/CRLF issue with a
@@ -227,6 +232,14 @@ Follow this order:
    same failure path is harder to repeat.
 5. Verify the guard with a bounded command.
 6. Only then resume the main pipeline step.
+
+Also update `docs/incident_response_log_v1.md` with:
+
+- what failed
+- why it happened
+- what durable guard was added or updated
+- how that guard was verified
+- what command/output proves the main pipeline was safe to resume
 
 Do not answer with only an apology, plan, or explanation when a durable guard is
 possible. If no durable guard is possible, say exactly why and record the manual
