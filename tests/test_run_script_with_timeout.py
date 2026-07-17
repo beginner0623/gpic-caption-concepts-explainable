@@ -39,6 +39,13 @@ class RunScriptWithTimeoutGuardTest(unittest.TestCase):
             ["--root", "outputs"],
         )
 
+    def test_background_launcher_is_never_allowed_through_timeout_wrapper(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "detached background launcher"):
+            timeout_script._raise_if_forbidden_timeout_target(
+                Path("scripts/run_background_job.py"),
+                ["start"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,12 @@ import threading
 import time
 from pathlib import Path
 
+SCRIPTS = Path(__file__).resolve().parent
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+from incident_gate import guarded_entrypoint, record_current_failure
+
 
 STAGE456_TIMEOUT_GUARDED_SCRIPTS = frozenset(
     {
@@ -17,6 +23,7 @@ STAGE456_TIMEOUT_GUARDED_SCRIPTS = frozenset(
         "run_stage6_export_counts.py",
     }
 )
+BACKGROUND_LAUNCHER = "run_background_job.py"
 
 
 def main() -> int:
@@ -92,6 +99,12 @@ def _raise_if_forbidden_timeout_target(
     *,
     allow_stage456_timeout: bool = False,
 ) -> None:
+    if script_path.name == BACKGROUND_LAUNCHER:
+        raise SystemExit(
+            "Refusing to run the detached background launcher through the hard timeout "
+            "wrapper. Launch run_background_job.py directly so its detached child owns "
+            "the incident running marker."
+        )
     if allow_stage456_timeout:
         return
     if script_path.name not in STAGE456_TIMEOUT_GUARDED_SCRIPTS:
@@ -129,6 +142,15 @@ def _safe_int(value: str) -> int | None:
 
 def timeout_exit(*, script: Path, start: float, timeout_seconds: int) -> None:
     elapsed = time.perf_counter() - start
+    record_current_failure(
+        failure_type="hard_timeout",
+        summary=f"Timed execution exceeded its hard limit: {script.name}",
+        details={
+            "script": str(script),
+            "elapsed_seconds": round(elapsed, 3),
+            "timeout_seconds": timeout_seconds,
+        },
+    )
     print(
         f"\nSCRIPT_TIMEOUT: killed {script} after "
         f"{elapsed:.3f}s limit={timeout_seconds}s",
@@ -149,4 +171,4 @@ def script_temp_root(root: Path) -> Path:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(guarded_entrypoint("bounded_script_runner", main))

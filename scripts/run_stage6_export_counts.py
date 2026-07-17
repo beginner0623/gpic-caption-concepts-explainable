@@ -2,6 +2,16 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+SCRIPTS = ROOT / "scripts"
+for path in (SRC, SCRIPTS):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+from incident_gate import guarded_entrypoint
 
 from gpic_concepts_v1.cli_memory import add_memory_safety_args, memory_safety_kwargs
 from gpic_concepts_v1.stage6_export_counts import run_stage6_export_counts
@@ -68,4 +78,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(guarded_entrypoint("stage6_export_counts", main))

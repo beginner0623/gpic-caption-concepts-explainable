@@ -62,6 +62,7 @@ function Assert-RunPythonArgsAllowed {
 
     if ($PythonArgs[0].ToLowerInvariant().EndsWith(".py")) {
         $AllowedScripts = @(
+            (Join-Path $Root "scripts\incident_gate.py"),
             (Join-Path $Root "scripts\run_background_job.py"),
             (Join-Path $Root "scripts\run_script_with_timeout.py"),
             (Join-Path $Root "scripts\run_unittest_with_timeout.py"),

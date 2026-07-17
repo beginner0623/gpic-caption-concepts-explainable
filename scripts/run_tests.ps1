@@ -94,6 +94,14 @@ if ($Mode -eq "pytest") {
         throw "pytest is not installed. Use default unittest mode or install pytest."
     }
 } else {
+    $TestsPackage = Join-Path $Root "tests\__init__.py"
+    if (-not (Test-Path -LiteralPath $TestsPackage)) {
+        foreach ($RunnerArg in $RunnerArgs) {
+            if ($RunnerArg -match '^tests\.[A-Za-z0-9_.]+$') {
+                throw "The tests directory is not a Python package, so dotted names such as '$RunnerArg' are invalid. Use --pytest with tests/test_name.py paths, or unittest discover arguments."
+            }
+        }
+    }
     $Parsed = Read-TimeoutArg -InputArgs $RunnerArgs
     Invoke-UnittestWithTimeout -UnittestArgs $Parsed.Args -TimeoutSeconds $Parsed.TimeoutSeconds
 }

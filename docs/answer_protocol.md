@@ -307,3 +307,31 @@ The report is current.
 ```
 
 if only the Markdown file itself was read.
+
+## 10. Enforced Incident Gate
+
+Do not describe incident prevention as implemented unless the current command
+path is guarded by `scripts/incident_gate.py`.
+
+Official Stage 1-6 entrypoints, Stage 3.5 workflow, mixed pipeline, inventory
+publish, bounded script runner, and supported remote wrappers must check the
+repository-fixed `.pipeline_state` directory before execution. Detached jobs
+must wrap the detached child itself; guarding only the launcher is invalid.
+
+An open `.pipeline_state/incident.json` blocks official execution. An
+uncompleted `.pipeline_state/running.json` becomes an incident on the next
+official invocation when its recorded process is no longer verifiably active.
+OOM, hard termination, and power loss are therefore detected by the surviving
+marker even when exception cleanup could not run.
+
+Do not clear an incident merely to retry. Clearing requires all of:
+
+- concrete root cause
+- durable guard added or an explicit reason why only a manual guard is possible
+- verification evidence
+- successful verification command when the incident has an executable check
+
+Tests, diagnostics, and the incident CLI remain runnable while an incident is
+open so the failure can be investigated and verified. A direct internal Python
+function call that bypasses the guarded entrypoint is outside this guarantee
+and must not be presented as an official run.

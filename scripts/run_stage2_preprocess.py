@@ -7,8 +7,12 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+SCRIPTS = ROOT / "scripts"
+for path in (SRC, SCRIPTS):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+from incident_gate import guarded_entrypoint
 
 from gpic_concepts_v1.stage2_preprocess import run_stage2_preprocess
 
@@ -51,4 +55,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(guarded_entrypoint("stage2_preprocess", main))

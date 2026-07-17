@@ -7,8 +7,12 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+SCRIPTS = ROOT / "scripts"
+for path in (SRC, SCRIPTS):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+from incident_gate import guarded_entrypoint
 
 from gpic_concepts_v1.inventory_validation import (
     final_manual_resolution_blockers,
@@ -230,4 +234,4 @@ def _raise_if_action_inventory_not_ready(path: Path) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(guarded_entrypoint("stage4_extract_raw", main))

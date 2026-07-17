@@ -3,6 +3,61 @@
 This log records repeated failure paths and the durable guard added before the
 pipeline resumed.
 
+## 2026-07-17: Incident Prevention Existed Only As A Written Promise
+
+### What Failed
+
+Repeated failures had documentation in `AGENTS.md`, but official commands could
+still be rerun immediately because no executable state gate existed. The first
+explanation of the proposed gate was also phrased as though automatic incident
+creation and blocking were already implemented when they were not.
+
+During implementation, one oversized multi-file patch stalled and a targeted
+test command incorrectly used dotted `tests.test_*` names even though this
+repository's `tests` directory is not a Python package.
+
+### Why It Happened
+
+The incident process depended on conversation memory and written instructions.
+There was no repository state that official entrypoints were required to check,
+no surviving running marker for OOM/hard termination, and no verified-clear
+operation. The patch and test-command mistakes also came from assuming command
+shape instead of checking current file context and runner syntax first.
+
+### Durable Guard
+
+- Added `scripts/incident_gate.py` with repository-fixed state in
+  `.pipeline_state/`.
+- Official Stage 1-6, Stage 3.5, mixed pipeline, inventory publish, timeout,
+  MLXP, and password SSH/SCP entrypoints now use `guarded_entrypoint`.
+- Detached jobs are launched through `incident_gate.py run`, so the detached
+  child owns the running marker and records its own nonzero exit.
+- A hard timeout records the incident before `os._exit`; an OOM or other
+  uncatchable termination leaves `running.json`, which the next official run
+  promotes to an incident.
+- An open incident blocks official execution. Clearing requires root cause,
+  guard added, verification evidence, and a successful verification command
+  when supplied. Resolved incidents append to one history JSONL.
+- `run_tests.ps1` now rejects invalid dotted `tests.test_*` unittest arguments
+  when `tests/__init__.py` is absent and points to pytest paths or discovery.
+- Large manual patches are split after reading exact current file context;
+  stalled patch calls are terminated and their partial diff is inspected before
+  further editing.
+
+### Verification
+
+- `58` affected regression tests passed after entrypoint integration.
+- `15` focused incident/background/timeout tests passed, including a real
+  one-second hard timeout that exited through `os._exit(124)` and still wrote an
+  incident.
+- An isolated CLI smoke test recorded child `returncode=7`, blocked the next
+  successful command with `IncidentOpenError`, refused execution until review,
+  then allowed execution only after a successful verification command cleared
+  the incident.
+- The real repository state remained clear throughout the isolated smoke test:
+  `.pipeline_state/incident.json` and `.pipeline_state/running.json` were both
+  absent.
+
 ## 2026-07-17: Stage6 TSV Report Lost Full Caption Drill-Down
 
 ### What Failed

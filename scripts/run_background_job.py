@@ -9,6 +9,17 @@ import subprocess
 import sys
 import time
 
+SCRIPTS = Path(__file__).resolve().parent
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+from incident_gate import (
+    RUN_TOKEN_ENV,
+    STATE_DIR_ENV,
+    assert_pipeline_clear,
+    create_incident,
+)
+
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 DETACHED_PROCESS = 0x00000008
@@ -74,6 +85,24 @@ def start_job(args: argparse.Namespace) -> int:
     cwd = Path(args.cwd).resolve()
     if not cwd.exists():
         raise SystemExit(f"cwd does not exist: {cwd}")
+    state_dir = cwd / ".pipeline_state"
+    assert_pipeline_clear(state_dir=state_dir)
+
+    incident_runner = Path(__file__).with_name("incident_gate.py").resolve()
+    guarded_job_args = [
+        sys.executable,
+        str(incident_runner),
+        "--state-dir",
+        str(state_dir),
+        "run",
+        "--name",
+        args.name or Path(job_args[0]).name,
+        "--",
+        *job_args,
+    ]
+    child_env = os.environ.copy()
+    child_env.pop(RUN_TOKEN_ENV, None)
+    child_env[STATE_DIR_ENV] = str(state_dir)
 
     stdout_path = Path(args.stdout).resolve()
     stderr_path = Path(args.stderr).resolve()
@@ -88,21 +117,37 @@ def start_job(args: argparse.Namespace) -> int:
         flags = 0
         if os.name == "nt":
             flags = CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
-        process = subprocess.Popen(
-            job_args,
-            cwd=cwd,
-            stdout=stdout,
-            stderr=stderr,
-            stdin=subprocess.DEVNULL,
-            creationflags=flags,
-            close_fds=True,
-        )
+        try:
+            process = subprocess.Popen(
+                guarded_job_args,
+                cwd=cwd,
+                stdout=stdout,
+                stderr=stderr,
+                stdin=subprocess.DEVNULL,
+                creationflags=flags,
+                close_fds=True,
+                env=child_env,
+            )
+        except BaseException as exc:
+            create_incident(
+                failure_type="background_launch_failure",
+                summary=f"Failed to launch detached job: {args.name or job_args[0]}",
+                details={
+                    "cwd": str(cwd),
+                    "command": job_args,
+                    "exception": repr(exc),
+                },
+                state_dir=state_dir,
+            )
+            raise
 
     record = {
         "name": args.name,
         "pid": process.pid,
         "cwd": str(cwd),
         "command": job_args,
+        "guarded_command": guarded_job_args,
+        "pipeline_state_dir": str(state_dir),
         "stdout": str(stdout_path),
         "stderr": str(stderr_path),
         "started_at_utc": datetime.now(timezone.utc).isoformat(),

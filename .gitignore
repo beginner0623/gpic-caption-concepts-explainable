@@ -13,6 +13,7 @@ outputs/
 reports/
 tmp/
 .tmp_tests/
+.pipeline_state/
 resources/nltk_data/
 resources/wn_data/
 *.log

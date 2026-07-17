@@ -21,6 +21,8 @@ if str(SCRIPTS) not in sys.path:
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from incident_gate import guarded_entrypoint
+
 from publish_inventory_bundle import DEFAULT_TARGET_DIR as DEFAULT_CURRENT_INVENTORY_DIR
 from publish_inventory_bundle import publish_inventory_bundle
 
@@ -1155,4 +1157,4 @@ def _optional_path(value: str | None) -> Path | None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(guarded_entrypoint("stage35_inventory_workflow", main))

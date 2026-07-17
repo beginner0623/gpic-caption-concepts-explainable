@@ -17,6 +17,8 @@ for path in (SRC, SCRIPTS):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
+from incident_gate import guarded_entrypoint
+
 from build_caption_concept_md import build_report, caption_id, group_by_caption
 from gpic_concepts_v1.atomic_io import atomic_text_writer
 from gpic_concepts_v1.inventory_bundle import load_inventory_bundle, merge_bundle_path
@@ -887,4 +889,4 @@ def build_mixed_markdown_report(
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(guarded_entrypoint("mixed_caption_pipeline", main))

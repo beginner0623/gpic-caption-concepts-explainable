@@ -287,6 +287,30 @@ currently do not have checkpoint/resume. The wrapper refuses
 
 ## Incident Response Guard
 
+The response order below is enforced for official execution by
+`scripts/incident_gate.py`, using repository-fixed state under
+`.pipeline_state/`:
+
+- `.pipeline_state/incident.json`: unresolved incident; official execution is blocked
+- `.pipeline_state/running.json`: currently active or incompletely terminated run
+- `.pipeline_state/incident_history.jsonl`: resolved incident audit history
+
+Do not delete or edit these files manually. Inspect them with:
+
+`scripts\run_python.ps1 scripts\incident_gate.py status`
+
+Clear an incident only with `scripts\incident_gate.py clear` and non-empty
+root-cause, guard-added, and verification-evidence fields. Use
+`--verify-command` when an executable regression check exists; a failing
+verification command must leave the incident open.
+
+Official Stage 1-6, Stage 3.5, mixed pipeline, inventory publish, timeout,
+MLXP, and password SSH/SCP entrypoints must use `guarded_entrypoint`. The
+background launcher must wrap the detached child with `incident_gate.py run`;
+do not guard only the launcher process. Diagnostic and test commands must stay
+available while an incident is open so that the incident can be investigated
+and cleared with evidence.
+
 When the user points out a repeated mistake, a violated project rule, a stuck
 process, a missing timeout, a wrong workspace, or an untracked background job,
 do not resume the main pipeline first.

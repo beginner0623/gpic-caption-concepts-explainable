@@ -11,11 +11,14 @@ import sys
 import uuid
 from typing import Any
 
-
 ROOT = Path(__file__).absolute().parents[1]
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+SCRIPTS = ROOT / "scripts"
+for path in (SRC, SCRIPTS):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+from incident_gate import guarded_entrypoint
 
 from gpic_concepts_v1.atomic_io import atomic_text_writer
 from gpic_concepts_v1.inventory_bundle import (
@@ -207,4 +210,4 @@ def _count_tsv_rows(path: Path) -> int:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(guarded_entrypoint("publish_inventory_bundle", main))
