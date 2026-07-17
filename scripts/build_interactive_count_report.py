@@ -205,8 +205,9 @@ def main(argv: Iterable[str] = sys.argv[1:]) -> int:
         rows_by_view = build_report_rows_from_stage6(args.stage6_dir)
         report_notes = [
             (
-                "stage6-tsv mode uses Stage 6 aggregate TSVs. Row caption panels "
-                "show the Stage 6 example_caption_ids, not every caption occurrence."
+                "stage6-tsv mode uses Stage 6 aggregate TSVs. Attach a "
+                "report_caption_index built from facts.jsonl to enable full row "
+                "caption drill-down beyond Stage 6 example_caption_ids."
             ),
             (
                 "patient_action_agent_triples is loaded from "
@@ -2173,6 +2174,31 @@ class ReportHandler(SimpleHTTPRequestHandler):
         page = max(1, int(params.get("page", ["1"])[0]))
         page_size = min(200, max(10, int(params.get("page_size", ["50"])[0])))
         with sqlite3.connect(DB_PATH) as conn:
+            indexed = self._row_caption_index_exists(conn)
+            if indexed:
+                indexed_total = conn.execute(
+                    "SELECT COUNT(*) FROM report_caption_index "
+                    "WHERE view_name = ? AND row_id = ?",
+                    [view, row_id],
+                ).fetchone()[0]
+                if indexed_total:
+                    offset = (page - 1) * page_size
+                    page_ids = [
+                        str(row[0])
+                        for row in conn.execute(
+                            "SELECT caption_id FROM report_caption_index "
+                            "WHERE view_name = ? AND row_id = ? "
+                            "ORDER BY caption_id ASC LIMIT ? OFFSET ?",
+                            [view, row_id, page_size, offset],
+                        ).fetchall()
+                    ]
+                    if not page_ids:
+                        return {"captions": [], "total": indexed_total}
+                    return {
+                        "captions": self._fetch_captions(conn, page_ids),
+                        "total": indexed_total,
+                    }
+
             caption_id_row = conn.execute(
                 f"SELECT _caption_ids FROM {quote_identifier(view)} WHERE _row_id = ?",
                 [row_id],
@@ -2185,18 +2211,32 @@ class ReportHandler(SimpleHTTPRequestHandler):
             page_ids = caption_ids[offset : offset + page_size]
             if not page_ids:
                 return {"captions": [], "total": total}
-            placeholders = ", ".join("?" for _ in page_ids)
-            conn.row_factory = sqlite3.Row
-            fetched = {
-                row["caption_id"]: dict(row)
-                for row in conn.execute(
-                    "SELECT caption_id, caption_type, caption_shape, caption "
-                    f"FROM captions WHERE caption_id IN ({placeholders})",
-                    page_ids,
-                ).fetchall()
-            }
-        captions = [fetched[caption_id] for caption_id in page_ids if caption_id in fetched]
+            captions = self._fetch_captions(conn, page_ids)
         return {"captions": captions, "total": total}
+
+    @staticmethod
+    def _row_caption_index_exists(conn: sqlite3.Connection) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = "
+            "'report_caption_index'",
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _fetch_captions(conn: sqlite3.Connection, caption_ids: list[str]) -> list[dict]:
+        if not caption_ids:
+            return []
+        placeholders = ", ".join("?" for _ in caption_ids)
+        conn.row_factory = sqlite3.Row
+        fetched = {
+            row["caption_id"]: dict(row)
+            for row in conn.execute(
+                "SELECT caption_id, caption_type, caption_shape, caption "
+                f"FROM captions WHERE caption_id IN ({placeholders})",
+                caption_ids,
+            ).fetchall()
+        }
+        return [fetched[caption_id] for caption_id in caption_ids if caption_id in fetched]
 
     def filter_values(self, params: dict[str, list[str]]) -> dict:
         view = params.get("view", ["objects"])[0]
