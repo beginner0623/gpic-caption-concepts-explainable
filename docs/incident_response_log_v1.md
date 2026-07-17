@@ -148,3 +148,49 @@ For the active 1M caption-index build, `/proc/<pid>/wchan` reported
 > isolated.
 
 The invalid NVMe/DDN probe result must not be reused as evidence.
+
+## 2026-07-17: Blackwell Password SSH Automation Misdiagnosis
+
+### What Failed
+
+The first Blackwell `ssh`/`scp` automation used a one-off Python PTY wrapper
+based on `pty.openpty()` plus `subprocess.Popen`. The SSH password prompt was
+not handled as a controlling terminal, so the correct password path failed or
+hung. I then discussed password ambiguity before first proving that the
+automation path itself was valid.
+
+### Why It Happened
+
+OpenSSH reads passwords from its controlling terminal. A file descriptor from
+`pty.openpty()` is not automatically the child process's controlling terminal.
+That made the credential failure look like a password problem even though the
+actual failure path was the automation wrapper. I also skipped the incident
+guard order: identify the concrete failure path and add a durable guard before
+continuing the main transfer.
+
+### Durable Guard
+
+- Added `scripts/run_password_ssh_pty.py`, a reusable Linux/WSL-only helper
+  that uses `pty.fork()` so the child SSH/SCP process has a real controlling
+  terminal.
+- The helper reads the password from an environment variable and does not
+  hardcode credentials.
+- `AGENTS.md` now requires this helper for password-based SSH/SCP automation
+  from the Windows/Codex desktop workspace.
+- Before a large transfer, run a bounded remote `echo ok` probe through the
+  same helper. Do not infer that a password is wrong until the
+  controlling-terminal path or a direct interactive terminal has been tested.
+
+### Verification
+
+The `pty.fork()` path successfully ran a bounded Blackwell probe:
+
+```text
+ssh -p 55031 rlathgns3@147.46.219.233 echo ok
+...
+ok
+```
+
+The same controlling-terminal path then completed the 1M full-caption report
+package upload to Blackwell with SCP progress reaching `100%` and exit status
+`0`.

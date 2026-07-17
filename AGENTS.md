@@ -86,6 +86,30 @@ immediately. Do not continue the main pipeline until the wrong local artifact
 has been identified and either removed with an absolute-path safety check or
 explicitly quarantined.
 
+## Password SSH/SCP Automation Guard
+
+For password-based SSH or SCP automation from this Windows/Codex desktop
+workspace, do not use `pty.openpty()` with `subprocess.Popen` or a hand-built
+PowerShell/WSL expect loop. OpenSSH password prompts require a controlling
+terminal, and the non-controlling PTY path can make a correct password look
+wrong or leave a hanging transfer.
+
+Use `scripts/run_password_ssh_pty.py` under Linux/WSL for password-prompting
+`ssh` and `scp` commands. The password must come from an environment variable;
+do not hardcode it in the script or repository.
+
+Before any large upload or remote mutation, first run a bounded remote probe
+through the same helper, for example an `echo ok` command. Do not infer that an
+SSH password is wrong until this controlling-terminal path or a direct
+interactive terminal has been tested.
+
+If a password-based transfer fails:
+
+1. identify whether the prompt was reached
+2. verify the helper was the `pty.fork()` runner, not `pty.openpty()`
+3. run a small `ssh ... echo ok` probe through the same path
+4. only then retry the large transfer or ask the user to verify credentials
+
 When a remote MLXP/Kubernetes background job is started from this conversation,
 the local background-job guard is not sufficient. Record the remote status JSON
 path and PID file in the conversation and in the user-facing update. Before
