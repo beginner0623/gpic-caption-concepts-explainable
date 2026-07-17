@@ -164,7 +164,16 @@ def parse_args(argv: Iterable[str] = sys.argv[1:]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build a small local interactive report from Stage 5/6 GPIC outputs.",
     )
-    parser.add_argument("--stage5-dir", required=True, type=Path)
+    parser.add_argument(
+        "--input-mode",
+        choices=("stage5", "stage6-tsv"),
+        default="stage5",
+        help=(
+            "stage5 aggregates canonical_mentions/edges in memory; "
+            "stage6-tsv streams Stage 6 count TSVs and is suitable for large runs."
+        ),
+    )
+    parser.add_argument("--stage5-dir", type=Path)
     parser.add_argument("--stage6-dir", required=True, type=Path)
     parser.add_argument("--caption-records", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -180,31 +189,55 @@ def main(argv: Iterable[str] = sys.argv[1:]) -> int:
         raise SystemExit(f"output directory already exists: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    mentions_path = args.stage5_dir / "canonical_mentions.jsonl"
-    edges_path = args.stage5_dir / "canonical_edges.jsonl"
-    mentions = list(_iter_jsonl(mentions_path))
-    edges = list(_iter_jsonl(edges_path))
-    captions = list(_iter_jsonl(args.caption_records))
+    if args.input_mode == "stage5":
+        if args.stage5_dir is None:
+            raise SystemExit("--stage5-dir is required when --input-mode=stage5")
+        mentions_path = args.stage5_dir / "canonical_mentions.jsonl"
+        edges_path = args.stage5_dir / "canonical_edges.jsonl"
+        mentions = list(_iter_jsonl(mentions_path))
+        edges = list(_iter_jsonl(edges_path))
+        rows_by_view: Mapping[str, Iterable[dict[str, Any]]] = build_report_rows(
+            mentions=mentions,
+            edges=edges,
+        )
+        report_notes: list[str] = []
+    else:
+        rows_by_view = build_report_rows_from_stage6(args.stage6_dir)
+        report_notes = [
+            (
+                "stage6-tsv mode uses Stage 6 aggregate TSVs. Row caption panels "
+                "show the Stage 6 example_caption_ids, not every caption occurrence."
+            ),
+            (
+                "patient_action_agent_triples is unavailable from aggregate TSVs "
+                "without re-reading fact-level rows, so this view is empty in this mode."
+            ),
+        ]
 
-    rows_by_view = build_report_rows(mentions=mentions, edges=edges)
     db_path = output_dir / "report.db"
     tmp_db_path = db_path.with_suffix(".db.tmp")
     if tmp_db_path.exists():
         tmp_db_path.unlink()
-    build_sqlite_db(tmp_db_path, rows_by_view, captions=captions, title=args.title)
+    build_sqlite_db(
+        tmp_db_path,
+        rows_by_view,
+        captions=_iter_jsonl(args.caption_records),
+        title=args.title,
+    )
     os.replace(tmp_db_path, db_path)
 
     write_static_report_files(output_dir, title=args.title)
+    view_counts = _read_view_counts(db_path)
     summary = {
         "title": args.title,
+        "input_mode": args.input_mode,
         "stage5_dir": str(args.stage5_dir),
         "stage6_dir": str(args.stage6_dir),
         "caption_records": str(args.caption_records),
         "output_dir": str(output_dir),
         "report_db": str(db_path),
-        "view_row_counts": {
-            view: len(rows) for view, rows in sorted(rows_by_view.items())
-        },
+        "report_notes": report_notes,
+        "view_row_counts": view_counts,
     }
     _atomic_write_text(
         output_dir / "summary.json",
@@ -263,6 +296,237 @@ def build_report_rows(
         mentions_by_caption
     )
     return rows_by_view
+
+
+def build_report_rows_from_stage6(
+    stage6_dir: Path,
+) -> dict[str, Iterable[dict[str, Any]]]:
+    """Build report row iterables directly from Stage 6 count TSVs.
+
+    This avoids loading Stage 5 canonical mention/edge JSONL files into memory.
+    It is intentionally aggregate-first: row caption panels use
+    example_caption_ids from the count tables.
+    """
+    lookups = _load_stage6_entity_lookups(stage6_dir)
+
+    def object_rows() -> Iterable[dict[str, Any]]:
+        yield from _stage6_tsv_rows(
+            stage6_dir / "object_counts.tsv",
+            lambda row: {
+                "canonical_object": row.get("object", ""),
+                "object_raw_surfaces": row.get("raw_variants", ""),
+                "object_parent_concepts": row.get("parent_concepts", ""),
+                "count": row.get("count", 0),
+                "caption_count": row.get("caption_count", 0),
+                "example_caption_ids": row.get("example_caption_ids", ""),
+                "_caption_ids": row.get("example_caption_ids", ""),
+            },
+        )
+
+    def attribute_rows() -> Iterable[dict[str, Any]]:
+        yield from _stage6_tsv_rows(
+            stage6_dir / "attribute_counts.tsv",
+            lambda row: {
+                "canonical_attribute": row.get("attribute", ""),
+                "attribute_raw_surfaces": row.get("raw_variants", ""),
+                "count": row.get("count", 0),
+                "caption_count": row.get("caption_count", 0),
+                "example_caption_ids": row.get("example_caption_ids", ""),
+                "_caption_ids": row.get("example_caption_ids", ""),
+            },
+        )
+
+    def action_rows() -> Iterable[dict[str, Any]]:
+        yield from _stage6_tsv_rows(
+            stage6_dir / "action_counts.tsv",
+            lambda row: {
+                "canonical_action": row.get("action", ""),
+                "action_raw_surfaces": row.get("raw_variants", ""),
+                "count": row.get("count", 0),
+                "caption_count": row.get("caption_count", 0),
+                "example_caption_ids": row.get("example_caption_ids", ""),
+                "_caption_ids": row.get("example_caption_ids", ""),
+            },
+        )
+
+    def relation_rows() -> Iterable[dict[str, Any]]:
+        yield from _stage6_tsv_rows(
+            stage6_dir / "relation_triple_counts.tsv",
+            lambda row: {
+                "source_object": row.get("source", ""),
+                "source_object_raw_surfaces": _lookup_raw_surface(lookups["objects"], row.get("source", "")),
+                "source_parent_concepts": row.get("source_parent_concepts", ""),
+                "relation": row.get("relation", ""),
+                "target_object": row.get("target", ""),
+                "target_object_raw_surfaces": _lookup_raw_surface(lookups["objects"], row.get("target", "")),
+                "target_parent_concepts": row.get("target_parent_concepts", ""),
+                "count": row.get("count", 0),
+                "caption_count": row.get("caption_count", 0),
+                "example_caption_ids": row.get("example_caption_ids", ""),
+                "_caption_ids": row.get("example_caption_ids", ""),
+            },
+        )
+
+    def object_cooccurrence_rows() -> Iterable[dict[str, Any]]:
+        yield from _stage6_tsv_rows(
+            stage6_dir / "object_cooccurrence_pair_counts.tsv",
+            lambda row: {
+                "source_object": row.get("source_object", ""),
+                "source_object_raw_surfaces": _lookup_raw_surface(lookups["objects"], row.get("source_object", "")),
+                "source_parent_concepts": row.get("source_parent_concepts", ""),
+                "target_object": row.get("target_object", ""),
+                "target_object_raw_surfaces": _lookup_raw_surface(lookups["objects"], row.get("target_object", "")),
+                "target_parent_concepts": row.get("target_parent_concepts", ""),
+                "count": row.get("count", 0),
+                "caption_count": row.get("caption_count", 0),
+                "example_caption_ids": row.get("example_caption_ids", ""),
+                "_caption_ids": row.get("example_caption_ids", ""),
+            },
+        )
+
+    def attribute_object_rows() -> Iterable[dict[str, Any]]:
+        yield from _stage6_tsv_rows(
+            stage6_dir / "object_attribute_pair_counts.tsv",
+            lambda row: {
+                "object": row.get("object", ""),
+                "object_raw_surfaces": _lookup_raw_surface(lookups["objects"], row.get("object", "")),
+                "object_parent_concepts": row.get("object_parent_concepts", ""),
+                "attribute": row.get("attribute", ""),
+                "attribute_raw_surfaces": _lookup_raw_surface(lookups["attributes"], row.get("attribute", "")),
+                "count": row.get("count", 0),
+                "caption_count": row.get("caption_count", 0),
+                "example_caption_ids": row.get("example_caption_ids", ""),
+                "_caption_ids": row.get("example_caption_ids", ""),
+            },
+        )
+
+    def role_rows(role: str, object_column: str, raw_column: str, parent_column: str) -> Iterable[dict[str, Any]]:
+        yield from _stage6_tsv_rows(
+            stage6_dir / "agent_patient_pair_counts.tsv",
+            lambda row: _stage6_role_row(
+                row,
+                role=role,
+                object_column=object_column,
+                raw_column=raw_column,
+                parent_column=parent_column,
+                lookups=lookups,
+            ),
+        )
+
+    def relation_component_rows() -> Iterable[dict[str, Any]]:
+        yield from _stage6_tsv_rows(
+            stage6_dir / "relation_component_counts.tsv",
+            lambda row: {
+                "relation": row.get("relation", ""),
+                "component_index": row.get("component_index", ""),
+                "component": row.get("component", ""),
+                "count": row.get("count", 0),
+                "caption_count": row.get("caption_count", 0),
+                "example_caption_ids": row.get("example_caption_ids", ""),
+                "_caption_ids": row.get("example_caption_ids", ""),
+            },
+        )
+
+    return {
+        "objects": object_rows(),
+        "attributes": attribute_rows(),
+        "actions": action_rows(),
+        "relations": relation_rows(),
+        "object_cooccurrence": object_cooccurrence_rows(),
+        "attribute_object_pairs": attribute_object_rows(),
+        "patient_action_pairs": role_rows(
+            "patient",
+            "patient_object",
+            "patient_object_raw_surfaces",
+            "patient_parent_concepts",
+        ),
+        "agent_action_pairs": role_rows(
+            "agent",
+            "agent_object",
+            "agent_object_raw_surfaces",
+            "agent_parent_concepts",
+        ),
+        "patient_action_agent_triples": iter(()),
+        "relation_components": relation_component_rows(),
+    }
+
+
+def _load_stage6_entity_lookups(stage6_dir: Path) -> dict[str, dict[str, dict[str, str]]]:
+    lookups: dict[str, dict[str, dict[str, str]]] = {
+        "objects": {},
+        "attributes": {},
+        "actions": {},
+    }
+    for row in _iter_tsv(stage6_dir / "object_counts.tsv"):
+        key = row.get("object", "")
+        if key:
+            lookups["objects"][key] = {
+                "raw_surfaces": row.get("raw_variants", ""),
+                "parent_concepts": row.get("parent_concepts", ""),
+            }
+    for row in _iter_tsv(stage6_dir / "attribute_counts.tsv"):
+        key = row.get("attribute", "")
+        if key:
+            lookups["attributes"][key] = {"raw_surfaces": row.get("raw_variants", "")}
+    for row in _iter_tsv(stage6_dir / "action_counts.tsv"):
+        key = row.get("action", "")
+        if key:
+            lookups["actions"][key] = {"raw_surfaces": row.get("raw_variants", "")}
+    return lookups
+
+
+def _stage6_role_row(
+    row: Mapping[str, str],
+    *,
+    role: str,
+    object_column: str,
+    raw_column: str,
+    parent_column: str,
+    lookups: Mapping[str, Mapping[str, Mapping[str, str]]],
+) -> dict[str, Any] | None:
+    if row.get("role") != role:
+        return None
+    target = row.get("target", "")
+    action = row.get("action", "")
+    return {
+        object_column: target,
+        raw_column: _lookup_raw_surface(lookups["objects"], target),
+        parent_column: row.get("target_parent_concepts", ""),
+        "action": action,
+        "action_raw_surfaces": _lookup_raw_surface(lookups["actions"], action),
+        "count": row.get("count", 0),
+        "caption_count": row.get("caption_count", 0),
+        "example_caption_ids": row.get("example_caption_ids", ""),
+        "_caption_ids": row.get("example_caption_ids", ""),
+    }
+
+
+def _lookup_raw_surface(
+    lookup: Mapping[str, Mapping[str, str]],
+    key: str | None,
+) -> str:
+    if not key:
+        return ""
+    return lookup.get(str(key), {}).get("raw_surfaces", "")
+
+
+def _stage6_tsv_rows(
+    path: Path,
+    mapper: Any,
+) -> Iterable[dict[str, Any]]:
+    for row in _iter_tsv(path):
+        mapped = mapper(row)
+        if mapped is not None:
+            yield mapped
+
+
+def _iter_tsv(path: Path) -> Iterable[dict[str, str]]:
+    if not path.exists():
+        return
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        for row in reader:
+            yield {str(key): str(value or "") for key, value in row.items()}
 
 
 def _aggregate_mentions(
@@ -602,9 +866,9 @@ def _aggregate_object_cooccurrence(
 
 def build_sqlite_db(
     db_path: Path,
-    rows_by_view: Mapping[str, list[dict[str, Any]]],
+    rows_by_view: Mapping[str, Iterable[dict[str, Any]]],
     *,
-    captions: list[dict[str, Any]],
+    captions: Iterable[dict[str, Any]],
     title: str,
 ) -> None:
     conn = sqlite3.connect(db_path)
@@ -614,38 +878,61 @@ def build_sqlite_db(
         conn.execute(
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
         )
+        conn.execute(
+            "CREATE TABLE captions (caption_id TEXT PRIMARY KEY, caption_index INTEGER, caption_type TEXT, caption_shape TEXT, caption TEXT)",
+        )
+        _insert_captions(conn, captions)
+        row_counts: dict[str, int] = {}
+        for view in VIEW_DEFINITIONS:
+            row_counts[view] = _create_view_table(conn, view, rows_by_view.get(view, ()))
         metadata = {
             "title": title,
-            "views": json.dumps(_view_metadata(rows_by_view), ensure_ascii=False),
+            "views": json.dumps(_view_metadata_from_counts(row_counts), ensure_ascii=False),
         }
         conn.executemany(
             "INSERT INTO metadata (key, value) VALUES (?, ?)",
             sorted(metadata.items()),
         )
-        conn.execute(
-            "CREATE TABLE captions (caption_id TEXT PRIMARY KEY, caption_index INTEGER, caption_type TEXT, caption_shape TEXT, caption TEXT)",
-        )
-        conn.executemany(
-            "INSERT INTO captions (caption_id, caption_index, caption_type, caption_shape, caption) VALUES (?, ?, ?, ?, ?)",
-            [
-                (
-                    str(row.get("caption_id") or row.get("key") or ""),
-                    index,
-                    str(row.get("caption_type") or ""),
-                    str(row.get("caption_shape") or ""),
-                    str(row.get("caption") or ""),
-                )
-                for index, row in enumerate(captions)
-            ],
-        )
-        for view, rows in rows_by_view.items():
-            _create_view_table(conn, view, rows)
         conn.commit()
     finally:
         conn.close()
 
 
-def _view_metadata(rows_by_view: Mapping[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+def _insert_captions(
+    conn: sqlite3.Connection,
+    captions: Iterable[dict[str, Any]],
+) -> int:
+    count = 0
+    buffer: list[tuple[str, int, str, str, str]] = []
+    for index, row in enumerate(captions):
+        caption_id = str(row.get("caption_id") or row.get("key") or "")
+        if not caption_id:
+            continue
+        buffer.append(
+            (
+                caption_id,
+                index,
+                str(row.get("caption_type") or ""),
+                str(row.get("caption_shape") or ""),
+                str(row.get("caption") or ""),
+            ),
+        )
+        count += 1
+        if len(buffer) >= 5000:
+            conn.executemany(
+                "INSERT OR REPLACE INTO captions (caption_id, caption_index, caption_type, caption_shape, caption) VALUES (?, ?, ?, ?, ?)",
+                buffer,
+            )
+            buffer.clear()
+    if buffer:
+        conn.executemany(
+            "INSERT OR REPLACE INTO captions (caption_id, caption_index, caption_type, caption_shape, caption) VALUES (?, ?, ?, ?, ?)",
+            buffer,
+        )
+    return count
+
+
+def _view_metadata_from_counts(row_counts: Mapping[str, int]) -> list[dict[str, Any]]:
     views = []
     for name, definition in VIEW_DEFINITIONS.items():
         columns = list(definition["columns"])
@@ -656,7 +943,7 @@ def _view_metadata(rows_by_view: Mapping[str, list[dict[str, Any]]]) -> list[dic
                 "default_sort": definition["default_sort"],
                 "default_dir": definition["default_dir"],
                 "columns": columns,
-                "row_count": len(rows_by_view.get(name, [])),
+                "row_count": int(row_counts.get(name, 0)),
             }
         )
     return views
@@ -665,29 +952,33 @@ def _view_metadata(rows_by_view: Mapping[str, list[dict[str, Any]]]) -> list[dic
 def _create_view_table(
     conn: sqlite3.Connection,
     view: str,
-    rows: list[dict[str, Any]],
-) -> None:
+    rows: Iterable[dict[str, Any]],
+) -> int:
     columns = list(VIEW_DEFINITIONS[view]["columns"])
     sql_columns = ["_row_id INTEGER PRIMARY KEY", "_caption_ids TEXT"]
     for column in columns:
         column_type = "INTEGER" if column in {"count", "caption_count"} else "TEXT"
         sql_columns.append(f"{_q(column)} {column_type}")
     conn.execute(f"CREATE TABLE {_q(view)} ({', '.join(sql_columns)})")
-    if not rows:
-        return
     insert_columns = ["_row_id", "_caption_ids", *columns]
     placeholders = ", ".join("?" for _ in insert_columns)
-    conn.executemany(
-        f"INSERT INTO {_q(view)} ({', '.join(_q(column) for column in insert_columns)}) VALUES ({placeholders})",
-        [
+    sql = f"INSERT INTO {_q(view)} ({', '.join(_q(column) for column in insert_columns)}) VALUES ({placeholders})"
+    row_count = 0
+    buffer: list[list[Any]] = []
+    for row_index, row in enumerate(rows, start=1):
+        buffer.append(
             [
                 row_index,
                 str(row.get("_caption_ids") or ""),
                 *[_coerce_sql_value(row.get(column, ""), column) for column in columns],
-            ]
-            for row_index, row in enumerate(rows, start=1)
-        ],
-    )
+            ],
+        )
+        row_count = row_index
+        if len(buffer) >= 5000:
+            conn.executemany(sql, buffer)
+            buffer.clear()
+    if buffer:
+        conn.executemany(sql, buffer)
     for column in columns:
         if column in {"count", "caption_count"} or column.startswith("canonical_") or column in {
             "object",
@@ -701,6 +992,16 @@ def _create_view_table(
             "component",
         }:
             conn.execute(f"CREATE INDEX idx_{view}_{column} ON {_q(view)} ({_q(column)})")
+    return row_count
+
+
+def _read_view_counts(db_path: Path) -> dict[str, int]:
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT value FROM metadata WHERE key = 'views'").fetchone()
+    if rows is None:
+        return {}
+    views = json.loads(str(rows[0]))
+    return {str(view["name"]): int(view.get("row_count", 0)) for view in views}
 
 
 def write_static_report_files(output_dir: Path, *, title: str) -> None:
@@ -729,7 +1030,7 @@ if exist "%PY%" (
 
 
 def _iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
-    with path.open("r", encoding="utf-8") as handle:
+    with path.open("r", encoding="utf-8-sig") as handle:
         for line in handle:
             line = line.strip()
             if line:
