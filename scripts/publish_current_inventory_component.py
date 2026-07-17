@@ -110,6 +110,7 @@ def publish_current_inventory_component(
         action_canonical_inventory=action_canonical_inventory,
         lexicon_dir=bundle.lexicon_dir,
         source_workflow_state=bundle.path,
+        bundle_dir=target_dir,
     )
     previous_state = _read_json_object(central_bundle)
     state.update(_preserved_bundle_metadata(previous_state))

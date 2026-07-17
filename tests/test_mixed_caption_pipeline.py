@@ -183,6 +183,45 @@ class MixedCaptionPipelineTest(unittest.TestCase):
 
         self.assertEqual(inputs, (object_inventory, attribute_inventory, action_inventory, lexicon_dir))
 
+    def test_inventory_bundle_resolves_bundle_relative_paths(self) -> None:
+        bundle_dir = self.tmp_path / "portable"
+        bundle_dir.mkdir()
+        bundle = bundle_dir / "inventory_bundle.json"
+        bundle.write_text(
+            json.dumps(
+                {
+                    "artifact_type": "gpic_inventory_bundle",
+                    "status": "complete",
+                    "path_base": "bundle_dir",
+                    "object_inventory": "inventory/object.tsv",
+                    "attribute_inventory": "inventory/attribute.tsv",
+                    "action_inventory": "inventory/action.tsv",
+                    "lexicon_dir": "lexicons",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        inputs = self.module.inventory_inputs_from_args(
+            SimpleNamespace(
+                inventory_bundle=str(bundle),
+                object_inventory=None,
+                attribute_inventory=None,
+                action_inventory=None,
+                lexicon_dir=None,
+            )
+        )
+
+        self.assertEqual(
+            inputs,
+            (
+                bundle_dir / "inventory" / "object.tsv",
+                bundle_dir / "inventory" / "attribute.tsv",
+                bundle_dir / "inventory" / "action.tsv",
+                bundle_dir / "lexicons",
+            ),
+        )
+
     def test_inventory_bundle_rejects_mismatched_explicit_path(self) -> None:
         bundle = self.tmp_path / "inventory_bundle.json"
         object_inventory = self.tmp_path / "object.tsv"

@@ -550,7 +550,8 @@ class Stage35InventoryWorkflowTest(unittest.TestCase):
         self.assertEqual(state["published_current_bundle"], str(central_bundle))
         self.assertEqual(state["publish_summary"]["status"], "published")
         self.assertEqual(bundle["snapshot_label"], "unit-test")
-        self.assertEqual(bundle["object_inventory"], str(target_dir / "inventory" / "object_inventory.tsv"))
+        self.assertEqual(bundle["path_base"], "bundle_dir")
+        self.assertEqual(bundle["object_inventory"], "inventory/object_inventory.tsv")
 
     def test_prior_inventory_bundle_populates_workflow_config(self) -> None:
         bundle_path = self.tmp / "inventory_bundle.json"

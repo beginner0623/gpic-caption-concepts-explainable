@@ -109,6 +109,7 @@ def publish_inventory_bundle(
         action_canonical_inventory=action_canonical_inventory,
         lexicon_dir=target_lexicon_dir,
         source_workflow_state=bundle.path,
+        bundle_dir=target_dir,
     )
     state.update(
         {

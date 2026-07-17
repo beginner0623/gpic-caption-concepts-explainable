@@ -8,6 +8,6 @@
   "snapshot_label": "front1m_gpic_nano_20260715",
   "source_bundle": "outputs\\front1000000_gpic_nano_20260715\\stage35_after_object_manual\\inventory_bundle.json",
   "status": "published",
-  "target_bundle": "C:\\Users\\rlath\\Documents\\Codex\\gpic-caption-concepts-explainable\\resources\\gpic_inventory\\current\\inventory_bundle.json",
-  "target_dir": "C:\\Users\\rlath\\Documents\\Codex\\gpic-caption-concepts-explainable\\resources\\gpic_inventory\\current"
+  "target_bundle": "resources\\gpic_inventory\\current\\inventory_bundle.json",
+  "target_dir": "resources\\gpic_inventory\\current"
 }

@@ -97,13 +97,11 @@ class PublishInventoryBundleTest(unittest.TestCase):
         self.assertEqual(summary["rows"]["object_inventory"], 1)
         data = json.loads(central_bundle.read_text(encoding="utf-8"))
         self.assertEqual(data["snapshot_label"], "front100")
-        self.assertEqual(data["object_inventory"], str(target / "inventory" / "object_inventory.tsv"))
-        self.assertEqual(
-            data["attribute_inventory"],
-            str(target / "inventory" / "attribute_inventory.tsv"),
-        )
-        self.assertEqual(data["action_inventory"], str(target / "inventory" / "action_inventory.tsv"))
-        self.assertEqual(data["lexicon_dir"], str(target / "lexicons"))
+        self.assertEqual(data["path_base"], "bundle_dir")
+        self.assertEqual(data["object_inventory"], "inventory/object_inventory.tsv")
+        self.assertEqual(data["attribute_inventory"], "inventory/attribute_inventory.tsv")
+        self.assertEqual(data["action_inventory"], "inventory/action_inventory.tsv")
+        self.assertEqual(data["lexicon_dir"], "lexicons")
         self.assertNotIn(str(source), data["object_inventory"])
         self.assertTrue((target / "lexicons" / "attribute_synonyms.tsv").exists())
         action_state = json.loads(

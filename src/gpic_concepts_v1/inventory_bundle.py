@@ -10,6 +10,9 @@ from typing import Any, Mapping
 from gpic_concepts_v1.atomic_io import atomic_text_writer
 
 
+BUNDLE_DIR_PATH_BASE = "bundle_dir"
+
+
 class InventoryBundleError(ValueError):
     """Raised when an inventory bundle is missing required formal inputs."""
 
@@ -45,20 +48,27 @@ def build_inventory_bundle_state(
     lexicon_dir: str | Path,
     action_canonical_inventory: str | Path | None = None,
     source_workflow_state: str | Path | None = None,
+    bundle_dir: str | Path | None = None,
 ) -> dict[str, Any]:
+    bundle_base = Path(bundle_dir) if bundle_dir is not None else None
     state: dict[str, Any] = {
         "schema_version": 1,
         "artifact_type": "gpic_inventory_bundle",
         "stage": "3.5-6",
         "status": "complete",
         "preview_mode": False,
-        "object_inventory": str(object_inventory),
-        "attribute_inventory": str(attribute_inventory),
-        "action_inventory": str(action_inventory),
-        "lexicon_dir": str(lexicon_dir),
+        "object_inventory": _serialized_path(object_inventory, bundle_base),
+        "attribute_inventory": _serialized_path(attribute_inventory, bundle_base),
+        "action_inventory": _serialized_path(action_inventory, bundle_base),
+        "lexicon_dir": _serialized_path(lexicon_dir, bundle_base),
     }
+    if bundle_base is not None:
+        state["path_base"] = BUNDLE_DIR_PATH_BASE
     if action_canonical_inventory is not None:
-        state["action_canonical_inventory"] = str(action_canonical_inventory)
+        state["action_canonical_inventory"] = _serialized_path(
+            action_canonical_inventory,
+            bundle_base,
+        )
     if source_workflow_state is not None:
         state["source_workflow_state"] = str(source_workflow_state)
     return state
@@ -108,7 +118,7 @@ def _bundle_from_stage35_state(path: Path, data: Mapping[str, Any]) -> Inventory
     attribute_inventory = _required_path(path, data, "attribute_canonical_inventory")
     action_inventory = _required_path(path, data, "action_resolved_inventory")
     lexicon_dir = _required_any_path(path, data, ("lexicon_output_dir", "lexicon_dir"))
-    action_canonical = _optional_path(path, data.get("action_canonical_inventory"))
+    action_canonical = _optional_path(path, data, data.get("action_canonical_inventory"))
     return InventoryBundle(
         path=path,
         object_inventory=object_inventory,
@@ -127,7 +137,11 @@ def _bundle_from_bundle_state(path: Path, data: Mapping[str, Any]) -> InventoryB
         object_inventory=_required_path(path, data, "object_inventory"),
         attribute_inventory=_required_path(path, data, "attribute_inventory"),
         action_inventory=_required_path(path, data, "action_inventory"),
-        action_canonical_inventory=_optional_path(path, data.get("action_canonical_inventory")),
+        action_canonical_inventory=_optional_path(
+            path,
+            data,
+            data.get("action_canonical_inventory"),
+        ),
         lexicon_dir=_required_path(path, data, "lexicon_dir"),
     )
 
@@ -136,7 +150,7 @@ def _required_any_path(path: Path, data: Mapping[str, Any], keys: tuple[str, ...
     for key in keys:
         value = data.get(key)
         if isinstance(value, str) and value.strip():
-            return _normalize_path(value)
+            return _normalize_path(path, data, value)
     raise InventoryBundleError(f"missing_inventory_bundle_field: {'/'.join(keys)} path={path}")
 
 
@@ -144,19 +158,34 @@ def _required_path(path: Path, data: Mapping[str, Any], key: str) -> Path:
     value = data.get(key)
     if not isinstance(value, str) or not value.strip():
         raise InventoryBundleError(f"missing_inventory_bundle_field: {key} path={path}")
-    return _normalize_path(value)
+    return _normalize_path(path, data, value)
 
 
-def _optional_path(path: Path, value: Any) -> Path | None:
+def _optional_path(path: Path, data: Mapping[str, Any], value: Any) -> Path | None:
     if value is None or value == "":
         return None
     if not isinstance(value, str):
         raise InventoryBundleError(f"invalid_inventory_bundle_path_value: {path}")
-    return _normalize_path(value)
+    return _normalize_path(path, data, value)
 
 
-def _normalize_path(value: str) -> Path:
-    return Path(value)
+def _normalize_path(bundle_path: Path, data: Mapping[str, Any], value: str) -> Path:
+    candidate = Path(value)
+    if candidate.is_absolute() or data.get("path_base") != BUNDLE_DIR_PATH_BASE:
+        return candidate
+    return bundle_path.parent / candidate
+
+
+def _serialized_path(value: str | Path, bundle_dir: Path | None) -> str:
+    path = Path(value)
+    if bundle_dir is None:
+        return str(path)
+    path_absolute = path.absolute()
+    bundle_absolute = bundle_dir.absolute()
+    try:
+        return path_absolute.relative_to(bundle_absolute).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _same_path(left: Path, right: Path) -> bool:

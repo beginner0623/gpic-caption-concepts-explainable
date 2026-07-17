@@ -256,3 +256,33 @@ package upload to Blackwell with SCP progress reaching `100%` and exit status
 A later attempted inline remote deploy command failed locally when PowerShell
 parsed remote shell syntax (`&&`). This confirmed the need for the uploaded
 remote-script guard above.
+
+## 2026-07-17: Successful CLI Help Was Recorded As An Incident
+
+### What Failed
+
+The first verification of the newly supported no-timeout MLXP foreground path
+ran `scripts/run_mlxp_bash.py --help`. `argparse` correctly exited with
+`SystemExit(0)`, but `PipelineRun.__exit__` treated every exception-shaped exit
+as an unhandled failure and opened an incident. The open incident then correctly
+blocked the following MLXP runtime probe.
+
+### Why It Happened
+
+Python CLI parsers implement a successful `--help` response with
+`SystemExit(0)`. The incident gate distinguished normal function returns from
+nonzero return codes, but did not distinguish successful and failed
+`SystemExit` codes.
+
+### Durable Guard
+
+- `PipelineRun.__exit__` now removes the running marker without opening an
+  incident for `SystemExit(None)` and `SystemExit(0)`.
+- Nonzero `SystemExit` still creates a `nonzero_exit` incident.
+- Regression tests cover both successful and nonzero `SystemExit` behavior.
+
+### Verification
+
+`scripts/run_tests.ps1 --timeout-seconds 120 discover -s tests -p
+test_incident_gate.py` completed 11 tests with `OK`, including the two new
+`SystemExit` cases.

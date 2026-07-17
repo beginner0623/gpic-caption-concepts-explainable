@@ -1,0 +1,8 @@
+# MLXP adds the NLP runtime to the pod's existing CUDA-enabled PyTorch base.
+# Torch is intentionally omitted and verified by scripts/setup_mlxp_runtime.sh.
+spacy==3.8.14
+cupy-cuda12x==14.1.1
+wn==1.1.0
+nltk==3.9.4
+pytest==9.1.1
+en-core-web-trf @ https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl

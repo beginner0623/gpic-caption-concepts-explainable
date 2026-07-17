@@ -307,8 +307,12 @@ class PipelineRun:
     def __exit__(self, exc_type, exc, tb) -> bool:
         if not self.owner:
             return False
-        if exc is None:
+        successful_system_exit = isinstance(exc, SystemExit) and exc.code in (None, 0)
+        if exc is None or successful_system_exit:
             remove_running_if_token_matches(self.state_dir, self.run_token)
+        elif isinstance(exc, SystemExit):
+            returncode = exc.code if isinstance(exc.code, int) else 1
+            self.record_nonzero_exit(returncode)
         else:
             details = {
                 "exception_type": exc_type.__name__ if exc_type else "",

@@ -87,6 +87,37 @@ class IncidentGateTest(unittest.TestCase):
         self.assertEqual(incident["failure_type"], "nonzero_exit")
         self.assertEqual(incident["details"]["returncode"], 17)
 
+    def test_zero_system_exit_is_not_an_incident(self) -> None:
+        def exit_successfully() -> None:
+            raise SystemExit(0)
+
+        with self.assertRaises(SystemExit) as raised:
+            gate.guarded_entrypoint(
+                "help-test",
+                exit_successfully,
+                state_dir=self.state_dir,
+            )
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertFalse(gate.running_path(self.state_dir).exists())
+        self.assertFalse(gate.incident_path(self.state_dir).exists())
+
+    def test_nonzero_system_exit_creates_incident(self) -> None:
+        def exit_with_error() -> None:
+            raise SystemExit(2)
+
+        with self.assertRaises(SystemExit) as raised:
+            gate.guarded_entrypoint(
+                "usage-error-test",
+                exit_with_error,
+                state_dir=self.state_dir,
+            )
+
+        self.assertEqual(raised.exception.code, 2)
+        incident = gate.read_json(gate.incident_path(self.state_dir))
+        self.assertEqual(incident["failure_type"], "nonzero_exit")
+        self.assertEqual(incident["details"]["returncode"], 2)
+
     def test_stale_running_marker_is_promoted_to_incident(self) -> None:
         gate.write_json_atomic(
             gate.running_path(self.state_dir),

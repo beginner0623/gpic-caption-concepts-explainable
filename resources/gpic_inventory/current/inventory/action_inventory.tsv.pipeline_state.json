@@ -10,7 +10,7 @@
   "manual_resolution_applied": true,
   "needs_manual_output": "",
   "needs_manual_rows": 0,
-  "output": "C:\\Users\\rlath\\Documents\\Codex\\gpic-caption-concepts-explainable\\resources\\gpic_inventory\\current\\inventory\\action_inventory.tsv",
+  "output": "resources\\gpic_inventory\\current\\inventory\\action_inventory.tsv",
   "preposition_mwe_detection_before_action": true,
   "preview_mode": false,
   "schema_version": 1,

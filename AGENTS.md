@@ -64,9 +64,12 @@ Preferred remote execution patterns:
   `kubectl -n <ns> exec <pod> -- git -C /root/work/repo status --short`
 - from this Windows/Codex desktop workspace, use
   `scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds <N> -- scripts\run_mlxp_bash.py <script.sh>`
-  for any multi-step MLXP command. The local `<script.sh>` must be written with
-  ASCII or UTF-8 without BOM. Do not pipe ad hoc PowerShell here-strings
-  directly into `wsl ... kubectl exec ... bash`.
+  for bounded multi-step MLXP diagnostics. For formal Stage 4/5/6 or another
+  healthy progress-producing job that must not have a wall-clock kill, use
+  `scripts\run_python.ps1 scripts\run_mlxp_bash.py <script.sh>` in the
+  foreground. The local `<script.sh>` must be written with ASCII or UTF-8
+  without BOM. Do not pipe ad hoc PowerShell here-strings directly into
+  `wsl ... kubectl exec ... bash`.
 - for multi-step remote work, create a checked script file with LF line endings
   and no BOM, copy it to the pod, then execute that script explicitly
 - if stdin script execution is used, first verify no BOM/CRLF issue with a

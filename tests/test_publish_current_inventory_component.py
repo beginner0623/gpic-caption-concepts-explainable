@@ -88,9 +88,10 @@ class PublishCurrentInventoryComponentTest(unittest.TestCase):
         bundle = json.loads((current / "inventory_bundle.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["status"], "published_component")
         self.assertEqual(summary["component"], "object")
-        self.assertEqual(bundle["object_inventory"], str(old_object))
-        self.assertEqual(bundle["attribute_inventory"], str(old_attribute))
-        self.assertEqual(bundle["action_inventory"], str(old_action))
+        self.assertEqual(bundle["path_base"], "bundle_dir")
+        self.assertEqual(bundle["object_inventory"], "inventory/object_inventory.tsv")
+        self.assertEqual(bundle["attribute_inventory"], "inventory/attribute_inventory.tsv")
+        self.assertEqual(bundle["action_inventory"], "inventory/action_inventory.tsv")
         self.assertEqual(bundle["component_sources"]["object"]["snapshot_label"], "front1m_object")
         self.assertEqual(_read_tsv(old_object)[0]["span_key"], "car")
 
