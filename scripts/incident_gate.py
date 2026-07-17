@@ -434,13 +434,17 @@ def clear_incident(
             command,
             text=True,
             capture_output=True,
+            encoding="utf-8",
+            errors="replace",
             env=verification_env,
         )
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
         verification_result = {
             "command": redact_argv(command),
             "returncode": completed.returncode,
-            "stdout_tail": completed.stdout[-4000:],
-            "stderr_tail": completed.stderr[-4000:],
+            "stdout_tail": stdout[-4000:],
+            "stderr_tail": stderr[-4000:],
         }
         if completed.returncode != 0:
             raise IncidentGateError(

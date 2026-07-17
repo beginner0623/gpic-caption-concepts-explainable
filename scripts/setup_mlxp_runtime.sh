@@ -31,6 +31,19 @@ fi
 "$env_dir/bin/python" -m pip install --requirement "$requirements"
 "$env_dir/bin/python" -m pip check
 
+cuda_libs=$(
+    "$env_dir/bin/python" - <<'PY'
+from pathlib import Path
+import nvidia
+
+root = Path(nvidia.__file__).resolve().parent
+print(":".join(str(path) for path in sorted(root.glob("*/lib")) if path.is_dir()))
+PY
+)
+if [[ -n "$cuda_libs" ]]; then
+    export LD_LIBRARY_PATH="$cuda_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
 env_torch=$(
     "$env_dir/bin/python" -c "import torch; print(torch.__version__)"
 )

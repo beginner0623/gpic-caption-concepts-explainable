@@ -213,6 +213,31 @@ class IncidentGateTest(unittest.TestCase):
         )
         self.assertFalse(gate.incident_path(self.state_dir).exists())
 
+    def test_clear_verification_decodes_utf8_output(self) -> None:
+        gate.create_incident(
+            failure_type="test_failure",
+            summary="utf8 verification incident",
+            state_dir=self.state_dir,
+        )
+
+        resolved = gate.clear_incident(
+            root_cause="root cause",
+            guard_added="decode verification output as utf-8",
+            verification_evidence="verification command emitted utf-8",
+            verification_command=[
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write('verified \u2713\\n'.encode('utf-8'))",
+            ],
+            state_dir=self.state_dir,
+        )
+
+        self.assertEqual(resolved["status"], "resolved")
+        self.assertIn(
+            "verified \u2713",
+            resolved["verification_command_result"]["stdout_tail"],
+        )
+
     def test_explicit_timeout_failure_is_recorded_before_hard_exit(self) -> None:
         with gate.PipelineRun("timeout-test", state_dir=self.state_dir):
             gate.record_current_failure(
