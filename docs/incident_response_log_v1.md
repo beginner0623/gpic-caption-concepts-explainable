@@ -177,6 +177,9 @@ continuing the main transfer.
   hardcode credentials.
 - `AGENTS.md` now requires this helper for password-based SSH/SCP automation
   from the Windows/Codex desktop workspace.
+- Multi-step Blackwell commands must be written as a local `.sh` file, uploaded
+  with SCP through the helper, and executed with SSH through the helper. Do not
+  place long remote `bash -lc` scripts inside PowerShell strings.
 - Before a large transfer, run a bounded remote `echo ok` probe through the
   same helper. Do not infer that a password is wrong until the
   controlling-terminal path or a direct interactive terminal has been tested.
@@ -194,3 +197,7 @@ ok
 The same controlling-terminal path then completed the 1M full-caption report
 package upload to Blackwell with SCP progress reaching `100%` and exit status
 `0`.
+
+A later attempted inline remote deploy command failed locally when PowerShell
+parsed remote shell syntax (`&&`). This confirmed the need for the uploaded
+remote-script guard above.

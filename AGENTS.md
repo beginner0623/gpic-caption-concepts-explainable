@@ -98,6 +98,13 @@ Use `scripts/run_password_ssh_pty.py` under Linux/WSL for password-prompting
 `ssh` and `scp` commands. The password must come from an environment variable;
 do not hardcode it in the script or repository.
 
+For multi-step Blackwell or other password-SSH remote work, do not embed a long
+`bash -lc` script inside a PowerShell string. Write a local `.sh` script, upload
+that script with `scp` through `scripts/run_password_ssh_pty.py`, and execute
+the uploaded script with `ssh` through the same helper. This avoids local
+PowerShell parsing remote shell operators such as `&&`, `|`, heredocs, or
+variable substitutions.
+
 Before any large upload or remote mutation, first run a bounded remote probe
 through the same helper, for example an `echo ok` command. Do not infer that an
 SSH password is wrong until this controlling-terminal path or a direct
