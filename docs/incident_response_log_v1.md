@@ -84,3 +84,36 @@ wrong layer.
 
 The runner successfully executed the MLXP preparation check after the ad hoc
 inline command path failed.
+
+## 2026-07-17: Full Caption Index Build Slowdown Was Misdiagnosed
+
+### What Failed
+
+During the 1M full-caption report index build, progress slowed sharply after
+roughly 140M Stage 6 fact rows. The first explanation given was that SQLite
+primary-key duplicate checks became expensive after crossing 100M indexed rows.
+
+### Why It Happened
+
+That explanation was too narrow and was stated before checking process wait
+state and I/O counters. The slowdown was not proven to be only SQLite B-tree
+growth.
+
+### Durable Guard
+
+Before diagnosing a long-running MLXP/SQLite slowdown, collect process evidence:
+
+- `ps -o pid,ppid,stat,etime,pcpu,pmem,rss,vsz,cmd -p <pid>`
+- `/proc/<pid>/wchan`
+- `/proc/<pid>/io` before and after a short interval
+- DB file size and mount/disk status
+
+Do not label the bottleneck as CPU, SQLite, B-tree, network filesystem, or lock
+contention until those checks have been read.
+
+### Verification
+
+For the active 1M caption-index build, `/proc/<pid>/wchan` reported
+`cl_sync_io_wait`, and `/proc/<pid>/io` showed continued write progress over a
+10-second interval. The safer diagnosis is that Lustre/DDN synchronous I/O wait
+is a major contributor, while SQLite index growth may still be secondary.
