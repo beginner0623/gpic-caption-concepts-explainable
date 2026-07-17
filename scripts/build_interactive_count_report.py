@@ -905,6 +905,9 @@ def _insert_captions(
     count = 0
     buffer: list[tuple[str, int, str, str, str]] = []
     for index, row in enumerate(captions):
+        meta = row.get("meta")
+        if not isinstance(meta, Mapping):
+            meta = {}
         caption_id = str(row.get("caption_id") or row.get("key") or "")
         if not caption_id:
             continue
@@ -912,8 +915,8 @@ def _insert_captions(
             (
                 caption_id,
                 index,
-                str(row.get("caption_type") or ""),
-                str(row.get("caption_shape") or ""),
+                str(row.get("caption_type") or meta.get("caption_type") or ""),
+                str(row.get("caption_shape") or meta.get("caption_shape") or ""),
                 str(row.get("caption") or ""),
             ),
         )
