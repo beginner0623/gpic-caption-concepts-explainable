@@ -83,6 +83,15 @@ command evidence from inside the pod:
 - `whoami`
 - expected repo branch and commit, using `git -C <remote_repo>`
 
+Do not assume an MLXP pod can fetch from GitHub. Before attempting a remote
+`git fetch`, `git pull`, or `git merge` that depends on GitHub access, first
+run a bounded auth-free probe with `GIT_TERMINAL_PROMPT=0`. If the probe would
+prompt for credentials or fails because remote auth is unavailable, do not use
+remote Git sync as part of the benchmark path. Either continue with the already
+verified remote commit when the local runner supplies the needed wrapper
+behavior, or use an explicit file/bundle transfer path. Do not let a benchmark
+run depend on an interactive Git credential prompt inside the pod.
+
 If any command unexpectedly reports a Windows path, the conversation default
 workspace, or a local WSL path while the intended target was MLXP, stop
 immediately. Do not continue the main pipeline until the wrong local artifact

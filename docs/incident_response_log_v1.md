@@ -385,3 +385,52 @@ cupy=13.6.0
 spacy_require_gpu=True
 spacy_model_loaded=1
 ```
+
+## 2026-07-18: MLXP Remote Git Sync Assumed GitHub Credentials
+
+### What Failed
+
+After the recreated MLXP pod probe passed, I attempted to fast-forward the
+remote pod repository with `git fetch origin mlxp-stage456-handoff`. The pod
+could not read a GitHub username non-interactively:
+
+```text
+fatal: could not read Username for 'https://github.com': No such device or address
+```
+
+The incident gate correctly opened an incident and blocked the next official
+runner invocation.
+
+### Why It Happened
+
+The remote repository update was not required for the next benchmark step: the
+new runtime library guard is prepended by the local `run_mlxp_bash.py` before
+the remote script runs. I treated remote Git sync as mandatory and tried it
+without first proving that the pod had non-interactive GitHub credentials.
+
+### Durable Guard
+
+- `AGENTS.md` now requires a bounded `GIT_TERMINAL_PROMPT=0` GitHub access
+  probe before using remote `git fetch`/`pull`/`merge` as part of an MLXP
+  workflow.
+- If the pod cannot access GitHub non-interactively, benchmark execution must
+  not depend on remote Git sync. Use the already verified remote commit when
+  sufficient, or use an explicit file/bundle transfer path.
+
+### Verification
+
+The open incident itself is the verification that the guard caught the failed
+official run:
+
+```text
+summary=Official run exited nonzero: bounded_script_runner
+returncode=128
+```
+
+The preceding MLXP runtime probe verified that the local runner prologue is
+sufficient for the immediate benchmark path even before remote repo sync:
+
+```text
+spacy_require_gpu=True
+spacy_model_loaded=1
+```
