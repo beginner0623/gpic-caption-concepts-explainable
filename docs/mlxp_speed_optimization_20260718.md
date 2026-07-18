@@ -215,3 +215,98 @@ Verification:
    path has commit `42251ff` or newer.
 3. Keep report caption-index timing separate from Stage 1-6 timing, because it
    is a post-processing step for the interactive HTML report.
+
+## Experiment 4: 1M Stage 6 Output On NVMe, Memory Backend
+
+Run:
+
+- `/mnt/nvme/gpic_speed_tests/stage6_1m_nvme_memory_20260718T132159Z`
+
+Conditions:
+
+- Stage range: Stage 6 only
+- Input: existing 1M Stage 5 canonical files:
+  - `/mnt/ddn/prod-runs/snu14ksh/gpic_stage456/full_1m_20260716/stage5/canonical_mentions.jsonl`
+  - `/mnt/ddn/prod-runs/snu14ksh/gpic_stage456/full_1m_20260716/stage5/canonical_edges.jsonl`
+- Input filesystem: DDN/Lustre
+- Output filesystem: NVMe/XFS
+- Count backend: `memory`
+- Cgroup memory limit: `240 GiB`
+- Effective Stage 6 RSS safety limit: `180 GiB`
+- Repo commit on MLXP: `325ab93`
+
+Result:
+
+- Stage 6 progress elapsed: `7,128.213s` (`1h 58m 48s`)
+- Fact total: `178,529,467`
+- Count integrity: OK, no deltas
+- Final progress RSS: `11.991 GiB`
+- Highest observed poll RSS from `ps`: about `17.4 GiB` during final table
+  writing; this stayed far below the `180 GiB` safety limit.
+- `facts.jsonl` size: `94,005,624,899` bytes
+
+Final fact type counts:
+
+- `object_pair_in_caption`: `132,986,020`
+- `entity_exists`: `10,352,739`
+- `object_parent`: `10,270,122`
+- `attribute_exists`: `5,739,552`
+- `has_attribute`: `5,737,095`
+- `event_role`: `4,245,559`
+- `action_event`: `3,878,681`
+- `relation_component`: `2,569,111`
+- `relation`: `2,138,690`
+- `has_quantity`: `283,146`
+- `quantity_exists`: `283,146`
+- `ambiguous_relation_candidate`: `45,606`
+
+Final table row counts:
+
+- `object_counts.tsv`: `112,119`
+- `attribute_counts.tsv`: `36,784`
+- `action_counts.tsv`: `5,444`
+- `relation_triple_counts.tsv`: `381,395`
+- `relation_component_counts.tsv`: `2,436`
+- `object_cooccurrence_pair_counts.tsv`: `7,978,858`
+- `object_attribute_pair_counts.tsv`: `319,282`
+- `agent_patient_pair_counts.tsv`: `231,699`
+
+Interpretation:
+
+- The 1M memory-backend Stage 6 run completed successfully within the MLXP pod
+  cgroup limit and did not show the earlier SQLite/large-index slowdown around
+  the `139M` fact region.
+- The memory backend is viable for 1M Stage 6 on this pod for the current count
+  table cardinalities.
+- The current Stage 6 bottleneck is still single-core Python streaming and fact
+  generation/write, not memory pressure.
+
+Incidents and guards during this run:
+
+- The first relaunch failed before processing because `--progress` was
+  registered twice. Fixed by making `add_memory_safety_args()` the single owner
+  of the CLI option and by testing parser construction.
+- The second relaunch failed before processing because `progress_path` was
+  passed twice. Fixed by making `memory_safety_kwargs(args)` the single owner of
+  `progress_path` conversion and by rejecting direct `progress_path=` in the
+  formal Stage 4/5/6 wrappers.
+- Both local and MLXP incidents were cleared only after targeted memory-safety
+  tests passed.
+
+Verification:
+
+- Local `.\scripts\run_tests.ps1 discover -s tests -p "test_formal_stage_memory_safety.py"`:
+  OK, 7 tests
+- MLXP `PYTHONPATH=src /root/work/gpic-linux-env/bin/python -m unittest discover -s tests -p test_formal_stage_memory_safety.py`:
+  OK, 7 tests
+- MLXP Stage 6 summary `count_integrity.status`: `ok`
+
+Next candidate tests:
+
+1. Run a formal Stage 1-6 baseline using the existing 1M lexicon with
+   `--stage6-count-backend memory`; keep caption-index/report generation outside
+   the baseline timing.
+2. If Stage 1-5 dominates, profile spaCy/lookup/canonical stages separately
+   before changing Stage 6 further.
+3. If Stage 6 remains worth optimizing, test parallel fact generation by caption
+   shard with deterministic merge of count tables.
