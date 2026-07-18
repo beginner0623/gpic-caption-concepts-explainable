@@ -286,3 +286,52 @@ nonzero return codes, but did not distinguish successful and failed
 `scripts/run_tests.ps1 --timeout-seconds 120 discover -s tests -p
 test_incident_gate.py` completed 11 tests with `OK`, including the two new
 `SystemExit` cases.
+
+## 2026-07-18: MLXP Verification Bypassed The Remote Runner
+
+### What Failed
+
+After the 50K fixed-lexicon baseline completed, a final DDN verification was
+attempted with direct local `kubectl cp` and `kubectl exec` commands from the
+Windows/Codex desktop shell. The command failed before reaching MLXP:
+
+- the local shell had no active Kubernetes context, so `kubectl` tried
+  `localhost:8080`
+- the Windows temp path contained a drive-letter colon, so `kubectl cp` parsed
+  the local path as a remote path
+
+This was not a pipeline failure. It was a violation of the already documented
+MLXP remote command guard.
+
+### Why It Happened
+
+The repository already had `scripts/run_mlxp_bash.py` and `AGENTS.md` required
+that runner for multi-step MLXP commands. I skipped that runner during a
+post-run verification and recreated the exact class of nested local/remote
+execution mistake the guard was meant to avoid.
+
+### Durable Guard
+
+- Treat direct `kubectl cp`/inline `kubectl exec` from the Windows/Codex
+  desktop shell as a process violation for this repository unless it is a
+  deliberately bounded one-argv diagnostic.
+- Use `scripts/run_mlxp_bash.py <script.sh>` for multi-step MLXP checks. It
+  streams a local LF/no-BOM shell script to remote `bash -s` and avoids both
+  PowerShell quoting and Windows path parsing.
+- If the active MLXP pod has expired, do not fall back to direct `kubectl`.
+  First update the pod argument or run the check from the user's interactive
+  MLXP shell.
+
+### Verification
+
+The repository state after the interruption was checked locally:
+
+```text
+## mlxp-stage456-handoff...origin/mlxp-stage456-handoff
+8184630 Record MLXP fixed-lexicon baseline
+5ba4268 Stabilize MLXP GPU runtime guard
+```
+
+The baseline measurements remain recorded in
+`docs/mlxp_fixed_lexicon_baseline_20260717.md`; the failed command was only a
+redundant remote-storage verification attempt.
