@@ -24,6 +24,16 @@ class RunMlxpBashTests(unittest.TestCase):
 
         self.assertEqual(module._strip_utf_bom(b"\xef\xbb\xbfset -eu\n"), b"set -eu\n")
 
+    def test_normalize_bash_newlines(self) -> None:
+        module = _load_module()
+
+        payload = b"echo one\r\necho two\rsort\r\n"
+
+        self.assertEqual(
+            module._normalize_bash_newlines(payload),
+            b"echo one\necho two\nsort\n",
+        )
+
     def test_runtime_env_guard_is_prepended(self) -> None:
         module = _load_module()
 

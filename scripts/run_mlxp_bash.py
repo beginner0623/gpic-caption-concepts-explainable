@@ -45,6 +45,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise SystemExit(f"missing script: {args.script}")
     payload = args.script.read_bytes()
     payload = _strip_utf_bom(payload)
+    payload = _normalize_bash_newlines(payload)
     if not args.no_runtime_env:
         payload = _prepend_mlxp_runtime_env(payload)
     command = [
@@ -69,6 +70,10 @@ def _strip_utf_bom(payload: bytes) -> bytes:
         if payload.startswith(bom):
             return payload[len(bom) :]
     return payload
+
+
+def _normalize_bash_newlines(payload: bytes) -> bytes:
+    return payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
 
 def _prepend_mlxp_runtime_env(payload: bytes) -> bytes:

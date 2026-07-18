@@ -564,3 +564,36 @@ argument.
 
 The targeted memory-safety test must pass locally and on MLXP before the 1M
 Stage 6 memory worker is relaunched again.
+
+## 2026-07-19: MLXP Bash Payload Preserved Windows CRLF
+
+### What Failed
+
+A quick MLXP probe for old 1M Stage 6 timing found the previous summary file,
+but the final `find ... | sort` line failed on the pod:
+
+```text
+bash: line 35: $'sort\r': command not found
+```
+
+The local incident gate opened because the guarded MLXP command exited with
+return code `127`.
+
+### Why It Happened
+
+The probe script was written from PowerShell into `%TEMP%`, so it used Windows
+CRLF line endings. `scripts/run_mlxp_bash.py` stripped BOM bytes before sending
+the script to `bash -s`, but it did not normalize CRLF to LF. The remote bash
+therefore treated the carriage return as part of the command token.
+
+### Durable Guard
+
+- `scripts/run_mlxp_bash.py` now normalizes all local script payload newlines to
+  LF before prepending the MLXP runtime guard and sending bytes to remote bash.
+- `tests/test_run_mlxp_bash.py` covers CRLF and bare-CR normalization so a
+  Windows-created temp script cannot reintroduce this failure mode.
+
+### Verification
+
+The targeted `test_run_mlxp_bash.py` must pass locally before this incident is
+cleared.
