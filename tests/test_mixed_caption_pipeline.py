@@ -121,6 +121,17 @@ class MixedCaptionPipelineTest(unittest.TestCase):
                 action_inventory=None,
             )
 
+    def test_formal_pipeline_rejects_invalid_stage6_count_backend(self) -> None:
+        with self.assertRaisesRegex(ValueError, "stage6_count_backend"):
+            self.module.run_mixed_caption_pipeline(
+                input_paths=[self.tmp_path / "missing.jsonl"],
+                output_dir=self.tmp_path / "out",
+                object_inventory=self.tmp_path / "object.tsv",
+                attribute_inventory=self.tmp_path / "attribute.tsv",
+                action_inventory=None,
+                stage6_count_backend="bogus",
+            )
+
     def test_formal_pipeline_requires_stage5_lexicon_bundle_state_before_running(self) -> None:
         object_inventory = self.tmp_path / "object.tsv"
         action_inventory = self.tmp_path / "action.tsv"

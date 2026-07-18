@@ -43,6 +43,17 @@ class FormalStageMemorySafetyContractTest(unittest.TestCase):
                 self.assertIn("add_memory_safety_args(parser", text)
                 self.assertIn("memory_safety_kwargs(args)", text)
 
+    def test_formal_stage_runners_expose_progress_cli_argument(self) -> None:
+        for script_name in (
+            "run_stage4_extract_raw.py",
+            "run_stage5_canonicalize.py",
+            "run_stage6_export_counts.py",
+        ):
+            with self.subTest(script=script_name):
+                text = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")
+                self.assertIn('"--progress"', text)
+                self.assertIn("progress_path=", text)
+
     def test_mixed_pipeline_writes_stage_specific_progress_files(self) -> None:
         text = (ROOT / "scripts" / "run_mixed_caption_pipeline.py").read_text(
             encoding="utf-8",
@@ -50,6 +61,8 @@ class FormalStageMemorySafetyContractTest(unittest.TestCase):
         for stage_dir in ("stage4_dir", "stage5_dir", "stage6_dir"):
             with self.subTest(stage_dir=stage_dir):
                 self.assertIn(f'progress_path={stage_dir} / "progress.json"', text)
+        self.assertIn("count_backend=stage6_count_backend", text)
+        self.assertIn("sqlite_cache_rows=stage6_sqlite_cache_rows", text)
 
     def test_memory_limit_uses_lower_fraction_or_reserve_limit(self) -> None:
         by_fraction = MemorySafetyConfig(

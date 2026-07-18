@@ -140,6 +140,12 @@ still be active, check all of the following from inside the pod:
 - remote parent PID and current child PID with `ps`
 - expected output directory/file growth or a completed summary artifact
 
+When checking a remote background PID, do not treat `ps -p <pid>` alone as
+proof that work is still active. A `STAT` containing `Z` or a command shown as
+`<defunct>` is a zombie: the worker has exited and is waiting to be reaped, so
+it must be reported as not actively running. Use the progress/status artifact
+and summary output to determine completion or failure.
+
 If the remote job is still running, do not send a final answer that implies the
 work is finished. Continue polling it, or explicitly state that monitoring is
 being handed back to the user only if the user asked to stop active monitoring.

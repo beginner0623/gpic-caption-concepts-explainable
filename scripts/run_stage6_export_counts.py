@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", required=True, help="Output directory")
     parser.add_argument("--summary", default=None, help="Optional summary JSONL path")
+    parser.add_argument("--progress", default=None, help="Optional progress JSON path")
     add_memory_safety_args(parser, stage_name="Stage 6")
     parser.add_argument(
         "--count-backend",
@@ -69,6 +70,7 @@ def main() -> None:
         Path(args.canonical_edges),
         output_dir=Path(args.output_dir),
         summary_path=Path(args.summary) if args.summary else None,
+        progress_path=Path(args.progress) if args.progress else None,
         **memory_safety_kwargs(args),
         count_backend=args.count_backend,
         sqlite_db_path=Path(args.sqlite_db) if args.sqlite_db else None,

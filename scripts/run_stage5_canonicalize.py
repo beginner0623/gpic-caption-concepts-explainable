@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
         help="Output canonical_edges.jsonl",
     )
     parser.add_argument("--summary", default=None, help="Optional summary JSONL path")
+    parser.add_argument("--progress", default=None, help="Optional progress JSON path")
     parser.add_argument(
         "--attribute-inventory",
         help=(
@@ -81,6 +82,7 @@ def main() -> None:
         canonical_mentions_path=Path(args.canonical_mentions),
         canonical_edges_path=Path(args.canonical_edges),
         summary_path=None,
+        progress_path=Path(args.progress) if args.progress else None,
         **memory_safety_kwargs(args),
     )
     summary["formal_attribute_inventory_gate"] = not preview_mode

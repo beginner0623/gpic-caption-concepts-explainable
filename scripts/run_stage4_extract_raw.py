@@ -57,6 +57,7 @@ def parse_args() -> argparse.Namespace:
         "--summary",
         help="Optional output JSONL path for one Stage 4 summary row.",
     )
+    parser.add_argument("--progress", default=None, help="Optional progress JSON path")
     parser.add_argument(
         "--limit",
         type=int,
@@ -142,6 +143,7 @@ def main() -> None:
         object_lookup=object_lookup,
         action_lookup=action_lookup,
         preposition_mwe_lookup=preposition_mwe_lookup,
+        progress_path=Path(args.progress) if args.progress else None,
         **memory_safety_kwargs(args),
     )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))

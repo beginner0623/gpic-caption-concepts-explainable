@@ -173,6 +173,25 @@ def parse_args() -> argparse.Namespace:
             "exceeds this value. 0 disables the guard. Default: 250000."
         ),
     )
+    parser.add_argument(
+        "--stage6-count-backend",
+        choices=("sqlite", "memory"),
+        default="sqlite",
+        help=(
+            "Stage 6 count accumulator backend. sqlite is the production-safe "
+            "default; memory is for bounded speed experiments after RSS has "
+            "been checked."
+        ),
+    )
+    parser.add_argument(
+        "--stage6-sqlite-cache-rows",
+        type=int,
+        default=None,
+        help=(
+            "Optional Stage 6 sqlite unique count-key cache hard cap. "
+            "Defaults to adaptive RSS flushing."
+        ),
+    )
     gpu_group = parser.add_mutually_exclusive_group()
     gpu_group.add_argument(
         "--prefer-gpu",
@@ -214,6 +233,8 @@ def main() -> None:
             progress_output=progress_output,
             progress_interval_records=args.progress_interval_records,
             max_monolithic_stage456_captions=args.max_monolithic_stage456_captions,
+            stage6_count_backend=args.stage6_count_backend,
+            stage6_sqlite_cache_rows=args.stage6_sqlite_cache_rows,
         )
     except BaseException as exc:
         if progress_output is not None:
@@ -312,6 +333,8 @@ def run_mixed_caption_pipeline(
     progress_output: Path | None = None,
     progress_interval_records: int = 5000,
     max_monolithic_stage456_captions: int = DEFAULT_MAX_MONOLITHIC_STAGE456_CAPTIONS,
+    stage6_count_backend: str = "sqlite",
+    stage6_sqlite_cache_rows: int | None = None,
 ) -> dict[str, Any]:
     total_start = time.perf_counter()
     timing_seconds: dict[str, float] = {}
@@ -341,6 +364,10 @@ def run_mixed_caption_pipeline(
         raise ValueError("batch_size must be greater than zero")
     if max_monolithic_stage456_captions < 0:
         raise ValueError("max_monolithic_stage456_captions must be >= 0")
+    if stage6_count_backend not in {"sqlite", "memory"}:
+        raise ValueError("stage6_count_backend must be one of: sqlite, memory")
+    if stage6_sqlite_cache_rows is not None and stage6_sqlite_cache_rows < 1:
+        raise ValueError("stage6_sqlite_cache_rows must be greater than zero")
     if action_inventory is None and not allow_runtime_action_lookup_preview:
         raise ValueError(
             "action_inventory is required for formal mixed pipeline Stage 4; "
@@ -503,6 +530,8 @@ def run_mixed_caption_pipeline(
         output_dir=stage6_dir,
         summary_path=stage6_dir / "summary.jsonl",
         progress_path=stage6_dir / "progress.json",
+        count_backend=stage6_count_backend,
+        sqlite_cache_rows=stage6_sqlite_cache_rows,
     )
     mark_timing("stage6_export_counts", stage_start)
     write_progress("stage6_export_counts_complete", stage6=stage6_summary)
