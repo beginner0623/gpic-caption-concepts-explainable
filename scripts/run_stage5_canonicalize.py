@@ -43,7 +43,6 @@ def parse_args() -> argparse.Namespace:
         help="Output canonical_edges.jsonl",
     )
     parser.add_argument("--summary", default=None, help="Optional summary JSONL path")
-    parser.add_argument("--progress", default=None, help="Optional progress JSON path")
     parser.add_argument(
         "--attribute-inventory",
         help=(

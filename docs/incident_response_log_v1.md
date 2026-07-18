@@ -498,3 +498,36 @@ therefore `git ls-remote` against the SSH repository URL.
 The incident was opened before any pipeline or benchmark mutation resumed. The
 next verification must clear this incident only after `git ls-remote` succeeds
 from the MLXP pod using the deploy key.
+
+## 2026-07-18: Formal Stage Progress CLI Was Registered Twice
+
+### What Failed
+
+The first 1M Stage 6 memory-backend worker on MLXP exited before processing any
+rows. The remote incident recorded an argparse construction failure:
+
+```text
+argparse.ArgumentError: argument --progress: conflicting option string: --progress
+```
+
+### Why It Happened
+
+The formal Stage 4/5/6 wrappers still registered their own `--progress`
+argument after progress reporting had been centralized in
+`add_memory_safety_args()`. The existing test only checked that the script text
+contained progress-related strings, so it did not actually construct the
+argparse parser and could not catch duplicate option registration.
+
+### Durable Guard
+
+- Removed wrapper-local `--progress` registrations from Stage 4, Stage 5, and
+  Stage 6. `add_memory_safety_args()` is now the single owner of that CLI
+  option.
+- Strengthened `tests/test_formal_stage_memory_safety.py` so it imports each
+  formal stage runner and calls `parse_args()` with `--progress`. If a duplicate
+  option is introduced again, parser construction fails in the test.
+
+### Verification
+
+The targeted memory-safety test must pass locally and on MLXP before the 1M
+Stage 6 memory worker is relaunched.

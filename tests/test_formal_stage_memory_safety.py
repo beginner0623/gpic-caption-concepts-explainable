@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import inspect
+import importlib.util
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from gpic_concepts_v1.runtime_memory import MemorySafetyConfig, ProgressWriter
 from gpic_concepts_v1.stage4_extract_raw import run_stage4_extract_raw
@@ -13,6 +16,17 @@ from gpic_concepts_v1.stage6_export_counts import run_stage6_export_counts
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_script_module(script_name: str):
+    path = ROOT / "scripts" / script_name
+    module_name = "test_loaded_" + script_name.replace(".", "_")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"Could not load script module: {script_name}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class FormalStageMemorySafetyContractTest(unittest.TestCase):
@@ -44,15 +58,58 @@ class FormalStageMemorySafetyContractTest(unittest.TestCase):
                 self.assertIn("memory_safety_kwargs(args)", text)
 
     def test_formal_stage_runners_expose_progress_cli_argument(self) -> None:
-        for script_name in (
-            "run_stage4_extract_raw.py",
-            "run_stage5_canonicalize.py",
-            "run_stage6_export_counts.py",
-        ):
+        cases = (
+            (
+                "run_stage4_extract_raw.py",
+                [
+                    "run_stage4_extract_raw.py",
+                    "--input",
+                    "stage3.jsonl",
+                    "--raw-mentions",
+                    "raw_mentions.jsonl",
+                    "--raw-edges",
+                    "raw_edges.jsonl",
+                    "--progress",
+                    "progress.json",
+                ],
+            ),
+            (
+                "run_stage5_canonicalize.py",
+                [
+                    "run_stage5_canonicalize.py",
+                    "--raw-mentions",
+                    "raw_mentions.jsonl",
+                    "--raw-edges",
+                    "raw_edges.jsonl",
+                    "--canonical-mentions",
+                    "canonical_mentions.jsonl",
+                    "--canonical-edges",
+                    "canonical_edges.jsonl",
+                    "--progress",
+                    "progress.json",
+                ],
+            ),
+            (
+                "run_stage6_export_counts.py",
+                [
+                    "run_stage6_export_counts.py",
+                    "--canonical-mentions",
+                    "canonical_mentions.jsonl",
+                    "--canonical-edges",
+                    "canonical_edges.jsonl",
+                    "--output-dir",
+                    "stage6",
+                    "--progress",
+                    "progress.json",
+                ],
+            ),
+        )
+        for script_name, argv in cases:
             with self.subTest(script=script_name):
-                text = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")
-                self.assertIn('"--progress"', text)
-                self.assertIn("progress_path=", text)
+                module = _load_script_module(script_name)
+                with patch.object(sys, "argv", argv):
+                    args = module.parse_args()
+                self.assertEqual(args.progress, "progress.json")
 
     def test_mixed_pipeline_writes_stage_specific_progress_files(self) -> None:
         text = (ROOT / "scripts" / "run_mixed_caption_pipeline.py").read_text(

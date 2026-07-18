@@ -57,7 +57,6 @@ def parse_args() -> argparse.Namespace:
         "--summary",
         help="Optional output JSONL path for one Stage 4 summary row.",
     )
-    parser.add_argument("--progress", default=None, help="Optional progress JSON path")
     parser.add_argument(
         "--limit",
         type=int,
