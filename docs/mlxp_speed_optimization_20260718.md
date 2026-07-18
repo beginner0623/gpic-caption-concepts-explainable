@@ -119,6 +119,53 @@ Interpretation:
   a larger intermediate size with RSS progress before making it the default for
   production-scale runs.
 
+## Experiment 3: Stage 6 Input And Output On NVMe, Memory Backend
+
+Run:
+
+- `/mnt/nvme/gpic_speed_tests/stage6_50k_all_nvme_memory_20260718T115009Z`
+
+Conditions:
+
+- Stage range: Stage 6 only
+- The same 50K Stage 5 canonical files were copied from DDN/Lustre into:
+  - `/mnt/nvme/gpic_speed_tests/stage6_50k_all_nvme_memory_20260718T115009Z/input_stage5/canonical_mentions.jsonl`
+  - `/mnt/nvme/gpic_speed_tests/stage6_50k_all_nvme_memory_20260718T115009Z/input_stage5/canonical_edges.jsonl`
+- Input filesystem during Stage 6: NVMe/XFS
+- Output filesystem during Stage 6: NVMe/XFS
+- Count backend: `memory`
+- Copy time for the two 50K Stage 5 input files was below the one-second
+  granularity of the shell timestamp used in the launch script.
+
+Result:
+
+- Outer wall time: `362.581s`
+- Stage 6 progress elapsed: `361.859s`
+- Fact total: `8,880,202`
+- Count integrity: OK, no deltas
+- Table row counts matched the previous Stage 6 probes.
+
+Interpretation:
+
+- Moving the Stage 5 input files from DDN/Lustre to NVMe did not improve the
+  50K memory-backend Stage 6 result:
+  - DDN input + NVMe output + memory backend: `361.441s`
+  - NVMe input + NVMe output + memory backend: `362.581s`
+- At 50K, Stage 6 input read location is not the observed bottleneck.
+- The confirmed speed-up is from avoiding the SQLite accumulator path, not from
+  moving input files to NVMe.
+
+## Larger Artifacts Found
+
+Existing larger Stage 5 artifacts are available on the same MLXP storage:
+
+- `/mnt/ddn/prod-runs/snu14ksh/gpic_stage456/full_1m_20260716/stage5/canonical_mentions.jsonl`
+  - size observed by `find -printf`: `14,116,106,189` bytes
+- `/mnt/ddn/prod-runs/snu14ksh/gpic_stage456/smoke_limit10000/stage5/canonical_mentions.jsonl`
+- `/mnt/ddn/prod-runs/snu14ksh/gpic_stage456/smoke_limit1000/stage5/canonical_mentions.jsonl`
+
+No existing 100K/200K Stage 5 artifact was found in the searched MLXP paths.
+
 ## Code/Process Adjustments Made During This Probe
 
 - Exposed `--progress` on standalone Stage 4, Stage 5, and Stage 6 wrappers so
@@ -139,8 +186,9 @@ Verification:
 
 ## Next Candidate Tests
 
-1. Run a 100K or 200K Stage 6-only memory backend probe using existing Stage 5
-   outputs, with progress/RSS monitoring.
+1. For a larger safety check, either create a bounded intermediate Stage 5
+   artifact or run the existing 1M Stage 5 artifact with memory backend while
+   monitoring RSS.
 2. If RSS remains safely below the pod cgroup limit, run one formal mixed
    Stage 1-6 benchmark with `--stage6-count-backend memory`.
 3. Keep report caption-index timing separate from Stage 1-6 timing, because it
