@@ -166,6 +166,27 @@ Existing larger Stage 5 artifacts are available on the same MLXP storage:
 
 No existing 100K/200K Stage 5 artifact was found in the searched MLXP paths.
 
+## Remote Git Sync Status
+
+The local branch was pushed through commit `42251ff`, but the active MLXP pod's
+repo remains at commit `8184630`.
+
+Auth-free probe from inside the pod:
+
+```text
+GIT_TERMINAL_PROMPT=0 git ls-remote origin mlxp-stage456-handoff
+fatal: could not read Username for 'https://github.com': terminal prompts disabled
+```
+
+Decision:
+
+- Do not use remote `git fetch`/`pull` in this pod for benchmark setup.
+- The Stage 6-only probes above did not require the new mixed runner option
+  because they called the existing Stage 6 function through the incident gate.
+- A formal mixed Stage 1-6 run with `--stage6-count-backend memory` requires a
+  code transfer path other than remote Git sync, or a fresh clone/session with
+  working GitHub access.
+
 ## Code/Process Adjustments Made During This Probe
 
 - Exposed `--progress` on standalone Stage 4, Stage 5, and Stage 6 wrappers so
@@ -190,6 +211,7 @@ Verification:
    artifact or run the existing 1M Stage 5 artifact with memory backend while
    monitoring RSS.
 2. If RSS remains safely below the pod cgroup limit, run one formal mixed
-   Stage 1-6 benchmark with `--stage6-count-backend memory`.
+   Stage 1-6 benchmark with `--stage6-count-backend memory` after the MLXP code
+   path has commit `42251ff` or newer.
 3. Keep report caption-index timing separate from Stage 1-6 timing, because it
    is a post-processing step for the interactive HTML report.
