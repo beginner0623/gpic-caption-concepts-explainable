@@ -531,3 +531,36 @@ argparse parser and could not catch duplicate option registration.
 
 The targeted memory-safety test must pass locally and on MLXP before the 1M
 Stage 6 memory worker is relaunched.
+
+## 2026-07-18: Formal Stage Progress Path Was Passed Twice
+
+### What Failed
+
+After fixing duplicate CLI option registration, the next 1M Stage 6
+memory-backend launch exited before processing because the Stage 6 wrapper
+passed `progress_path` twice:
+
+```text
+TypeError: gpic_concepts_v1.stage6_export_counts.run_stage6_export_counts() got multiple values for keyword argument 'progress_path'
+```
+
+### Why It Happened
+
+`memory_safety_kwargs(args)` already includes `progress_path`, but the formal
+Stage 4/5/6 wrappers also passed `progress_path=Path(args.progress)` directly.
+The earlier parser-construction test did not exercise wrapper call keyword
+ownership, so it caught the duplicate CLI option but not the duplicate function
+argument.
+
+### Durable Guard
+
+- `memory_safety_kwargs(args)` is now the single owner of `progress_path`
+  conversion from CLI string to `Path`.
+- Stage 4/5/6 wrappers no longer pass `progress_path` directly.
+- The memory-safety contract test now rejects `progress_path=` inside those
+  wrappers, preventing the same duplicate keyword path from returning.
+
+### Verification
+
+The targeted memory-safety test must pass locally and on MLXP before the 1M
+Stage 6 memory worker is relaunched again.

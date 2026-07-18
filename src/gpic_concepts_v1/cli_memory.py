@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Any
 
 
@@ -50,5 +51,5 @@ def memory_safety_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "memory_limit_gib": args.memory_limit_gib,
         "rss_limit_fraction": args.rss_limit_fraction,
         "rss_reserve_gib": args.rss_reserve_gib,
-        "progress_path": args.progress,
+        "progress_path": Path(args.progress) if args.progress else None,
     }

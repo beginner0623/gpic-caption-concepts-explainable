@@ -142,7 +142,6 @@ def main() -> None:
         object_lookup=object_lookup,
         action_lookup=action_lookup,
         preposition_mwe_lookup=preposition_mwe_lookup,
-        progress_path=Path(args.progress) if args.progress else None,
         **memory_safety_kwargs(args),
     )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))

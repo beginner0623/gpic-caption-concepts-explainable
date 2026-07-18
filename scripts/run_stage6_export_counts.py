@@ -69,7 +69,6 @@ def main() -> None:
         Path(args.canonical_edges),
         output_dir=Path(args.output_dir),
         summary_path=Path(args.summary) if args.summary else None,
-        progress_path=Path(args.progress) if args.progress else None,
         **memory_safety_kwargs(args),
         count_backend=args.count_backend,
         sqlite_db_path=Path(args.sqlite_db) if args.sqlite_db else None,

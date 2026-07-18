@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import inspect
 import importlib.util
 import json
@@ -9,6 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from gpic_concepts_v1.cli_memory import memory_safety_kwargs
 from gpic_concepts_v1.runtime_memory import MemorySafetyConfig, ProgressWriter
 from gpic_concepts_v1.stage4_extract_raw import run_stage4_extract_raw
 from gpic_concepts_v1.stage5_canonicalize import run_stage5_canonicalize
@@ -56,6 +58,7 @@ class FormalStageMemorySafetyContractTest(unittest.TestCase):
                 text = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")
                 self.assertIn("add_memory_safety_args(parser", text)
                 self.assertIn("memory_safety_kwargs(args)", text)
+                self.assertNotIn("progress_path=", text)
 
     def test_formal_stage_runners_expose_progress_cli_argument(self) -> None:
         cases = (
@@ -110,6 +113,17 @@ class FormalStageMemorySafetyContractTest(unittest.TestCase):
                 with patch.object(sys, "argv", argv):
                     args = module.parse_args()
                 self.assertEqual(args.progress, "progress.json")
+
+    def test_memory_safety_kwargs_owns_progress_path_conversion(self) -> None:
+        args = argparse.Namespace(
+            max_rss_gib=None,
+            memory_limit_gib=None,
+            rss_limit_fraction=0.75,
+            rss_reserve_gib=16.0,
+            progress="progress.json",
+        )
+        kwargs = memory_safety_kwargs(args)
+        self.assertEqual(kwargs["progress_path"], Path("progress.json"))
 
     def test_mixed_pipeline_writes_stage_specific_progress_files(self) -> None:
         text = (ROOT / "scripts" / "run_mixed_caption_pipeline.py").read_text(

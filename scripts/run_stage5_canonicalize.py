@@ -81,7 +81,6 @@ def main() -> None:
         canonical_mentions_path=Path(args.canonical_mentions),
         canonical_edges_path=Path(args.canonical_edges),
         summary_path=None,
-        progress_path=Path(args.progress) if args.progress else None,
         **memory_safety_kwargs(args),
     )
     summary["formal_attribute_inventory_gate"] = not preview_mode
