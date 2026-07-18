@@ -23,13 +23,19 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         description=(
             "Run a local bash script inside the MLXP pod through WSL kubectl. "
             "The script is sent as raw bytes to `bash -s`, avoiding PowerShell "
-            "quoting, heredoc, and BOM issues."
+            "quoting, heredoc, and BOM issues. The runner also prepends the "
+            "standard MLXP Python runtime library path guard unless disabled."
         ),
     )
     parser.add_argument("script", type=Path)
     parser.add_argument("--namespace", default=DEFAULT_NAMESPACE)
     parser.add_argument("--pod", default=DEFAULT_POD)
     parser.add_argument("--kubectl", default=DEFAULT_KUBECTL)
+    parser.add_argument(
+        "--no-runtime-env",
+        action="store_true",
+        help="Do not prepend the GPIC MLXP runtime LD_LIBRARY_PATH guard.",
+    )
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -39,6 +45,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise SystemExit(f"missing script: {args.script}")
     payload = args.script.read_bytes()
     payload = _strip_utf_bom(payload)
+    if not args.no_runtime_env:
+        payload = _prepend_mlxp_runtime_env(payload)
     command = [
         "wsl",
         "-e",
@@ -61,6 +69,29 @@ def _strip_utf_bom(payload: bytes) -> bytes:
         if payload.startswith(bom):
             return payload[len(bom) :]
     return payload
+
+
+def _prepend_mlxp_runtime_env(payload: bytes) -> bytes:
+    prologue = b"""# GPIC MLXP runtime guard: expose CUDA libraries installed by NVIDIA wheels.
+if [ -x /root/work/gpic-linux-env/bin/python ]; then
+  _gpic_cuda_libs=$(/root/work/gpic-linux-env/bin/python - <<'PY' 2>/dev/null || true
+from pathlib import Path
+try:
+    import nvidia
+except Exception:
+    raise SystemExit(0)
+root = Path(nvidia.__file__).resolve().parent
+print(":".join(str(path) for path in sorted(root.glob("*/lib")) if path.is_dir()))
+PY
+)
+  if [ -n "${_gpic_cuda_libs:-}" ]; then
+    export LD_LIBRARY_PATH="${_gpic_cuda_libs}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  fi
+  unset _gpic_cuda_libs
+fi
+
+"""
+    return prologue + payload
 
 
 if __name__ == "__main__":

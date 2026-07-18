@@ -335,3 +335,53 @@ The repository state after the interruption was checked locally:
 The baseline measurements remain recorded in
 `docs/mlxp_fixed_lexicon_baseline_20260717.md`; the failed command was only a
 redundant remote-storage verification attempt.
+
+## 2026-07-18: New MLXP Pod Lost CUDA Wheel Library Paths
+
+### What Failed
+
+The recreated MLXP pod could see the H200 GPU and `spacy.require_gpu()`
+returned true, but loading `en_core_web_trf` failed with:
+
+```text
+CuPy failed to load libnvrtc.so.12
+```
+
+### Why It Happened
+
+`scripts/setup_mlxp_runtime.sh` exported the NVIDIA wheel library directories
+inside the setup process, but that `LD_LIBRARY_PATH` was not persisted into
+later MLXP benchmark/probe shells. A fresh pod or shell could therefore import
+CuPy far enough for `spacy.require_gpu()` to pass, then fail when the
+transformer model needed NVRTC during model load.
+
+### Durable Guard
+
+- `scripts/run_mlxp_bash.py` now prepends the GPIC MLXP runtime guard to remote
+  scripts by default.
+- The guard discovers `/root/work/gpic-linux-env` NVIDIA wheel `*/lib`
+  directories and exports them into `LD_LIBRARY_PATH` before the user script
+  runs.
+- `--no-runtime-env` is available only for deliberate diagnostics.
+- `tests/test_run_mlxp_bash.py` fixes the runner contract so the CUDA library
+  path guard remains prepended.
+
+### Verification
+
+The targeted runner test passed:
+
+```text
+scripts/run_tests.ps1 --timeout-seconds 120 discover -s tests -p test_run_mlxp_bash.py
+Ran 2 tests in 0.043s
+OK
+```
+
+The same pod probe then loaded the spaCy transformer model successfully:
+
+```text
+torch_cuda=True
+torch_gpu=NVIDIA H200
+cupy=13.6.0
+spacy_require_gpu=True
+spacy_model_loaded=1
+```
