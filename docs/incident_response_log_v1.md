@@ -434,3 +434,36 @@ sufficient for the immediate benchmark path even before remote repo sync:
 spacy_require_gpu=True
 spacy_model_loaded=1
 ```
+
+## 2026-07-18: Report DB Build Correctly Refused Missing Triple Helper
+
+### What Failed
+
+The first attempt to build a 50K interactive report DB from Stage 6 TSVs failed
+because `patient_action_agent_triple_counts.tsv` was not present in the Stage 6
+directory.
+
+### Why It Happened
+
+`build_interactive_count_report.py --input-mode stage6-tsv` requires the helper
+triple count table so the report does not silently show an empty
+patient-action-agent triple view. The Stage 1-6 benchmark produces Stage 6
+facts and standard count TSVs, but the helper triple table is a separate
+post-processing artifact.
+
+### Durable Guard
+
+No new code guard was needed. The existing report-builder guard did the right
+thing: it refused to build a misleading report and printed the required next
+command family:
+
+```text
+Build it first with scripts/build_patient_action_agent_triples_from_facts.py
+using the Stage 6 facts.jsonl.
+```
+
+### Verification
+
+The failure happened before writing `report.db`, so no incomplete interactive
+report was accepted as valid. The next valid report build must first create
+`stage6/patient_action_agent_triple_counts.tsv` from `stage6/facts.jsonl`.
