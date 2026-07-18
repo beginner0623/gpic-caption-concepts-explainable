@@ -467,3 +467,34 @@ using the Stage 6 facts.jsonl.
 The failure happened before writing `report.db`, so no incomplete interactive
 report was accepted as valid. The next valid report build must first create
 `stage6/patient_action_agent_triple_counts.tsv` from `stage6/facts.jsonl`.
+
+## 2026-07-18: GitHub SSH Deploy-Key Probe Used The Wrong Success Criterion
+
+### What Failed
+
+After creating and registering an MLXP pod deploy key, the verification script
+ran `ssh -T git@github.com` inside a guarded MLXP command. GitHub printed a
+successful authentication message for the deploy key, but the command exited
+nonzero because GitHub does not provide shell access. The incident gate
+correctly treated the official remote command as failed.
+
+### Why It Happened
+
+The probe used an interactive SSH authentication check as though exit code `0`
+meant success. For GitHub deploy keys, the operation the pipeline actually needs
+is repository Git access, not shell access. The correct guarded verification is
+therefore `git ls-remote` against the SSH repository URL.
+
+### Durable Guard
+
+- `AGENTS.md` now states that GitHub SSH deploy-key validation must not use
+  `ssh -T git@github.com` exit code as the official success criterion.
+- Guarded MLXP Git verification should use `git ls-remote` for the intended
+  repository URL, or explicitly capture and interpret `ssh -T` output without
+  letting the expected nonzero shell-access exit fail the official command.
+
+### Verification
+
+The incident was opened before any pipeline or benchmark mutation resumed. The
+next verification must clear this incident only after `git ls-remote` succeeds
+from the MLXP pod using the deploy key.

@@ -92,6 +92,13 @@ verified remote commit when the local runner supplies the needed wrapper
 behavior, or use an explicit file/bundle transfer path. Do not let a benchmark
 run depend on an interactive Git credential prompt inside the pod.
 
+For GitHub SSH deploy-key validation, do not use `ssh -T git@github.com` exit
+code as the official success criterion inside a guarded command. GitHub can
+return exit code `1` even when authentication succeeds because it does not
+provide shell access. Use `git ls-remote` against the intended SSH repository
+URL as the guarded verification, or capture and interpret the `ssh -T` message
+without letting its nonzero exit fail the official run.
+
 If any command unexpectedly reports a Windows path, the conversation default
 workspace, or a local WSL path while the intended target was MLXP, stop
 immediately. Do not continue the main pipeline until the wrong local artifact
