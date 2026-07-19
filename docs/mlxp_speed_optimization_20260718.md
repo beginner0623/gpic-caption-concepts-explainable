@@ -569,3 +569,49 @@ Interpretation:
   `/proc` reads.
 - Stage 3 is now the dominant fixed-lexicon cost on 50K, followed by Stage 6
   aggregate counting. Stage 4/5 combined dropped to about `129.6s`.
+
+## Experiment 9: Stage 3 Batch-Size Sweep
+
+Run:
+
+- `/mnt/nvme/gpic_speed_tests/batch_sweep_50k_20260719T121636Z`
+
+Conditions:
+
+- 50K GPIC-Nano front captions
+- fixed current inventory
+- `en_core_web_trf`
+- H200 GPU required
+- NVMe output
+- Stage 6 memory backend
+- `--stage6-facts-output-mode discard`
+- batch sizes: `64`, `128`, `192`, `256`, `384`
+
+Results:
+
+| Batch Size | Stage 3 Sentence | Stage 4 | Stage 5 | Stage 6 | Total | Captions/s |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | 189.237124 | 83.220668 | 44.448193 | 117.395992 | 460.864573 | 108.491741 |
+| 128 | 187.439617 | 83.217839 | 46.461620 | 118.294628 | 462.479729 | 108.112847 |
+| 192 | 184.815487 | 82.775271 | 46.629832 | 117.796177 | 458.738115 | 108.994649 |
+| 256 | 186.967902 | 82.970629 | 44.891659 | 118.615852 | 460.135270 | 108.663698 |
+| 384 | 187.210622 | 83.309055 | 45.258308 | 118.907498 | 461.652055 | 108.306677 |
+
+Validation:
+
+- All five batch sizes completed with return code `0`.
+- All five runs had Stage 6 count integrity `ok`.
+- All five runs produced identical Stage 6 `fact_total`: `8,880,202`.
+- All five runs produced identical Stage 6 table row counts.
+
+Interpretation:
+
+- Batch size `192` was the fastest in this 50K sweep, but the difference is
+  small: about `2.1s` faster than batch `64` and about `3.7s` faster than batch
+  `128`.
+- Larger batch sizes did not produce a meaningful speedup on this pipeline.
+  Stage 3 sentence time varies only within roughly `4.4s` across the tested
+  range.
+- Use batch `192` as the current best candidate for the next larger
+  fixed-lexicon validation, but do not expect a dramatic 1M gain from batch
+  size alone.
