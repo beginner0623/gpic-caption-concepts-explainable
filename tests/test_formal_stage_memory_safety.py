@@ -134,6 +134,7 @@ class FormalStageMemorySafetyContractTest(unittest.TestCase):
                 self.assertIn(f'progress_path={stage_dir} / "progress.json"', text)
         self.assertIn("count_backend=stage6_count_backend", text)
         self.assertIn("sqlite_cache_rows=stage6_sqlite_cache_rows", text)
+        self.assertIn("facts_output_mode=stage6_facts_output_mode", text)
 
     def test_memory_limit_uses_lower_fraction_or_reserve_limit(self) -> None:
         by_fraction = MemorySafetyConfig(
@@ -166,6 +167,23 @@ class FormalStageMemorySafetyContractTest(unittest.TestCase):
         self.assertEqual(progress["memory_limit_gib"], 32)
         self.assertEqual(progress["memory_limit_source"], "explicit")
         self.assertIn("current_rss_kib", progress)
+        self.assertEqual(progress["memory_check_min_interval_seconds"], 1.0)
+
+    def test_progress_memory_check_is_throttled_between_progress_writes(self) -> None:
+        writer = ProgressWriter(
+            None,
+            stage_name="stage-test",
+            memory_config=MemorySafetyConfig(
+                memory_limit_gib=32,
+                memory_check_min_interval_seconds=60.0,
+            ),
+        )
+        with patch("gpic_concepts_v1.runtime_memory.current_rss_kib", return_value=1024) as rss:
+            writer.check_memory(phase="probe")
+            writer.check_memory(phase="probe")
+            writer.check_memory(phase="probe", force=True)
+
+        self.assertEqual(rss.call_count, 2)
 
 
 if __name__ == "__main__":

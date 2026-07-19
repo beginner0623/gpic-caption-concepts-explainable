@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 import csv
 import json
@@ -305,6 +306,7 @@ def run_stage6_export_counts(
     count_backend: str = "sqlite",
     sqlite_db_path: str | Path | None = None,
     sqlite_cache_rows: int | None = None,
+    facts_output_mode: str = "write",
 ) -> dict[str, Any]:
     """Run Stage 6 and write facts plus TSV count tables.
 
@@ -312,6 +314,8 @@ def run_stage6_export_counts(
     for tests and small samples, but 1M-caption exports can create hundreds of
     millions of fact rows and must not materialize them as Python objects.
     """
+    if facts_output_mode not in {"write", "discard"}:
+        raise ValueError("facts_output_mode must be one of: write, discard")
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     facts_path = output_root / "facts.jsonl"
@@ -352,7 +356,8 @@ def run_stage6_export_counts(
     edge_groups = _CaptionGroupReader(canonical_edges_path, _coerce_canonical_edge)
 
     try:
-        with open_text(facts_path, "wt") as facts_handle:
+        facts_handle = open_text(facts_path, "wt") if facts_output_mode == "write" else nullcontext()
+        with facts_handle as handle:
             for caption_id, mentions in mention_groups:
                 progress.check_memory(
                     phase="stage6_streaming",
@@ -365,10 +370,11 @@ def run_stage6_export_counts(
                     start_index=fact_total,
                 )
                 for fact in facts:
-                    facts_handle.write(
-                        json.dumps(to_jsonable(fact), ensure_ascii=False, sort_keys=True),
-                    )
-                    facts_handle.write("\n")
+                    if handle is not None:
+                        handle.write(
+                            json.dumps(to_jsonable(fact), ensure_ascii=False, sort_keys=True),
+                        )
+                        handle.write("\n")
                     count_store.accumulate(fact)
                     fact_type_counts[fact.fact_type] += 1
                     fact_total += 1
@@ -433,6 +439,7 @@ def run_stage6_export_counts(
         "canonical_edges_path": str(canonical_edges_path),
         "output_dir": str(output_root),
         "facts_path": str(facts_path),
+        "facts_output_mode": facts_output_mode,
         "fact_total": fact_total,
         "fact_type_counts": dict(sorted(fact_type_counts.items())),
         "table_paths": table_paths,

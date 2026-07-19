@@ -486,6 +486,72 @@ class Stage6ExportCountsTest(unittest.TestCase):
                     path.rmdir()
             tmp_path.rmdir()
 
+    def test_discard_facts_output_mode_keeps_counts_without_facts_jsonl(self) -> None:
+        mentions = [
+            mention("c1", "m0", "object", "dog", "R19"),
+            mention("c1", "m1", "object", "bench", "R19"),
+            mention("c1", "m2", "action", "sit", "R22"),
+            mention("c2", "m0", "object", "dog", "R19"),
+            mention("c2", "m1", "object", "bench", "R19"),
+        ]
+        edges = [
+            edge("c1", "e0", "event_role", "m2", "m0", "agent", "R16"),
+            edge("c1", "e1", "relation", "m0", "m1", "on", "R18", canonical_rule_id="R24"),
+            edge("c2", "e0", "relation", "m0", "m1", "on", "R18", canonical_rule_id="R24"),
+        ]
+        tmp_path = _stage6_temp_base() / uuid.uuid4().hex
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        try:
+            canonical_mentions_path = tmp_path / "canonical_mentions.jsonl"
+            canonical_edges_path = tmp_path / "canonical_edges.jsonl"
+            write_jsonl(canonical_mentions_path, mentions)
+            write_jsonl(canonical_edges_path, edges)
+
+            write_dir = tmp_path / "write"
+            discard_dir = tmp_path / "discard"
+            write_summary = run_stage6_export_counts(
+                canonical_mentions_path,
+                canonical_edges_path,
+                output_dir=write_dir,
+                count_backend="memory",
+            )
+            discard_summary = run_stage6_export_counts(
+                canonical_mentions_path,
+                canonical_edges_path,
+                output_dir=discard_dir,
+                count_backend="memory",
+                facts_output_mode="discard",
+            )
+
+            self.assertTrue((write_dir / "facts.jsonl").exists())
+            self.assertFalse((discard_dir / "facts.jsonl").exists())
+            self.assertEqual(write_summary["facts_output_mode"], "write")
+            self.assertEqual(discard_summary["facts_output_mode"], "discard")
+            self.assertEqual(discard_summary["count_integrity"]["status"], "ok")
+            self.assertEqual(write_summary["fact_total"], discard_summary["fact_total"])
+            self.assertEqual(
+                write_summary["fact_type_counts"],
+                discard_summary["fact_type_counts"],
+            )
+            for file_name in (
+                "object_counts.tsv",
+                "relation_triple_counts.tsv",
+                "object_cooccurrence_pair_counts.tsv",
+                "agent_patient_pair_counts.tsv",
+            ):
+                with self.subTest(file_name=file_name):
+                    self.assertEqual(
+                        (write_dir / file_name).read_text(encoding="utf-8"),
+                        (discard_dir / file_name).read_text(encoding="utf-8"),
+                    )
+        finally:
+            for path in sorted(tmp_path.rglob("*"), reverse=True):
+                if path.is_file():
+                    path.unlink(missing_ok=True)
+                elif path.is_dir():
+                    path.rmdir()
+            tmp_path.rmdir()
+
     def test_count_integrity_report_rejects_dropped_or_duplicated_counts(self) -> None:
         with self.assertRaisesRegex(ValueError, "count integrity check failed"):
             _count_integrity_report(

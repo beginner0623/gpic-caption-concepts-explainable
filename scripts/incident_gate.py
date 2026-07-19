@@ -22,6 +22,7 @@ DEFAULT_STATE_DIR = ROOT / ".pipeline_state"
 INCIDENT_FILE = "incident.json"
 RUNNING_FILE = "running.json"
 HISTORY_FILE = "incident_history.jsonl"
+HISTORY_FALLBACK_PREFIX = "incident_history_fallback"
 SCHEMA_VERSION = 1
 _T = TypeVar("_T")
 
@@ -95,6 +96,22 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def write_history_with_fallback(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        append_jsonl(path, payload)
+        return {"history_path": str(path), "history_fallback_path": ""}
+    except PermissionError as exc:
+        fallback = path.with_name(
+            f"{HISTORY_FALLBACK_PREFIX}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex}.jsonl",
+        )
+        append_jsonl(fallback, {**payload, "history_append_error": repr(exc)})
+        return {
+            "history_path": str(path),
+            "history_fallback_path": str(fallback),
+            "history_append_error": repr(exc),
+        }
 
 
 def redact_argv(argv: Sequence[str]) -> list[str]:
@@ -459,7 +476,8 @@ def clear_incident(
         "resolved_at_utc": utc_now(),
         "verification_command_result": verification_result,
     }
-    append_jsonl(history_path(directory), resolved)
+    history_result = write_history_with_fallback(history_path(directory), resolved)
+    resolved = {**resolved, **history_result}
     incident_path(directory).unlink(missing_ok=True)
     running_path(directory).unlink(missing_ok=True)
     return resolved

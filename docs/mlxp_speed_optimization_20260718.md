@@ -310,3 +310,262 @@ Next candidate tests:
    before changing Stage 6 further.
 3. If Stage 6 remains worth optimizing, test parallel fact generation by caption
    shard with deterministic merge of count tables.
+
+## Experiment 5: 50K Formal Stage 1-6 On NVMe, Memory Backend
+
+Run:
+
+- `/mnt/nvme/gpic_speed_tests/full50k_fixedlex_memory_20260718T160412Z`
+
+Conditions:
+
+- Stage range: formal mixed Stage 1-6
+- Input: `/root/work/gpic_baselines/inputs/gpic_nano_front1000000.jsonl.gz`
+- Limit: `50,000` front GPIC-Nano rows
+- Inventory bundle: `resources/gpic_inventory/current/inventory_bundle.json`
+- Preposition MWE lexicon: `resources/lexicons/preposition_mwes.tsv`
+- GPU mode: `--require-gpu`
+- spaCy batch size: `128`
+- Output filesystem: NVMe/XFS
+- Stage 6 count backend: `memory`
+- Progress output: `progress.json`
+
+Result:
+
+- Total pipeline: `885.873699s`
+- Throughput: `56.441454 captions/s`
+- Stage 6: `362.072664s`
+- Stage 6 fact total: `8,880,202`
+- Stage 6 integrity: OK
+- Stage 6 final RSS in progress: `3.634 GiB`
+
+Stage timings:
+
+| Stage | Seconds |
+| --- | ---: |
+| stage1_records | 2.719689 |
+| stage1_mixed_caption_rows | 1.032841 |
+| stage3_model_load | 2.639990 |
+| stage3_sentence | 225.217261 |
+| stage3_tag_list | 4.884540 |
+| stage3_combined | 15.680831 |
+| stage4_lookup_load | 0.829507 |
+| stage4_extract_raw | 138.379483 |
+| stage5_canonicalize | 131.560715 |
+| stage6_export_counts | 362.072664 |
+| total_pipeline | 885.873699 |
+
+Comparison with the 50K fixed reference
+`/root/work/gpic_baselines/runs/baseline_50k_fixedlex_current_20260718T075309Z`:
+
+| Metric | Reference | NVMe + memory | Delta |
+| --- | ---: | ---: | ---: |
+| total_pipeline | 995.529975 | 885.873699 | -109.656276 |
+| stage6_export_counts | 464.984527 | 362.072664 | -102.911863 |
+| fact_total | 8,880,202 | 8,880,202 | 0 |
+
+Validation:
+
+- `fact_type_counts_equal`: true
+- `table_row_count_equal`: true
+- old/new count integrity: `ok` / `ok`
+
+Interpretation:
+
+- On the same 50K caption set, Stage 6 memory backend plus NVMe output is
+  result-preserving and reduces total Stage 1-6 wall time by about `11.0%`.
+- The measured total speed-up is mostly Stage 6: `102.9s` of the `109.7s`
+  total improvement came from `stage6_export_counts`.
+- Stage 3, Stage 4, and Stage 5 stayed close to the previous fixed-lexicon
+  baseline, so the next optimization target should be Stage 4/5 processing or
+  Stage 3 batching/parallelism rather than more Stage 6 storage changes.
+
+## Experiment 6: 50K Formal Stage 1-6 With Stage 6 Facts Discarded
+
+Run:
+
+- `/mnt/nvme/gpic_speed_tests/full50k_fixedlex_memory_discard_20260719T094840Z`
+
+Conditions:
+
+- Same input, inventory bundle, preposition MWE lexicon, model, GPU mode, limit,
+  and NVMe output filesystem as Experiment 5.
+- Stage 6 count backend: `memory`
+- Stage 6 facts output mode: `discard`
+- `facts.jsonl` intentionally not written; count tables and Stage 6 integrity
+  are still produced.
+
+Result:
+
+- Total pipeline: `647.8655s`
+- Throughput: `77.176513 captions/s`
+- Stage 6: `123.052012s`
+- Stage 6 fact total: `8,880,202`
+- Stage 6 integrity: OK
+- `stage6/facts.jsonl`: absent as expected
+
+Stage timings:
+
+| Stage | Seconds |
+| --- | ---: |
+| stage1_records | 2.766426 |
+| stage1_mixed_caption_rows | 1.039375 |
+| stage3_model_load | 2.678540 |
+| stage3_sentence | 224.935582 |
+| stage3_tag_list | 4.907504 |
+| stage3_combined | 15.494165 |
+| stage4_lookup_load | 0.810275 |
+| stage4_extract_raw | 138.931818 |
+| stage5_canonicalize | 132.409393 |
+| stage6_export_counts | 123.052012 |
+| total_pipeline | 647.865500 |
+
+Comparison with Experiment 5:
+
+| Metric | Write facts | Discard facts | Delta |
+| --- | ---: | ---: | ---: |
+| total_pipeline | 885.873699 | 647.865500 | -238.008199 |
+| stage6_export_counts | 362.072664 | 123.052012 | -239.020652 |
+| fact_total | 8,880,202 | 8,880,202 | 0 |
+
+Validation:
+
+- `fact_total_equal`: true
+- `fact_type_counts_equal`: true
+- `table_row_counts_equal`: true
+- discard count integrity: `ok`
+
+Interpretation:
+
+- Writing `facts.jsonl` accounts for about `239s` of the 50K run. When the
+  workflow only needs count tables, `--stage6-facts-output-mode discard` is
+  result-preserving for aggregates and gives a much larger win than the sqlite
+  to memory count-backend change alone.
+- At this point the 50K fixed-lexicon pipeline is dominated by Stage 3 parsing
+  plus Stage 4/5 extraction/canonicalization, not by Stage 6 count aggregation.
+
+## Experiment 7: Shallow JSON Record Serialization
+
+Profile:
+
+- `/mnt/nvme/gpic_speed_tests/stage45_profile_20260719T105352Z`
+
+The Stage 4/5 cProfile run showed that a large share of time was spent in
+`JsonRecord.to_dict() -> dataclasses.asdict()`, especially while writing JSONL
+records. `asdict()` recursively deep-copies nested dict/list fields for every
+record, but the pipeline only needs a JSON-serializable mapping for immediate
+`json.dumps()`.
+
+Change:
+
+- `JsonRecord.to_dict()` now uses cached dataclass field names and returns a
+  shallow `{field: value}` dict.
+- Existing validation still happens in dataclass `__post_init__`.
+- Tests assert shallow `to_dict()` is value-equal to `dataclasses.asdict()` for
+  raw and canonical records.
+
+Run:
+
+- `/mnt/nvme/gpic_speed_tests/full50k_fixedlex_memory_discard_20260719T111739Z`
+
+Conditions:
+
+- Same as Experiment 6: fixed current inventory, NVMe output, memory Stage 6
+  backend, and `--stage6-facts-output-mode discard`.
+
+Result:
+
+- Total pipeline: `526.698593s`
+- Stage 4: `86.789123s`
+- Stage 5: `102.331004s`
+- Stage 6: `123.082176s`
+
+Comparison with Experiment 6:
+
+| Metric | Before | After | Delta |
+| --- | ---: | ---: | ---: |
+| stage3_sentence | 224.935582 | 187.264461 | -37.671121 |
+| stage4_extract_raw | 138.931818 | 86.789123 | -52.142695 |
+| stage5_canonicalize | 132.409393 | 102.331004 | -30.078389 |
+| stage6_export_counts | 123.052012 | 123.082176 | +0.030164 |
+| total_pipeline | 647.865500 | 526.698593 | -121.166907 |
+
+Validation:
+
+- `fact_total_equal`: true
+- `fact_type_counts_equal`: true
+- `table_row_counts_equal`: true
+
+Interpretation:
+
+- The code change directly targets Stage 4/5 JSONL serialization and produced a
+  Stage 4/5 combined improvement of about `82.2s` on 50K captions.
+- The Stage 3 improvement in this run is likely runtime variance rather than a
+  result of the schema change.
+- After this change, the largest remaining controllable costs are Stage 3
+  parsing and Stage 6 aggregate counting; Stage 4/5 are still meaningful but no
+  longer dominated by `dataclasses.asdict()`.
+
+## Experiment 8: Throttled Runtime Memory Checks
+
+Profile source:
+
+- `/mnt/nvme/gpic_speed_tests/stage45_profile_20260719T105352Z`
+
+The same cProfile run showed another avoidable Stage 5 cost:
+`ProgressWriter.check_memory()` called `/proc/self/status` through
+`current_rss_kib()` for every raw mention and edge. That preserves the memory
+safety guard, but it turns RSS polling into a hot loop.
+
+Change:
+
+- `MemorySafetyConfig` now has
+  `memory_check_min_interval_seconds = 1.0`.
+- `ProgressWriter.check_memory()` keeps the last check timestamp and skips RSS
+  reads until the interval expires, unless `force=True` is passed.
+- The safety limit and progress JSON memory reporting remain in the shared
+  Stage 4/5/6 path.
+- Tests cover the throttle behavior and progress JSON metadata.
+
+Run:
+
+- `/mnt/nvme/gpic_speed_tests/full50k_fixedlex_memory_discard_20260719T114948Z`
+
+Conditions:
+
+- Same as Experiment 7: fixed current inventory, NVMe output, memory Stage 6
+  backend, and `--stage6-facts-output-mode discard`.
+
+Result:
+
+- Total pipeline: `462.962737s`
+- Throughput: `108.000053 captions/s`
+- Stage 4: `83.026928s`
+- Stage 5: `46.615288s`
+- Stage 6: `119.219013s`
+
+Comparison with Experiment 7:
+
+| Metric | Before | After | Delta |
+| --- | ---: | ---: | ---: |
+| stage3_sentence | 187.264461 | 186.927990 | -0.336471 |
+| stage4_extract_raw | 86.789123 | 83.026928 | -3.762195 |
+| stage5_canonicalize | 102.331004 | 46.615288 | -55.715716 |
+| stage6_export_counts | 123.082176 | 119.219013 | -3.863163 |
+| total_pipeline | 526.698593 | 462.962737 | -63.735856 |
+
+Validation:
+
+- `fact_total_equal`: true
+- `fact_type_counts_equal`: true
+- `table_row_counts_equal`: true
+- Stage 6 count integrity: `ok`
+- `facts.jsonl` absent as expected in discard mode
+
+Interpretation:
+
+- The Stage 5 RSS polling bottleneck was real. Throttling memory checks in the
+  shared `ProgressWriter` path preserves the guard while avoiding millions of
+  `/proc` reads.
+- Stage 3 is now the dominant fixed-lexicon cost on 50K, followed by Stage 6
+  aggregate counting. Stage 4/5 combined dropped to about `129.6s`.

@@ -6,7 +6,7 @@ canonicalization, repair, or counting.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, fields
 import json
 from typing import Any, Literal, TypeAlias
 
@@ -77,6 +77,15 @@ FACT_TYPES = frozenset(
 )
 CANONICAL_SOURCES = frozenset(("lexicon", "raw_fallback", "gpic_observed_inventory"))
 PARENT_SOURCES = frozenset(("lexicon", "selected_oewn_hypernym"))
+_JSON_RECORD_FIELD_NAMES: dict[type[object], tuple[str, ...]] = {}
+
+
+def _json_record_field_names(record_type: type[object]) -> tuple[str, ...]:
+    names = _JSON_RECORD_FIELD_NAMES.get(record_type)
+    if names is None:
+        names = tuple(field_info.name for field_info in fields(record_type))
+        _JSON_RECORD_FIELD_NAMES[record_type] = names
+    return names
 
 
 def make_local_id(prefix: Literal["m", "e", "f"], index: int) -> str:
@@ -168,7 +177,7 @@ class JsonRecord:
     """Base mixin for JSONL-friendly records."""
 
     def to_dict(self) -> JsonObject:
-        return asdict(self)
+        return {name: getattr(self, name) for name in _json_record_field_names(type(self))}
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True)

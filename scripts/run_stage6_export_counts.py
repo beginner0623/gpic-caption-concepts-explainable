@@ -59,6 +59,16 @@ def parse_args() -> argparse.Namespace:
             "the cgroup/explicit RSS safety limit instead of a fixed row count."
         ),
     )
+    parser.add_argument(
+        "--facts-output-mode",
+        choices=("write", "discard"),
+        default="write",
+        help=(
+            "Stage 6 fact row output mode. write preserves production facts.jsonl; "
+            "discard skips facts.jsonl serialization/write for bounded diagnostics "
+            "while still accumulating and validating count tables."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -73,6 +83,7 @@ def main() -> None:
         count_backend=args.count_backend,
         sqlite_db_path=Path(args.sqlite_db) if args.sqlite_db else None,
         sqlite_cache_rows=args.sqlite_cache_rows,
+        facts_output_mode=args.facts_output_mode,
     )
     print(summary)
 

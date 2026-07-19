@@ -192,6 +192,16 @@ def parse_args() -> argparse.Namespace:
             "Defaults to adaptive RSS flushing."
         ),
     )
+    parser.add_argument(
+        "--stage6-facts-output-mode",
+        choices=("write", "discard"),
+        default="write",
+        help=(
+            "Whether Stage 6 should write facts.jsonl. Use discard only for "
+            "fixed-lexicon count-speed experiments that do not need a markdown "
+            "case report or fact-row handoff."
+        ),
+    )
     gpu_group = parser.add_mutually_exclusive_group()
     gpu_group.add_argument(
         "--prefer-gpu",
@@ -235,6 +245,7 @@ def main() -> None:
             max_monolithic_stage456_captions=args.max_monolithic_stage456_captions,
             stage6_count_backend=args.stage6_count_backend,
             stage6_sqlite_cache_rows=args.stage6_sqlite_cache_rows,
+            stage6_facts_output_mode=args.stage6_facts_output_mode,
         )
     except BaseException as exc:
         if progress_output is not None:
@@ -335,6 +346,7 @@ def run_mixed_caption_pipeline(
     max_monolithic_stage456_captions: int = DEFAULT_MAX_MONOLITHIC_STAGE456_CAPTIONS,
     stage6_count_backend: str = "sqlite",
     stage6_sqlite_cache_rows: int | None = None,
+    stage6_facts_output_mode: str = "write",
 ) -> dict[str, Any]:
     total_start = time.perf_counter()
     timing_seconds: dict[str, float] = {}
@@ -368,6 +380,10 @@ def run_mixed_caption_pipeline(
         raise ValueError("stage6_count_backend must be one of: sqlite, memory")
     if stage6_sqlite_cache_rows is not None and stage6_sqlite_cache_rows < 1:
         raise ValueError("stage6_sqlite_cache_rows must be greater than zero")
+    if stage6_facts_output_mode not in {"write", "discard"}:
+        raise ValueError("stage6_facts_output_mode must be one of: write, discard")
+    if md_report is not None and stage6_facts_output_mode != "write":
+        raise ValueError("md_report requires stage6_facts_output_mode='write'")
     if action_inventory is None and not allow_runtime_action_lookup_preview:
         raise ValueError(
             "action_inventory is required for formal mixed pipeline Stage 4; "
@@ -532,6 +548,7 @@ def run_mixed_caption_pipeline(
         progress_path=stage6_dir / "progress.json",
         count_backend=stage6_count_backend,
         sqlite_cache_rows=stage6_sqlite_cache_rows,
+        facts_output_mode=stage6_facts_output_mode,
     )
     mark_timing("stage6_export_counts", stage_start)
     write_progress("stage6_export_counts_complete", stage6=stage6_summary)

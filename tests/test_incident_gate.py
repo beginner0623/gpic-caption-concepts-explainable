@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -237,6 +238,26 @@ class IncidentGateTest(unittest.TestCase):
             "verified \u2713",
             resolved["verification_command_result"]["stdout_tail"],
         )
+
+    def test_history_append_permission_error_uses_fallback_history_file(self) -> None:
+        calls = []
+
+        def fake_append(path: Path, payload: dict) -> None:
+            calls.append((path, payload))
+            if len(calls) == 1:
+                raise PermissionError("history locked")
+
+        with patch.object(gate, "append_jsonl", side_effect=fake_append):
+            result = gate.write_history_with_fallback(
+                self.state_dir / "incident_history.jsonl",
+                {"status": "resolved"},
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["history_path"], str(self.state_dir / "incident_history.jsonl"))
+        self.assertIn("incident_history_fallback_", result["history_fallback_path"])
+        self.assertIn("history_append_error", result)
+        self.assertIn("history_append_error", calls[1][1])
 
     def test_explicit_timeout_failure_is_recorded_before_hard_exit(self) -> None:
         with gate.PipelineRun("timeout-test", state_dir=self.state_dir):

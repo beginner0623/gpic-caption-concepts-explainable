@@ -87,6 +87,60 @@ class BackgroundJobIncidentGateTest(unittest.TestCase):
 
         popen.assert_not_called()
 
+    def test_windows_ps1_child_is_invoked_through_powershell(self) -> None:
+        args = self.args()
+        args.job_args = [
+            "--",
+            ".\\scripts\\run_python.ps1",
+            "scripts\\safe_probe.py",
+            "probe.sh",
+        ]
+        process = Mock(pid=4321)
+
+        with (
+            patch.object(background.os, "name", "nt"),
+            patch.object(background.subprocess, "Popen", return_value=process) as popen,
+        ):
+            result = background.start_job(args)
+
+        self.assertEqual(result, 0)
+        command = popen.call_args.args[0]
+        marker = command.index("--")
+        child_command = command[marker + 1 :]
+        self.assertTrue(child_command[0].lower().endswith("powershell.exe"))
+        self.assertEqual(
+            child_command[1:6],
+            [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                ".\\scripts\\run_python.ps1",
+            ],
+        )
+        self.assertEqual(
+            child_command[6:],
+            ["scripts\\safe_probe.py", "probe.sh"],
+        )
+
+    def test_local_detached_mlxp_runner_is_rejected(self) -> None:
+        args = self.args()
+        args.job_args = [
+            "--",
+            ".\\scripts\\run_python.ps1",
+            "scripts\\run_mlxp_bash.py",
+            "long_remote_job.sh",
+        ]
+
+        with (
+            patch.object(background.os, "name", "nt"),
+            patch.object(background.subprocess, "Popen") as popen,
+            self.assertRaisesRegex(SystemExit, "Do not wrap scripts/run_mlxp_bash.py"),
+        ):
+            background.start_job(args)
+
+        popen.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

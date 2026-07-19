@@ -132,6 +132,29 @@ class MixedCaptionPipelineTest(unittest.TestCase):
                 stage6_count_backend="bogus",
             )
 
+    def test_formal_pipeline_rejects_invalid_stage6_facts_output_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "stage6_facts_output_mode"):
+            self.module.run_mixed_caption_pipeline(
+                input_paths=[self.tmp_path / "missing.jsonl"],
+                output_dir=self.tmp_path / "out",
+                object_inventory=self.tmp_path / "object.tsv",
+                attribute_inventory=self.tmp_path / "attribute.tsv",
+                action_inventory=None,
+                stage6_facts_output_mode="bogus",
+            )
+
+    def test_formal_pipeline_rejects_md_report_when_stage6_facts_are_discarded(self) -> None:
+        with self.assertRaisesRegex(ValueError, "md_report requires"):
+            self.module.run_mixed_caption_pipeline(
+                input_paths=[self.tmp_path / "missing.jsonl"],
+                output_dir=self.tmp_path / "out",
+                object_inventory=self.tmp_path / "object.tsv",
+                attribute_inventory=self.tmp_path / "attribute.tsv",
+                action_inventory=None,
+                md_report=self.tmp_path / "report.md",
+                stage6_facts_output_mode="discard",
+            )
+
     def test_formal_pipeline_requires_stage5_lexicon_bundle_state_before_running(self) -> None:
         object_inventory = self.tmp_path / "object.tsv"
         action_inventory = self.tmp_path / "action.tsv"

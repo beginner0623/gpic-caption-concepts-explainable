@@ -62,6 +62,11 @@ Preferred remote execution patterns:
 
 - use direct argv commands:
   `kubectl -n <ns> exec <pod> -- git -C /root/work/repo status --short`
+- when running `kubectl exec` from PowerShell, do not append shell pipes such as
+  `| grep` to the command. PowerShell interprets the pipe locally after
+  `kubectl` returns. Either print the bounded remote output directly, use
+  `scripts\run_mlxp_bash.py <script.sh>` for remote shell filtering, or filter
+  intentionally with PowerShell-native commands after capturing the output.
 - from this Windows/Codex desktop workspace, use
   `scripts\run_python.ps1 scripts\run_script_with_timeout.py --timeout-seconds <N> -- scripts\run_mlxp_bash.py <script.sh>`
   for bounded multi-step MLXP diagnostics. For formal Stage 4/5/6 or another
@@ -74,6 +79,26 @@ Preferred remote execution patterns:
   and no BOM, copy it to the pod, then execute that script explicitly
 - if stdin script execution is used, first verify no BOM/CRLF issue with a
   bounded `pwd`, `whoami`, and `hostname` probe
+- for remote patch transfer, do not create `git apply` patch files with
+  PowerShell `Set-Content`. Use `git diff --output <patch>` or another
+  byte-preserving writer, verify the first bytes are not `EF BB BF`, and run
+  `git apply --check` inside the pod before applying.
+- when running Python tests or scripts directly inside the MLXP repo, set
+  `PYTHONPATH=<remote_repo>/src${PYTHONPATH:+:$PYTHONPATH}` unless the command
+  is executed through a wrapper that is already verified to add the source tree.
+  Local `scripts\run_python.ps1` hides this requirement on Windows; the remote
+  pod does not. A remote test failure with `ModuleNotFoundError:
+  gpic_concepts_v1` is an execution-environment mistake, not a code failure.
+- if an incident-clear verification command would need to pass another command
+  containing its own `--`, prefer running the verification as a separate
+  bounded probe and then clear with the captured evidence. Nested argparse
+  remainder parsing is easy to misroute.
+- clearing an incident mutates `.pipeline_state`. In migrated desktop sessions,
+  the active repo may be outside the sandbox writable roots even when tests can
+  run through approved wrappers. If `incident_gate.py clear` raises
+  `PermissionError` while writing `.pipeline_state`, confirm the active repo
+  path and rerun the clear command with explicit sandbox escalation; do not
+  misdiagnose it as pipeline data corruption or a remote failure.
 
 Before trusting a remote command result, verify the execution context with
 command evidence from inside the pod:
@@ -665,6 +690,12 @@ broken. First verify with the same bounded command outside the sandbox and, when
 useful, with a narrow `run_python.ps1 -c` write probe.
 
 Do not run an all-in-one diagnostic group. Run one bounded group at a time.
+
+For syntax-only validation of a small edited file set, prefer
+`run_python.ps1 -c` with `ast.parse()` over `python -m compileall`.
+`compileall` writes `__pycache__` files and can fail with unrelated
+`PermissionError` or file-lock issues in this workspace. Use `compileall` only
+when bytecode generation itself is the thing being tested.
 
 Do not use `scripts\run_python.ps1 -m unittest` or
 `scripts\run_python.ps1 -m pytest` as a validation runner. `run_python.ps1`

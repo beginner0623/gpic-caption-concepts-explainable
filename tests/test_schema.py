@@ -1,5 +1,6 @@
 import json
 import unittest
+from dataclasses import asdict
 
 from gpic_concepts_v1.schema import (
     PIPELINE_VERSION,
@@ -72,6 +73,8 @@ class SchemaTest(unittest.TestCase):
 
         self.assertEqual(mention.stage, 4)
         self.assertEqual(edge.source_mention_id, "m1")
+        self.assertEqual(mention.to_dict(), asdict(mention))
+        self.assertEqual(edge.to_dict(), asdict(edge))
 
     def test_canonical_records(self) -> None:
         mention = CanonicalMention(
@@ -103,6 +106,8 @@ class SchemaTest(unittest.TestCase):
 
         self.assertEqual(mention.parent_concepts, ["animal"])
         self.assertEqual(edge.canonical_label, "on")
+        self.assertEqual(mention.to_dict(), asdict(mention))
+        self.assertEqual(edge.to_dict(), asdict(edge))
 
     def test_missing_endpoint_ids_are_only_for_ambiguous_relation_candidates(self) -> None:
         raw_edge = RawEdge(

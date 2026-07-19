@@ -81,6 +81,8 @@ def start_job(args: argparse.Namespace) -> int:
         job_args = job_args[1:]
     if not job_args:
         raise SystemExit("start requires a command after --")
+    job_args = normalize_child_command(job_args)
+    reject_local_detached_mlxp_command(job_args)
 
     cwd = Path(args.cwd).resolve()
     if not cwd.exists():
@@ -225,6 +227,45 @@ def adopt_job(args: argparse.Namespace) -> int:
     write_json_atomic(pid_path, record)
     print(json.dumps(record, ensure_ascii=False, sort_keys=True))
     return 0
+
+
+def normalize_child_command(job_args: list[str]) -> list[str]:
+    if os.name != "nt" or not job_args:
+        return job_args
+    executable = job_args[0]
+    if not executable.lower().endswith(".ps1"):
+        return job_args
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    powershell = (
+        Path(system_root)
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    return [
+        str(powershell),
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        executable,
+        *job_args[1:],
+    ]
+
+
+def reject_local_detached_mlxp_command(job_args: list[str]) -> None:
+    if any(is_run_mlxp_bash_arg(arg) for arg in job_args):
+        raise SystemExit(
+            "Do not wrap scripts/run_mlxp_bash.py in a local detached background "
+            "job. Launch long MLXP work inside the pod and poll its progress "
+            "from a separate guarded probe."
+        )
+
+
+def is_run_mlxp_bash_arg(arg: str) -> bool:
+    normalized = arg.replace("\\", "/").lower()
+    return normalized == "run_mlxp_bash.py" or normalized.endswith("/run_mlxp_bash.py")
 
 
 def process_is_running(pid: int) -> bool:

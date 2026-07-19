@@ -19,6 +19,11 @@ class MemorySafetyConfig:
     memory_limit_gib: float | None = None
     rss_limit_fraction: float = 0.75
     rss_reserve_gib: float = 16.0
+    memory_check_min_interval_seconds: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.memory_check_min_interval_seconds < 0:
+            raise ValueError("memory_check_min_interval_seconds must be non-negative")
 
     @property
     def resolved_memory_limit_gib(self) -> float | None:
@@ -58,6 +63,7 @@ class ProgressWriter:
         self.stage_name = stage_name
         self.memory_config = memory_config
         self.started_at = time.time()
+        self._last_memory_check_at: float | None = None
 
     def write(
         self,
@@ -92,6 +98,9 @@ class ProgressWriter:
             "rss_limit_fraction": self.memory_config.rss_limit_fraction,
             "rss_reserve_gib": self.memory_config.rss_reserve_gib,
             "max_rss_gib": self.memory_config.effective_max_rss_gib,
+            "memory_check_min_interval_seconds": (
+                self.memory_config.memory_check_min_interval_seconds
+            ),
         }
         if metrics:
             payload.update(dict(metrics))
@@ -109,11 +118,27 @@ class ProgressWriter:
             json.dump(payload, handle, ensure_ascii=False, sort_keys=True, indent=2)
             handle.write("\n")
 
-    def check_memory(self, *, phase: str, metrics: Mapping[str, Any] | None = None) -> None:
+    def check_memory(
+        self,
+        *,
+        phase: str,
+        metrics: Mapping[str, Any] | None = None,
+        force: bool = False,
+    ) -> None:
+        now = time.monotonic()
+        interval = self.memory_config.memory_check_min_interval_seconds
+        if (
+            not force
+            and interval > 0
+            and self._last_memory_check_at is not None
+            and now - self._last_memory_check_at < interval
+        ):
+            return
         raise_if_rss_limit_exceeded(
             max_rss_gib=self.memory_config.effective_max_rss_gib,
             context={"stage": self.stage_name, "phase": phase, **dict(metrics or {})},
         )
+        self._last_memory_check_at = now
 
 
 def effective_max_rss_gib(
