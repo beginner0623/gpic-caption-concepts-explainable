@@ -384,6 +384,8 @@ class Stage5CanonicalizeTest(unittest.TestCase):
             self.assertEqual(summary["canonical_edge_total"], 1)
             self.assertEqual(len(list(iter_jsonl(canonical_mentions_path))), 2)
             self.assertEqual(len(list(iter_jsonl(canonical_edges_path))), 1)
+            self.assertNotIn('": ', canonical_mentions_path.read_text(encoding="utf-8"))
+            self.assertNotIn('": ', canonical_edges_path.read_text(encoding="utf-8"))
             self.assertEqual(list(iter_jsonl(summary_path))[0]["canonical_edge_total"], 1)
 
             loaded = load_stage5_lexicons(lexicon_dir)

@@ -9,6 +9,7 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+import tempfile
 import traceback
 from typing import Any, TypeVar
 import uuid
@@ -103,15 +104,35 @@ def write_history_with_fallback(path: Path, payload: dict[str, Any]) -> dict[str
         append_jsonl(path, payload)
         return {"history_path": str(path), "history_fallback_path": ""}
     except PermissionError as exc:
-        fallback = path.with_name(
-            f"{HISTORY_FALLBACK_PREFIX}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex}.jsonl",
-        )
-        append_jsonl(fallback, {**payload, "history_append_error": repr(exc)})
-        return {
-            "history_path": str(path),
-            "history_fallback_path": str(fallback),
-            "history_append_error": repr(exc),
-        }
+        first_error = repr(exc)
+    fallback_errors: list[str] = []
+    for fallback in _history_fallback_candidates(path):
+        try:
+            append_jsonl(fallback, {**payload, "history_append_error": first_error})
+            return {
+                "history_path": str(path),
+                "history_fallback_path": str(fallback),
+                "history_append_error": first_error,
+                "history_fallback_errors": fallback_errors,
+            }
+        except PermissionError as fallback_exc:
+            fallback_errors.append(f"{fallback}: {fallback_exc!r}")
+    raise PermissionError(
+        "could not write incident history or fallback history files: "
+        + "; ".join([first_error, *fallback_errors])
+    )
+
+
+def _history_fallback_candidates(path: Path) -> list[Path]:
+    file_name = (
+        f"{HISTORY_FALLBACK_PREFIX}_"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_"
+        f"{uuid.uuid4().hex}.jsonl"
+    )
+    return [
+        path.with_name(file_name),
+        Path(tempfile.gettempdir()) / file_name,
+    ]
 
 
 def redact_argv(argv: Sequence[str]) -> list[str]:
@@ -443,6 +464,7 @@ def clear_incident(
             command = command[1:]
         if not command:
             raise IncidentGateError("--verify-command requires a command")
+        reject_direct_powershell_script_command(command)
         verification_env = os.environ.copy()
         verification_env[STATE_DIR_ENV] = str(directory)
         verification_env[VERIFICATION_INCIDENT_ENV] = str(incident.get("incident_id", ""))
@@ -481,6 +503,17 @@ def clear_incident(
     incident_path(directory).unlink(missing_ok=True)
     running_path(directory).unlink(missing_ok=True)
     return resolved
+
+
+def reject_direct_powershell_script_command(command: Sequence[str]) -> None:
+    executable = command[0] if command else ""
+    if executable.lower().endswith(".ps1"):
+        raise IncidentGateError(
+            "Incident verification command cannot execute a .ps1 script "
+            "directly. Python subprocess on Windows treats .ps1 files as "
+            "non-executable and raises WinError 193. Use python.exe directly "
+            "for Python scripts, or invoke powershell.exe -File explicitly."
+        )
 
 
 def run_command(args: argparse.Namespace) -> int:

@@ -16,27 +16,26 @@ from run_mlxp_bash import (  # noqa: E402
     DEFAULT_NAMESPACE,
     DEFAULT_POD_ENV,
     DEFAULT_POD_PREFIX_ENV,
-    DEFAULT_POD,
-    _normalize_bash_newlines,
+    _decode_process_output,
     _preflight_pod_running,
+    _preflight_wsl_access,
     _resolve_target_pod,
-    _strip_utf_bom,
 )
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run a bounded read-only MLXP probe script without opening an "
-            "incident on transient observation failures. Formal pipeline work "
-            "must still use scripts/run_mlxp_bash.py."
+            "Copy a local file into the active MLXP pod through WSL kubectl. "
+            "Use --pod-prefix to avoid stale exact pod names."
         ),
     )
-    parser.add_argument("script", type=Path)
+    parser.add_argument("local_source", type=Path)
+    parser.add_argument("remote_destination")
     parser.add_argument("--namespace", default=DEFAULT_NAMESPACE)
     parser.add_argument(
         "--pod",
-        default=DEFAULT_POD,
+        default=None,
         help=f"Target MLXP pod. Required unless {DEFAULT_POD_ENV} is set.",
     )
     parser.add_argument(
@@ -48,58 +47,65 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--kubectl", default=DEFAULT_KUBECTL)
-    parser.add_argument("--timeout-seconds", type=int, default=60)
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.timeout_seconds < 1:
-        raise SystemExit("--timeout-seconds must be greater than zero")
+    source = args.local_source.expanduser().resolve()
+    if not source.exists():
+        raise SystemExit(f"missing local source: {source}")
+    if ":" in args.remote_destination:
+        raise SystemExit("remote_destination must be a path inside the pod, not pod:/path")
+
     pod = _resolve_target_pod(
         explicit_pod=args.pod or os.environ.get(DEFAULT_POD_ENV),
         pod_prefix=args.pod_prefix or os.environ.get(DEFAULT_POD_PREFIX_ENV),
         namespace=args.namespace,
         kubectl=args.kubectl,
     )
-    if not args.script.exists():
-        raise SystemExit(f"missing script: {args.script}")
-    if not args.script.name.startswith("probe_"):
-        raise SystemExit(
-            "run_mlxp_probe_bash.py only accepts probe_*.sh scripts; "
-            "use run_mlxp_bash.py for formal remote work."
-        )
-
-    payload = _normalize_bash_newlines(_strip_utf_bom(args.script.read_bytes()))
-    pod_preflight_returncode = _preflight_pod_running(
+    wsl_preflight = _preflight_wsl_access()
+    if wsl_preflight != 0:
+        return wsl_preflight
+    pod_preflight = _preflight_pod_running(
         kubectl=args.kubectl,
         namespace=args.namespace,
         pod=pod,
     )
-    if pod_preflight_returncode != 0:
-        return pod_preflight_returncode
+    if pod_preflight != 0:
+        return pod_preflight
+
+    wsl_source = _to_wsl_path(source)
     command = [
         "wsl",
         "-e",
         args.kubectl,
         "-n",
         args.namespace,
-        "exec",
-        "-i",
-        pod,
-        "--",
-        "bash",
-        "-s",
+        "cp",
+        wsl_source,
+        f"{pod}:{args.remote_destination}",
     ]
-    try:
-        completed = subprocess.run(command, input=payload, timeout=args.timeout_seconds)
-    except subprocess.TimeoutExpired:
-        print(
-            f"probe timed out after {args.timeout_seconds}s: {args.script}",
-            file=sys.stderr,
-        )
-        return 124
+    completed = subprocess.run(command)
     return int(completed.returncode)
+
+
+def _to_wsl_path(path: Path) -> str:
+    completed = subprocess.run(
+        ["wsl", "-e", "wslpath", "-a", str(path)],
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        stdout = _decode_process_output(completed.stdout)
+        stderr = _decode_process_output(completed.stderr)
+        raise SystemExit(
+            "failed to convert local path to WSL path before kubectl cp.\n"
+            f"path={path}\n"
+            f"returncode={completed.returncode}\n"
+            f"stdout={stdout[-1000:]}\n"
+            f"stderr={stderr[-1000:]}"
+        )
+    return _decode_process_output(completed.stdout).strip()
 
 
 if __name__ == "__main__":

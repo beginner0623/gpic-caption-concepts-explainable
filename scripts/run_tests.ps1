@@ -4,18 +4,15 @@ $Root = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 $ScratchBase = if ($env:GPIC_TEST_TEMP_ROOT) {
     $env:GPIC_TEST_TEMP_ROOT
 } else {
-    $CreatorTemp = "C:\Users\Public\Documents\ESTsoft\CreatorTemp"
-    if (Test-Path -LiteralPath $CreatorTemp) {
-        Join-Path $CreatorTemp "gpic-explainable-link-tests"
-    } else {
-        Join-Path (Split-Path -Parent $Root) ".gpic_tmp\gpic-explainable-link-tests"
-    }
+    Join-Path $Root "outputs\.test_tmp\gpic-explainable-link-tests"
 }
-$TempRoot = (New-Item -ItemType Directory -Force -Path $ScratchBase).FullName
+$ScratchRoot = (New-Item -ItemType Directory -Force -Path $ScratchBase).FullName
+$TempRoot = (New-Item -ItemType Directory -Force -Path (Join-Path $ScratchRoot ("run-" + [guid]::NewGuid().ToString("N")))).FullName
 
 $env:TMP = $TempRoot
 $env:TEMP = $TempRoot
 $env:TMPDIR = $TempRoot
+$env:GPIC_TEST_TEMP_ROOT = $TempRoot
 $env:PYTHONDONTWRITEBYTECODE = "1"
 
 $RunPython = Join-Path $PSScriptRoot "run_python.ps1"

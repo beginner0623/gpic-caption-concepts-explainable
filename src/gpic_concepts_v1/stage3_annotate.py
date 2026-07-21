@@ -38,6 +38,7 @@ except ModuleNotFoundError:  # pragma: no cover - keeps non-spaCy tests importab
 
 DEFAULT_STAGE3_MODEL = "en_core_web_trf"
 DEFAULT_STAGE3_BATCH_SIZE = 128
+DEFAULT_STAGE3_DISABLED_COMPONENTS = ("ner",)
 
 TAG_RULE_ID = "R6"
 PARSER_RULE_ID = "R8"
@@ -120,6 +121,7 @@ def make_stage3_nlp(
     model: str = DEFAULT_STAGE3_MODEL,
     *,
     gpu_mode: str = "none",
+    disabled_components: Sequence[str] | None = None,
 ) -> Language:
     """Load the Stage 3 spaCy model."""
     if spacy is None:
@@ -127,8 +129,9 @@ def make_stage3_nlp(
             "Stage 3 requires spaCy. Install/use the project environment."
         )
     gpu_info = _configure_spacy_gpu(gpu_mode)
+    disabled = normalize_stage3_disabled_components(disabled_components)
     try:
-        nlp = spacy.load(model, disable=["ner"])
+        nlp = spacy.load(model, disable=list(disabled))
     except OSError as exc:
         raise Stage3DependencyError(
             f"Could not load spaCy model {model!r}. Run scripts/setup_env.ps1."
@@ -137,7 +140,35 @@ def make_stage3_nlp(
     nlp.meta["gpic_model_id"] = model
     nlp.meta["gpic_gpu_mode"] = gpu_info["gpu_mode"]
     nlp.meta["gpic_gpu_enabled"] = gpu_info["gpu_enabled"]
+    nlp.meta["gpic_disabled_components"] = list(disabled)
+    nlp.meta["gpic_enabled_components"] = list(nlp.pipe_names)
     return nlp
+
+
+def normalize_stage3_disabled_components(
+    disabled_components: Sequence[str] | str | None = None,
+) -> tuple[str, ...]:
+    """Return the normalized spaCy components disabled for Stage 3.
+
+    The default intentionally keeps the historical behavior: NER is disabled
+    because Stage 3 records POS, morphology, dependency, lemma, and noun chunks,
+    but it does not consume entity spans.
+    """
+    if disabled_components is None:
+        values: Sequence[str] = DEFAULT_STAGE3_DISABLED_COMPONENTS
+    elif isinstance(disabled_components, str):
+        values = disabled_components.split(",")
+    else:
+        values = disabled_components
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = value.strip()
+        if not item or item in seen:
+            continue
+        normalized.append(item)
+        seen.add(item)
+    return tuple(normalized)
 
 
 def annotate_gpic_sentence_row(
@@ -222,6 +253,7 @@ def run_stage3_annotate(
     limit: int | None = None,
     batch_size: int = DEFAULT_STAGE3_BATCH_SIZE,
     gpu_mode: str = "none",
+    disabled_components: Sequence[str] | str | None = None,
     caption_shape: str = "sentence",
     progress_output: str | Path | None = None,
     progress_interval_records: int = 5000,
@@ -245,13 +277,21 @@ def run_stage3_annotate(
         total=0,
         elapsed_seconds=round(perf_counter() - started, 3),
     )
-    nlp = make_stage3_nlp(model, gpu_mode=gpu_mode)
+    model_load_start = perf_counter()
+    nlp = make_stage3_nlp(
+        model,
+        gpu_mode=gpu_mode,
+        disabled_components=disabled_components,
+    )
+    model_load_seconds = perf_counter() - model_load_start
 
     span_counts: Counter[str] = Counter()
     token_total = 0
     noun_chunk_total = 0
     tag_segment_total = 0
     total = 0
+    timing = Stage3Timing()
+    annotation_start = perf_counter()
     _write_stage3_progress(
         progress_path,
         status="running",
@@ -263,6 +303,8 @@ def run_stage3_annotate(
         batch_size=batch_size,
         gpu_mode=nlp.meta.get("gpic_gpu_mode", gpu_mode),
         gpu_enabled=bool(nlp.meta.get("gpic_gpu_enabled", False)),
+        disabled_components=nlp.meta.get("gpic_disabled_components", []),
+        enabled_components=nlp.meta.get("gpic_enabled_components", []),
         total=0,
         elapsed_seconds=round(perf_counter() - started, 3),
     )
@@ -281,6 +323,7 @@ def run_stage3_annotate(
                 nlp=nlp,
                 batch_size=batch_size,
                 limit=limit,
+                timing=timing,
             )
         for record in records:
             total += 1
@@ -303,6 +346,8 @@ def run_stage3_annotate(
                     batch_size=batch_size,
                     gpu_mode=nlp.meta.get("gpic_gpu_mode", gpu_mode),
                     gpu_enabled=bool(nlp.meta.get("gpic_gpu_enabled", False)),
+                    disabled_components=nlp.meta.get("gpic_disabled_components", []),
+                    enabled_components=nlp.meta.get("gpic_enabled_components", []),
                     total=total,
                     token_total=token_total,
                     noun_chunk_total=noun_chunk_total,
@@ -311,7 +356,13 @@ def run_stage3_annotate(
                 )
             yield record
 
-    written = write_jsonl(output_path, iter_records())
+    written = write_jsonl(output_path, iter_records(), sort_keys=False, compact=True)
+    annotation_and_write_seconds = perf_counter() - annotation_start
+    total_seconds = perf_counter() - started
+    record_build_json_write_seconds = max(
+        0.0,
+        annotation_and_write_seconds - timing.stage2_seconds - timing.stage3_seconds,
+    )
     summary = {
         "total": total,
         "written": written,
@@ -320,11 +371,31 @@ def run_stage3_annotate(
         "caption_shape": caption_shape,
         "gpu_mode": nlp.meta.get("gpic_gpu_mode", gpu_mode),
         "gpu_enabled": bool(nlp.meta.get("gpic_gpu_enabled", False)),
+        "disabled_components": list(nlp.meta.get("gpic_disabled_components", [])),
+        "enabled_components": list(nlp.meta.get("gpic_enabled_components", [])),
         "output_path": str(output_path),
         "token_total": token_total,
         "noun_chunk_total": noun_chunk_total,
         "tag_segment_total": tag_segment_total,
         "protected_span_counts": dict(sorted(span_counts.items())),
+        "timing_seconds": {
+            "total": round(total_seconds, 6),
+            "model_load": round(model_load_seconds, 6),
+            "annotation_and_write": round(annotation_and_write_seconds, 6),
+            "stage2_prepare": round(timing.stage2_seconds, 6),
+            "spacy_pipe": round(timing.stage3_seconds, 6),
+            "record_build_json_write_overhead": round(record_build_json_write_seconds, 6),
+        },
+        "timing_counts": {
+            "stage2_doc_count": timing.stage2_doc_count,
+            "stage3_doc_count": timing.stage3_doc_count,
+            "stage3_batch_count": timing.stage3_batch_count,
+            "profile_scope": (
+                "sentence_stage2_spacy_record_write"
+                if caption_shape == "sentence"
+                else "tag_list_total_only"
+            ),
+        },
     }
     if summary_path is not None:
         write_jsonl(summary_path, [summary])

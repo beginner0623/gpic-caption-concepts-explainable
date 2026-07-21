@@ -109,6 +109,8 @@ def _raise_if_forbidden_timeout_target(
         return
     if script_path.name not in STAGE456_TIMEOUT_GUARDED_SCRIPTS:
         return
+    if script_path.name == "run_mixed_caption_pipeline.py" and _has_flag(script_args, "--dry-run"):
+        return
     hint = ""
     if _has_explicit_small_limit(script_args):
         hint = (
@@ -131,6 +133,10 @@ def _has_explicit_small_limit(script_args: list[str]) -> bool:
         if arg.startswith("--limit="):
             return _safe_int(arg.split("=", 1)[1]) is not None
     return False
+
+
+def _has_flag(script_args: list[str], flag: str) -> bool:
+    return flag in script_args
 
 
 def _safe_int(value: str) -> int | None:

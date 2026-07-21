@@ -166,6 +166,12 @@ def run_stage5_canonicalize(
         },
     )
 
+    compact_encoder = json.JSONEncoder(
+        ensure_ascii=False,
+        sort_keys=False,
+        separators=(",", ":"),
+    ).encode
+
     try:
         with open_text(canonical_mentions_output, "wt") as handle:
             for raw_record in iter_jsonl(raw_mentions_path):
@@ -175,7 +181,7 @@ def run_stage5_canonicalize(
                 )
                 raw_mention = _coerce_raw_mention(raw_record)
                 mention = _canonicalize_mention(raw_mention, lexicons=lexicons)
-                handle.write(json.dumps(to_jsonable(mention), ensure_ascii=False, sort_keys=True))
+                handle.write(compact_encoder(to_jsonable(mention)))
                 handle.write("\n")
                 canonical_by_key[(mention.caption_id, mention.mention_id)] = mention
                 canonical_mention_total += 1
@@ -223,7 +229,7 @@ def run_stage5_canonicalize(
                 )
                 raw_edge = _coerce_raw_edge(raw_record)
                 edge = _canonicalize_edge(raw_edge, canonical_by_key=canonical_by_key)
-                handle.write(json.dumps(to_jsonable(edge), ensure_ascii=False, sort_keys=True))
+                handle.write(compact_encoder(to_jsonable(edge)))
                 handle.write("\n")
                 canonical_edge_total += 1
                 edge_counts[edge.edge_type] += 1

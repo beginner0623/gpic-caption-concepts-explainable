@@ -33,6 +33,12 @@ class RunScriptWithTimeoutGuardTest(unittest.TestCase):
             allow_stage456_timeout=True,
         )
 
+    def test_mixed_pipeline_dry_run_is_allowed_through_timeout_wrapper(self) -> None:
+        timeout_script._raise_if_forbidden_timeout_target(
+            Path("scripts/run_mixed_caption_pipeline.py"),
+            ["--dry-run", "--auto-resources"],
+        )
+
     def test_non_stage456_script_is_not_blocked(self) -> None:
         timeout_script._raise_if_forbidden_timeout_target(
             Path("scripts/list_active_background_jobs.py"),

@@ -20,6 +20,28 @@ class JsonlIoTest(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
 
+    def test_write_jsonl_can_skip_key_sorting_for_large_pipeline_records(self) -> None:
+        path = _io_temp_path("unsorted_rows.jsonl")
+        try:
+            count = write_jsonl(path, [{"b": 1, "a": 2}], sort_keys=False)
+
+            self.assertEqual(count, 1)
+            self.assertTrue(path.read_text(encoding="utf-8").startswith('{"b": 1, "a": 2}'))
+            self.assertEqual(list(iter_jsonl(path)), [{"b": 1, "a": 2}])
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_write_jsonl_can_write_compact_rows(self) -> None:
+        path = _io_temp_path("compact_rows.jsonl")
+        try:
+            count = write_jsonl(path, [{"b": 1, "a": 2}], sort_keys=False, compact=True)
+
+            self.assertEqual(count, 1)
+            self.assertEqual(path.read_text(encoding="utf-8"), '{"b":1,"a":2}\n')
+            self.assertEqual(list(iter_jsonl(path)), [{"b": 1, "a": 2}])
+        finally:
+            path.unlink(missing_ok=True)
+
     def test_gzip_jsonl_read(self) -> None:
         path = _io_temp_path("rows.jsonl.gz")
         try:

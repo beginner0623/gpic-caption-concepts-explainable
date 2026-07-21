@@ -1893,6 +1893,8 @@ class Stage4ExtractRawTest(unittest.TestCase):
             self.assertEqual(summary["raw_edge_total"], 1)
             self.assertEqual(len(list(iter_jsonl(raw_mentions_path))), 2)
             self.assertEqual(len(list(iter_jsonl(raw_edges_path))), 1)
+            self.assertNotIn('": ', raw_mentions_path.read_text(encoding="utf-8"))
+            self.assertNotIn('": ', raw_edges_path.read_text(encoding="utf-8"))
             self.assertEqual(list(iter_jsonl(summary_path))[0]["raw_mention_total"], 2)
         finally:
             for path in sorted(tmp_path.rglob("*"), reverse=True):

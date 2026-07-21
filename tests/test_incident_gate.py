@@ -239,6 +239,22 @@ class IncidentGateTest(unittest.TestCase):
             resolved["verification_command_result"]["stdout_tail"],
         )
 
+    def test_clear_verification_rejects_direct_powershell_script(self) -> None:
+        gate.create_incident(
+            failure_type="test_failure",
+            summary="ps1 verification incident",
+            state_dir=self.state_dir,
+        )
+
+        with self.assertRaisesRegex(gate.IncidentGateError, "cannot execute a .ps1"):
+            gate.clear_incident(
+                root_cause="root cause",
+                guard_added="durable guard",
+                verification_evidence="verification command should be explicit",
+                verification_command=[r".\scripts\run_python.ps1", "-c", "print('bad')"],
+                state_dir=self.state_dir,
+            )
+
     def test_history_append_permission_error_uses_fallback_history_file(self) -> None:
         calls = []
 
@@ -258,6 +274,31 @@ class IncidentGateTest(unittest.TestCase):
         self.assertIn("incident_history_fallback_", result["history_fallback_path"])
         self.assertIn("history_append_error", result)
         self.assertIn("history_append_error", calls[1][1])
+
+    def test_history_append_permission_error_uses_temp_fallback_when_state_dir_is_blocked(self) -> None:
+        calls = []
+        temp_fallback_dir = self.tmp / "temp_fallback"
+
+        def fake_append(path: Path, payload: dict) -> None:
+            calls.append((path, payload))
+            if len(calls) <= 2:
+                raise PermissionError("history path blocked")
+
+        with (
+            patch.object(gate, "append_jsonl", side_effect=fake_append),
+            patch.object(gate.tempfile, "gettempdir", return_value=str(temp_fallback_dir)),
+        ):
+            result = gate.write_history_with_fallback(
+                self.state_dir / "incident_history.jsonl",
+                {"status": "resolved"},
+            )
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(result["history_path"], str(self.state_dir / "incident_history.jsonl"))
+        self.assertIn("incident_history_fallback_", result["history_fallback_path"])
+        self.assertTrue(result["history_fallback_path"].startswith(str(temp_fallback_dir)))
+        self.assertEqual(len(result["history_fallback_errors"]), 1)
+        self.assertIn("history_append_error", calls[2][1])
 
     def test_explicit_timeout_failure_is_recorded_before_hard_exit(self) -> None:
         with gate.PipelineRun("timeout-test", state_dir=self.state_dir):

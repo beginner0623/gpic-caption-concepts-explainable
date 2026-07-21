@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from gpic_concepts_v1.io_jsonl import iter_jsonl, write_jsonl
 from gpic_concepts_v1.pipeline_state import artifact_state_path, write_pipeline_state
+from gpic_concepts_v1.runtime_resources import HardwareResources
 
 
 def load_script_module():
@@ -110,6 +111,41 @@ class MixedCaptionPipelineTest(unittest.TestCase):
                 tag_stage3_path=tag_stage3_path,
                 output_path=self.tmp_path / "out.jsonl",
             )
+
+    def test_combine_stage3_preserves_raw_stage3_lines(self) -> None:
+        caption_records_path = self.tmp_path / "caption_records.jsonl"
+        sentence_stage3_path = self.tmp_path / "sentence_stage3.jsonl"
+        tag_stage3_path = self.tmp_path / "tag_stage3.jsonl"
+        output_path = self.tmp_path / "stage3_records.jsonl"
+        write_jsonl(
+            caption_records_path,
+            [
+                {"caption_id": "s1", "caption_shape": "sentence", "skipped": False},
+                {"caption_id": "t1", "caption_shape": "tag_list", "skipped": False},
+            ],
+            sort_keys=False,
+        )
+        sentence_stage3_path.write_text(
+            '{"tokens":[],"caption_id":"s1","meta":{"caption_shape":"sentence"}}\n',
+            encoding="utf-8",
+        )
+        tag_stage3_path.write_text(
+            '  {"meta":{"caption_shape":"tag_list"},"caption_id":"t1","tokens":[]}\n',
+            encoding="utf-8",
+        )
+
+        self.module.combine_stage3_records_in_caption_order(
+            caption_records_path=caption_records_path,
+            sentence_stage3_path=sentence_stage3_path,
+            tag_stage3_path=tag_stage3_path,
+            output_path=output_path,
+        )
+
+        self.assertEqual(
+            output_path.read_text(encoding="utf-8"),
+            '{"tokens":[],"caption_id":"s1","meta":{"caption_shape":"sentence"}}\n'
+            '  {"meta":{"caption_shape":"tag_list"},"caption_id":"t1","tokens":[]}\n',
+        )
 
     def test_formal_pipeline_requires_action_inventory_before_running(self) -> None:
         with self.assertRaisesRegex(ValueError, "action_inventory is required"):
@@ -303,6 +339,206 @@ class MixedCaptionPipelineTest(unittest.TestCase):
         self.assertEqual(progress["stage3_records_written"], 1)
         self.assertEqual(progress["token_total"], 8)
 
+    def test_stage3_gpu_devices_parser(self) -> None:
+        self.assertEqual(self.module._parse_stage3_gpu_devices("0, 1,,2"), ["0", "1", "2"])
+        self.assertEqual(self.module._parse_stage3_gpu_devices(""), [])
+
+    def test_parse_args_tracks_explicit_resource_overrides(self) -> None:
+        args = self.module.parse_args(
+            [
+                "--input",
+                "input.jsonl.gz",
+                "--output-dir",
+                "out",
+                "--object-inventory",
+                "object.tsv",
+                "--attribute-inventory",
+                "attribute.tsv",
+                "--action-inventory",
+                "action.tsv",
+                "--auto-resources",
+                "--stage3-gpu-devices",
+                "0,1",
+                "--stage456-jobs=7",
+                "--stage456-merge-jobs=5",
+            ]
+        )
+
+        self.assertTrue(args.auto_resources)
+        self.assertEqual(
+            args._explicit_resource_options,
+            {"stage3_gpu_devices", "stage456_jobs", "stage456_merge_jobs"},
+        )
+
+    def test_dry_run_auto_resources_does_not_require_inventory_inputs(self) -> None:
+        args = self.module.parse_args(
+            [
+                "--input",
+                "input.jsonl.gz",
+                "--output-dir",
+                "out",
+                "--dry-run",
+                "--auto-resources",
+                "--require-gpu",
+                "--stage6-facts-output-mode",
+                "discard",
+                "--auto-resource-cpu-fraction",
+                "0.5",
+            ]
+        )
+        gpu_mode, stage3_gpu_devices, resource_plan = self.module.apply_runtime_resource_plan(
+            args,
+            hardware=_hardware(cpu_cores=28, gpu_devices=("0", "1")),
+        )
+        summary = self.module.build_mixed_pipeline_dry_run_summary(
+            args,
+            gpu_mode=gpu_mode,
+            stage3_gpu_devices=stage3_gpu_devices,
+            runtime_resource_plan=resource_plan,
+        )
+
+        self.assertEqual(summary["status"], "dry_run")
+        self.assertEqual(summary["projected_args"]["stage3_sentence_shards"], 2)
+        self.assertEqual(summary["projected_args"]["stage3_gpu_devices"], ["0", "1"])
+        self.assertEqual(summary["projected_args"]["stage456_jobs"], 14)
+        self.assertEqual(summary["projected_args"]["stage456_merge_jobs"], 14)
+        self.assertEqual(summary["validation_warnings"], [])
+
+    def test_dry_run_without_auto_resources_reports_current_args_and_hardware(self) -> None:
+        args = self.module.parse_args(
+            [
+                "--input",
+                "input.jsonl.gz",
+                "--output-dir",
+                "out",
+                "--dry-run",
+                "--stage456-shards",
+                "4",
+            ]
+        )
+        gpu_mode, stage3_gpu_devices, resource_plan = self.module.apply_runtime_resource_plan(
+            args,
+            hardware=_hardware(cpu_cores=28, gpu_devices=("0", "1")),
+        )
+        summary = self.module.build_mixed_pipeline_dry_run_summary(
+            args,
+            gpu_mode=gpu_mode,
+            stage3_gpu_devices=stage3_gpu_devices,
+            runtime_resource_plan=resource_plan,
+            hardware=_hardware(cpu_cores=28, gpu_devices=("0", "1")),
+        )
+
+        self.assertFalse(summary["runtime_resource_plan"]["auto_resources_enabled"])
+        self.assertEqual(summary["projected_args"]["stage456_shards"], 4)
+        self.assertIn(
+            "stage456_shards > 1 requires stage6_facts_output_mode='discard'",
+            summary["validation_warnings"],
+        )
+
+    def test_formal_pipeline_rejects_invalid_stage3_shard_count(self) -> None:
+        with self.assertRaisesRegex(ValueError, "stage3_sentence_shards"):
+            self.module.run_mixed_caption_pipeline(
+                input_paths=[self.tmp_path / "missing.jsonl"],
+                output_dir=self.tmp_path / "out",
+                object_inventory=self.tmp_path / "object.tsv",
+                attribute_inventory=self.tmp_path / "attribute.tsv",
+                action_inventory=self.tmp_path / "action.tsv",
+                stage3_sentence_shards=0,
+                stage6_facts_output_mode="discard",
+            )
+
+    def test_standardizes_sharded_stage3_outputs(self) -> None:
+        source_dir = self.tmp_path / "stage3_sharded"
+        source_dir.mkdir()
+        write_jsonl(
+            source_dir / "sentence_stage3_records.jsonl",
+            [
+                {"caption_id": "s1", "tokens": [1]},
+                {"caption_id": "s2", "tokens": [1, 2]},
+            ],
+        )
+        write_jsonl(source_dir / "tag_list_stage3_records.jsonl", [{"caption_id": "t1", "tokens": []}])
+        write_jsonl(
+            source_dir / "stage3_records.jsonl",
+            [
+                {"caption_id": "s1", "tokens": [1]},
+                {"caption_id": "t1", "tokens": []},
+                {"caption_id": "s2", "tokens": [1, 2]},
+            ],
+        )
+        (source_dir / "summary.json").write_text("{}", encoding="utf-8")
+        sharded_summary = {
+            "output_dir": str(source_dir),
+            "model": "en_core_web_trf",
+            "batch_size": 192,
+            "gpu_mode": "require",
+            "gpu_devices": ["0", "1"],
+            "shards": [
+                {
+                    "caption_shape": "sentence",
+                    "shard_index": 0,
+                    "worker_summary": {
+                        "total": 1,
+                        "written": 1,
+                        "token_total": 1,
+                        "noun_chunk_total": 2,
+                        "tag_segment_total": 0,
+                        "protected_span_counts": {"quote": 1},
+                        "gpu_enabled": True,
+                    },
+                },
+                {
+                    "caption_shape": "sentence",
+                    "shard_index": 1,
+                    "worker_summary": {
+                        "total": 1,
+                        "written": 1,
+                        "token_total": 2,
+                        "noun_chunk_total": 3,
+                        "tag_segment_total": 0,
+                        "protected_span_counts": {"quote": 2, "hyphen": 1},
+                        "gpu_enabled": True,
+                    },
+                },
+                {
+                    "caption_shape": "tag_list",
+                    "shard_index": 0,
+                    "worker_summary": {
+                        "total": 1,
+                        "written": 1,
+                        "token_total": 0,
+                        "noun_chunk_total": 0,
+                        "tag_segment_total": 4,
+                        "protected_span_counts": {},
+                        "gpu_enabled": True,
+                    },
+                },
+            ],
+            "stage3_combined": {
+                "total": 3,
+                "written": 3,
+                "caption_shape_counts": {"sentence": 2, "tag_list": 1},
+                "output_path": str(source_dir / "stage3_records.jsonl"),
+            },
+        }
+
+        sentence_summary, tag_summary, combined_summary = self.module._standardize_sharded_stage3_outputs(
+            sharded_summary,
+            standard_stage3_dir=self.tmp_path / "stage3",
+        )
+
+        self.assertEqual(sentence_summary["total"], 2)
+        self.assertEqual(sentence_summary["token_total"], 3)
+        self.assertEqual(sentence_summary["noun_chunk_total"], 5)
+        self.assertEqual(sentence_summary["protected_span_counts"], {"hyphen": 1, "quote": 3})
+        self.assertEqual(tag_summary["total"], 1)
+        self.assertEqual(tag_summary["tag_segment_total"], 4)
+        self.assertTrue(combined_summary["sharded"])
+        self.assertEqual(
+            [row["caption_id"] for row in iter_jsonl(self.tmp_path / "stage3" / "stage3_records.jsonl")],
+            ["s1", "t1", "s2"],
+        )
+
     def test_monolithic_stage456_guard_blocks_large_caption_count(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "monolithic Stage 4/5/6 is not safe"):
             self.module._raise_if_monolithic_stage456_too_large(
@@ -317,6 +553,26 @@ class MixedCaptionPipelineTest(unittest.TestCase):
             max_captions=0,
             output_dir=self.tmp_path / "out",
         )
+
+    def test_stage456_safety_guard_allows_large_sharded_run(self) -> None:
+        self.module._raise_if_stage456_execution_not_safe(
+            caption_total=1_000_000,
+            max_monolithic_captions=250_000,
+            stage456_shards=4,
+            output_dir=self.tmp_path / "out",
+        )
+
+    def test_formal_pipeline_rejects_sharded_stage456_when_facts_are_written(self) -> None:
+        with self.assertRaisesRegex(ValueError, "stage456_shards > 1"):
+            self.module.run_mixed_caption_pipeline(
+                input_paths=[self.tmp_path / "missing.jsonl"],
+                output_dir=self.tmp_path / "out",
+                object_inventory=self.tmp_path / "object.tsv",
+                attribute_inventory=self.tmp_path / "attribute.tsv",
+                action_inventory=self.tmp_path / "action.tsv",
+                stage456_shards=4,
+                stage6_facts_output_mode="write",
+            )
 
 
 def _temp_base() -> Path:
@@ -374,6 +630,21 @@ def _write_action_state(path: Path) -> None:
             "decision_status_counts": {"raw_fallback": 1},
             "needs_manual_rows": 0,
         },
+    )
+
+
+def _hardware(*, cpu_cores: int, gpu_devices: tuple[str, ...]) -> HardwareResources:
+    return HardwareResources(
+        cpu_cores=cpu_cores,
+        cpu_source="test",
+        cpu_quota_cores=float(cpu_cores),
+        affinity_cores=cpu_cores,
+        os_cpu_count=cpu_cores,
+        memory_limit_gib=480.0,
+        memory_limit_source="test",
+        gpu_devices=gpu_devices,
+        gpu_source="test",
+        gpu_metadata=tuple({"index": device} for device in gpu_devices),
     )
 
 

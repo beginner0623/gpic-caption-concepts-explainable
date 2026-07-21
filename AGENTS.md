@@ -47,6 +47,28 @@ verified by command evidence when the result matters.
 
 ## Remote Pod Command Guard
 
+In this desktop Codex environment, the working MLXP Kubernetes context is in
+the `Ubuntu-24.04` WSL distribution, not in the Windows `kubectl` picked from
+Docker Desktop. Before declaring MLXP inaccessible, check:
+
+- `wsl -d Ubuntu-24.04 -- bash -lc "kubectl config current-context"`
+- use `wsl -d Ubuntu-24.04 -- bash -lc "kubectl -n p-production exec <pod> -- <argv...>"`
+  for single bounded remote commands from this desktop session
+
+The Windows command `kubectl config current-context` may report no context and
+`kubectl` may try `localhost:8080`; that is evidence that the wrong local
+kubectl context was used, not evidence that the MLXP pod is unavailable.
+
+MLXP pod names are reservation-specific and expire. Do not rely on a hardcoded
+default pod. When using `scripts\run_mlxp_bash.py` or
+`scripts\run_mlxp_probe_bash.py`, prefer `--pod-prefix <reservation-prefix>` or
+set `MLXP_POD_PREFIX=<reservation-prefix>` when the reservation has exactly one
+Running pod, for example `--pod-prefix prod-rsv-snu14ksh-`. The runner resolves
+the single Running pod and preflights it before sending the remote script. If
+multiple pods match, pass `--pod <current-pod>` explicitly or set
+`MLXP_POD=<current-pod>`. If no pod/prefix is set, the runner must fail before
+issuing `kubectl`.
+
 Do not run MLXP/Kubernetes pod commands by embedding long command strings in
 nested local shells such as:
 
@@ -62,6 +84,11 @@ Preferred remote execution patterns:
 
 - use direct argv commands:
   `kubectl -n <ns> exec <pod> -- git -C /root/work/repo status --short`
+- for file transfer from this desktop session, use direct argv `kubectl cp`
+  through `Ubuntu-24.04` WSL and do not combine the copy with a second remote
+  command in the same local `bash -lc` string. Run verification/extraction as a
+  separate `scripts\run_mlxp_bash.py --pod-prefix <prefix> <script.sh>` step
+  when possible, or `--pod <pod>` when multiple Running pods share the prefix.
 - when running `kubectl exec` from PowerShell, do not append shell pipes such as
   `| grep` to the command. PowerShell interprets the pipe locally after
   `kubectl` returns. Either print the bounded remote output directly, use
@@ -75,6 +102,10 @@ Preferred remote execution patterns:
   foreground. The local `<script.sh>` must be written with ASCII or UTF-8
   without BOM. Do not pipe ad hoc PowerShell here-strings directly into
   `wsl ... kubectl exec ... bash`.
+- when invoking `scripts\run_mlxp_bash.py` or `scripts\run_mlxp_probe_bash.py`
+  from this Codex desktop tool environment, request sandbox escalation. Without
+  escalation, WSL instance creation can fail locally with
+  `Wsl/Service/CreateInstance/E_ACCESSDENIED` before the MLXP command starts.
 - for multi-step remote work, create a checked script file with LF line endings
   and no BOM, copy it to the pod, then execute that script explicitly
 - if stdin script execution is used, first verify no BOM/CRLF issue with a
@@ -83,16 +114,32 @@ Preferred remote execution patterns:
   PowerShell `Set-Content`. Use `git diff --output <patch>` or another
   byte-preserving writer, verify the first bytes are not `EF BB BF`, and run
   `git apply --check` inside the pod before applying.
+- for partial remote code-sync zip files, do not use `Compress-Archive` with a
+  bare list of individual files unless the archive entries have been inspected.
+  It can flatten paths, causing extraction into the remote repository root.
+  Prefer `scripts\build_code_sync_zip.py`, which uses Python `zipfile` with
+  explicit repository-relative `arcname` entries and prints the archive
+  contents before upload.
 - when running Python tests or scripts directly inside the MLXP repo, set
   `PYTHONPATH=<remote_repo>/src${PYTHONPATH:+:$PYTHONPATH}` unless the command
   is executed through a wrapper that is already verified to add the source tree.
   Local `scripts\run_python.ps1` hides this requirement on Windows; the remote
   pod does not. A remote test failure with `ModuleNotFoundError:
   gpic_concepts_v1` is an execution-environment mistake, not a code failure.
+- do not execute Windows PowerShell test wrappers such as `scripts/run_tests.ps1`
+  directly inside Linux MLXP pods. For direct remote tests, use the verified
+  MLXP Python interpreter with `PYTHONPATH` set, for example
+  `PYTHONPATH=<remote_repo>/src /root/work/gpic-linux-env/bin/python -m pytest
+  -p no:cacheprovider ...`.
 - if an incident-clear verification command would need to pass another command
   containing its own `--`, prefer running the verification as a separate
   bounded probe and then clear with the captured evidence. Nested argparse
   remainder parsing is easy to misroute.
+- do not pass `.ps1` files directly as `incident_gate.py clear
+  --verify-command` executables. Python `subprocess` does not execute
+  PowerShell scripts directly on Windows and raises `WinError 193`. Use the
+  project Python executable directly for Python scripts, or call
+  `powershell.exe -File` explicitly when PowerShell is truly required.
 - clearing an incident mutates `.pipeline_state`. In migrated desktop sessions,
   the active repo may be outside the sandbox writable roots even when tests can
   run through approved wrappers. If `incident_gate.py clear` raises
@@ -334,6 +381,9 @@ currently do not have checkpoint/resume. The wrapper refuses
 `run_mixed_caption_pipeline.py`, `run_stage4_extract_raw.py`,
 `run_stage5_canonicalize.py`, and `run_stage6_export_counts.py` by default; use
 `--allow-stage456-timeout` only for a deliberately bounded smoke diagnostic.
+`run_mixed_caption_pipeline.py --dry-run` is the safe exception: it performs no
+pipeline stage execution and may be run through the timeout wrapper to inspect
+the hardware-aware resource plan.
 
 ## Incident Response Guard
 
@@ -604,6 +654,12 @@ when `nvidia-smi` is available:
 
 Do not say "I will check it manually next time" as a substitute for durable
 benchmark instrumentation or documentation.
+
+For portable fixed-lexicon Stage 1-6 speed runs on MLXP or any unknown hardware,
+prefer `scripts/run_mixed_caption_pipeline.py --auto-resources` over hardcoded
+CPU/GPU counts. The mixed runner must record `runtime_resource_plan` in its
+summary/progress output; benchmark writeups should cite that field when
+explaining CPU/GPU/shard choices.
 
 For benchmark answers, do not fix reasoning mistakes by adding more checklist
 rules. Separate reporting from analysis. If a causal explanation is given, first

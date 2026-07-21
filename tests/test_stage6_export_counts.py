@@ -9,6 +9,7 @@ from gpic_concepts_v1.io_jsonl import iter_jsonl, write_jsonl
 from gpic_concepts_v1.schema import CanonicalEdge, CanonicalMention
 from gpic_concepts_v1.schema import MISSING_SOURCE_MENTION_ID
 from gpic_concepts_v1.stage6_export_counts import (
+    COUNT_TABLE_SPECS,
     _count_integrity_report,
     export_count_facts,
     run_stage6_export_counts,
@@ -422,6 +423,55 @@ class Stage6ExportCountsTest(unittest.TestCase):
             with (output_dir / "object_counts.tsv").open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle, delimiter="\t"))
             self.assertEqual(rows[0]["count"], "1")
+        finally:
+            for path in sorted(tmp_path.rglob("*"), reverse=True):
+                if path.is_file():
+                    path.unlink(missing_ok=True)
+                elif path.is_dir():
+                    path.rmdir()
+            tmp_path.rmdir()
+
+    def test_memory_backend_writes_full_header_for_empty_count_tables(self) -> None:
+        mentions = [
+            mention("c1", "m0", "object", "dog", "R19"),
+        ]
+        tmp_path = _stage6_temp_base() / uuid.uuid4().hex
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        try:
+            canonical_mentions_path = tmp_path / "canonical_mentions.jsonl"
+            canonical_edges_path = tmp_path / "canonical_edges.jsonl"
+            output_dir = tmp_path / "stage6"
+            write_jsonl(canonical_mentions_path, mentions)
+            write_jsonl(canonical_edges_path, [])
+
+            run_stage6_export_counts(
+                canonical_mentions_path,
+                canonical_edges_path,
+                output_dir=output_dir,
+                count_backend="memory",
+            )
+
+            spec = next(
+                item
+                for item in COUNT_TABLE_SPECS
+                if item.file_name == "relation_component_counts.tsv"
+            )
+            expected_header = "\t".join(
+                [
+                    "count_key",
+                    *spec.value_fields,
+                    *spec.extra_value_fields,
+                    "count",
+                    "caption_count",
+                    "example_caption_ids",
+                    "raw_variants",
+                    "rule_ids",
+                ]
+            )
+            actual_header = (
+                output_dir / "relation_component_counts.tsv"
+            ).read_text(encoding="utf-8").splitlines()[0]
+            self.assertEqual(actual_header, expected_header)
         finally:
             for path in sorted(tmp_path.rglob("*"), reverse=True):
                 if path.is_file():

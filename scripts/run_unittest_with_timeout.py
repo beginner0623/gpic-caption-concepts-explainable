@@ -67,7 +67,7 @@ def test_temp_root(root: Path) -> Path:
     if configured:
         temp_root = Path(configured)
     else:
-        temp_root = root.parent / ".gpic_tmp" / "gpic-explainable-link-tests"
+        temp_root = root / "outputs" / ".test_tmp" / "gpic-explainable-link-tests"
     temp_root.mkdir(parents=True, exist_ok=True)
     return temp_root
 

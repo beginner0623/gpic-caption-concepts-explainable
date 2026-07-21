@@ -16,7 +16,9 @@ from incident_gate import guarded_entrypoint
 
 from gpic_concepts_v1.stage3_annotate import (
     DEFAULT_STAGE3_BATCH_SIZE,
+    DEFAULT_STAGE3_DISABLED_COMPONENTS,
     DEFAULT_STAGE3_MODEL,
+    normalize_stage3_disabled_components,
     run_stage3_annotate,
 )
 
@@ -54,6 +56,14 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_STAGE3_BATCH_SIZE,
         help=f"spaCy nlp.pipe batch size. Default: {DEFAULT_STAGE3_BATCH_SIZE}",
+    )
+    parser.add_argument(
+        "--disable-components",
+        default=",".join(DEFAULT_STAGE3_DISABLED_COMPONENTS),
+        help=(
+            "Comma-separated spaCy pipeline components to disable for Stage 3. "
+            f"Default: {','.join(DEFAULT_STAGE3_DISABLED_COMPONENTS)}."
+        ),
     )
     parser.add_argument(
         "--caption-shape",
@@ -95,11 +105,12 @@ def main() -> None:
         model=args.model,
         limit=args.limit,
         batch_size=args.batch_size,
-            gpu_mode=gpu_mode,
-            caption_shape=args.caption_shape,
-            progress_output=args.progress_output,
-            progress_interval_records=args.progress_interval_records,
-        )
+        gpu_mode=gpu_mode,
+        disabled_components=normalize_stage3_disabled_components(args.disable_components),
+        caption_shape=args.caption_shape,
+        progress_output=args.progress_output,
+        progress_interval_records=args.progress_interval_records,
+    )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
 
 

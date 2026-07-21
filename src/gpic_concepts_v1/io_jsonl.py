@@ -56,14 +56,25 @@ def to_jsonable(record: object) -> JsonObject:
     return value
 
 
-def write_jsonl(path: str | Path, records: Iterable[object]) -> int:
+def write_jsonl(
+    path: str | Path,
+    records: Iterable[object],
+    *,
+    sort_keys: bool = True,
+    compact: bool = False,
+) -> int:
     """Write records to .jsonl or .jsonl.gz and return row count."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    encoder = json.JSONEncoder(
+        ensure_ascii=False,
+        sort_keys=sort_keys,
+        separators=(",", ":") if compact else None,
+    ).encode
     count = 0
     with open_text(path, "wt") as handle:
         for record in records:
-            handle.write(json.dumps(to_jsonable(record), ensure_ascii=False, sort_keys=True))
+            handle.write(encoder(to_jsonable(record)))
             handle.write("\n")
             count += 1
     return count

@@ -372,7 +372,7 @@ def run_stage6_export_counts(
                 for fact in facts:
                     if handle is not None:
                         handle.write(
-                            json.dumps(to_jsonable(fact), ensure_ascii=False, sort_keys=True),
+                            json.dumps(to_jsonable(fact), ensure_ascii=False, sort_keys=False),
                         )
                         handle.write("\n")
                     count_store.accumulate(fact)
@@ -565,7 +565,11 @@ class _MemoryCountStore:
         for spec in COUNT_TABLE_SPECS:
             rows = _count_rows_from_buckets(self._table_buckets[spec.file_name])
             path = output_root / spec.file_name
-            _write_count_table_tsv(path, rows)
+            _write_count_table_tsv(
+                path,
+                rows,
+                value_fields=(*spec.value_fields, *spec.extra_value_fields),
+            )
             table_paths[spec.file_name] = str(path)
             table_row_counts[spec.file_name] = len(rows)
         return table_paths, table_row_counts
@@ -1607,9 +1611,14 @@ def _collect_value_field(facts: Iterable[FactRow], field: str) -> str:
     return "|".join(sorted(values))
 
 
-def _write_count_table_tsv(path: Path, rows: Sequence[CountRow]) -> None:
+def _write_count_table_tsv(
+    path: Path,
+    rows: Sequence[CountRow],
+    *,
+    value_fields: Sequence[str] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    value_fields = _value_fields(rows)
+    value_fields = tuple(value_fields) if value_fields is not None else tuple(_value_fields(rows))
     fieldnames = [
         "count_key",
         *value_fields,

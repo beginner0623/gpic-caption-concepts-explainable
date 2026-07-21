@@ -81,11 +81,11 @@ def run_stage1_records(
     if tag_rows_path is not None:
         summary["tag_rows_path"] = str(tag_rows_path)
 
-    write_jsonl(caption_records_path, records)
+    write_jsonl(caption_records_path, records, sort_keys=False)
     if sentence_rows_path is not None:
-        write_jsonl(sentence_rows_path, sentence_rows)
+        write_jsonl(sentence_rows_path, sentence_rows, sort_keys=False)
     if tag_rows_path is not None:
-        write_jsonl(tag_rows_path, tag_rows)
+        write_jsonl(tag_rows_path, tag_rows, sort_keys=False)
     if summary_path is not None:
         write_jsonl(summary_path, [summary])
 

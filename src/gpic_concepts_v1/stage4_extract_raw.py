@@ -789,8 +789,8 @@ def run_stage4_extract_raw(
         },
     )
 
-    write_jsonl(raw_mentions_path, all_mentions)
-    write_jsonl(raw_edges_path, all_edges)
+    write_jsonl(raw_mentions_path, all_mentions, sort_keys=False, compact=True)
+    write_jsonl(raw_edges_path, all_edges, sort_keys=False, compact=True)
     summary = {
         "total": total,
         "raw_mentions_path": str(raw_mentions_path),

@@ -145,6 +145,13 @@ class Stage3AnnotateTest(unittest.TestCase):
             self.assertGreater(summary["noun_chunk_total"], 0)
             self.assertEqual(len(records), 1)
             self.assertEqual(summary_rows[0]["model"], DEFAULT_STAGE3_MODEL)
+            self.assertIn("timing_seconds", summary)
+            self.assertIn("model_load", summary["timing_seconds"])
+            self.assertIn("spacy_pipe", summary["timing_seconds"])
+            self.assertIn("record_build_json_write_overhead", summary["timing_seconds"])
+            self.assertEqual(summary["timing_counts"]["profile_scope"], "sentence_stage2_spacy_record_write")
+            self.assertEqual(summary["timing_counts"]["stage2_doc_count"], 1)
+            self.assertEqual(summary["timing_counts"]["stage3_doc_count"], 1)
         finally:
             for path in sorted(tmp_path.rglob("*"), reverse=True):
                 if path.is_file():
@@ -180,6 +187,8 @@ class Stage3AnnotateTest(unittest.TestCase):
             self.assertEqual(summary["total"], 1)
             self.assertEqual(summary["caption_shape"], "tag_list")
             self.assertEqual(summary["tag_segment_total"], 3)
+            self.assertIn("timing_seconds", summary)
+            self.assertEqual(summary["timing_counts"]["profile_scope"], "tag_list_total_only")
             self.assertEqual(len(records[0]["tag_segments"]), 3)
         finally:
             for path in sorted(tmp_path.rglob("*"), reverse=True):
