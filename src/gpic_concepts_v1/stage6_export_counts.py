@@ -84,8 +84,13 @@ COUNT_TABLE_SPECS = (
         ("object",),
         ("parent_concepts", "parent_synset_ids"),
     ),
-    CountTableSpec("attribute_counts.tsv", "attribute_exists", "attribute", ("attribute",)),
-    CountTableSpec("quantity_counts.tsv", "quantity_exists", "quantity", ("quantity",)),
+    CountTableSpec(
+        "attribute_counts.tsv",
+        "attribute_exists",
+        "attribute",
+        ("attribute",),
+        ("attribute_kind",),
+    ),
     CountTableSpec(
         "object_parent_counts.tsv",
         "object_parent",
@@ -98,14 +103,7 @@ COUNT_TABLE_SPECS = (
         "has_attribute",
         "object_attribute_pair",
         ("object", "attribute"),
-        ("object_parent_concepts", "object_parent_synset_ids"),
-    ),
-    CountTableSpec(
-        "object_quantity_pair_counts.tsv",
-        "has_quantity",
-        "object_quantity_pair",
-        ("object", "quantity"),
-        ("object_parent_concepts", "object_parent_synset_ids"),
+        ("attribute_kind", "object_parent_concepts", "object_parent_synset_ids"),
     ),
     CountTableSpec("action_counts.tsv", "action_event", "action", ("action",)),
     CountTableSpec(
@@ -179,8 +177,7 @@ def export_count_facts(
 
     facts: list[FactRow] = []
     facts.extend(_entity_exists_facts(mentions, start_index=len(facts)))
-    facts.extend(_attribute_exists_facts(mentions, start_index=len(facts)))
-    facts.extend(_quantity_exists_facts(mentions, start_index=len(facts)))
+    facts.extend(_attribute_family_exists_facts(mentions, start_index=len(facts)))
     facts.extend(_object_parent_facts(mentions, start_index=len(facts)))
     facts.extend(_action_event_facts(mentions, start_index=len(facts)))
     facts.extend(_edge_facts(edges, mention_by_key, start_index=len(facts)))
@@ -201,12 +198,7 @@ def export_count_facts(
             fact_type="attribute_exists",
             table_key_prefix="attribute",
             value_fields=("attribute",),
-        ),
-        "quantity_counts.tsv": _aggregate_facts(
-            facts,
-            fact_type="quantity_exists",
-            table_key_prefix="quantity",
-            value_fields=("quantity",),
+            extra_value_fields=("attribute_kind",),
         ),
         "object_parent_counts.tsv": _aggregate_facts(
             facts,
@@ -220,14 +212,11 @@ def export_count_facts(
             fact_type="has_attribute",
             table_key_prefix="object_attribute_pair",
             value_fields=("object", "attribute"),
-            extra_value_fields=("object_parent_concepts", "object_parent_synset_ids"),
-        ),
-        "object_quantity_pair_counts.tsv": _aggregate_facts(
-            facts,
-            fact_type="has_quantity",
-            table_key_prefix="object_quantity_pair",
-            value_fields=("object", "quantity"),
-            extra_value_fields=("object_parent_concepts", "object_parent_synset_ids"),
+            extra_value_fields=(
+                "attribute_kind",
+                "object_parent_concepts",
+                "object_parent_synset_ids",
+            ),
         ),
         "action_counts.tsv": _aggregate_facts(
             facts,
@@ -486,8 +475,7 @@ def _caption_facts(
     }
     facts: list[FactRow] = []
     facts.extend(_entity_exists_facts(mentions, start_index=start_index + len(facts)))
-    facts.extend(_attribute_exists_facts(mentions, start_index=start_index + len(facts)))
-    facts.extend(_quantity_exists_facts(mentions, start_index=start_index + len(facts)))
+    facts.extend(_attribute_family_exists_facts(mentions, start_index=start_index + len(facts)))
     facts.extend(_object_parent_facts(mentions, start_index=start_index + len(facts)))
     facts.extend(_action_event_facts(mentions, start_index=start_index + len(facts)))
     facts.extend(_edge_facts(edges, mention_by_key, start_index=start_index + len(facts)))
@@ -1159,15 +1147,16 @@ def _action_event_facts(
     return facts
 
 
-def _attribute_exists_facts(
+def _attribute_family_exists_facts(
     mentions: Sequence[CanonicalMention],
     *,
     start_index: int,
 ) -> list[FactRow]:
     facts: list[FactRow] = []
     for mention in mentions:
-        if mention.mention_type != "attribute":
+        if mention.mention_type not in {"attribute", "quantity"}:
             continue
+        attribute_kind = "quantity" if mention.mention_type == "quantity" else "attribute"
         facts.append(
             _make_fact_row(
                 caption_id=mention.caption_id,
@@ -1179,6 +1168,7 @@ def _attribute_exists_facts(
                 source_edge_ids=[],
                 values={
                     "attribute": mention.canonical,
+                    "attribute_kind": attribute_kind,
                     "raw_variants": [_raw_variant(mention)],
                 },
             ),
@@ -1260,22 +1250,27 @@ def _edge_facts(
         source = _require_mention(mention_by_key, edge.caption_id, edge.source_mention_id)
         target = _require_mention(mention_by_key, edge.caption_id, edge.target_mention_id)
         if edge.edge_type == "has_attribute":
+            fact_type = "has_attribute"
             values = {
                 "object": source.canonical,
                 "attribute": target.canonical,
+                "attribute_kind": "attribute",
                 "object_parent_concepts": source.parent_concepts,
                 "object_parent_synset_ids": _parent_synset_ids(source),
             }
             count_key = f"has_attribute:{source.canonical}:{target.canonical}"
         elif edge.edge_type == "has_quantity":
+            fact_type = "has_attribute"
             values = {
                 "object": source.canonical,
-                "quantity": target.canonical,
+                "attribute": target.canonical,
+                "attribute_kind": "quantity",
                 "object_parent_concepts": source.parent_concepts,
                 "object_parent_synset_ids": _parent_synset_ids(source),
             }
-            count_key = f"has_quantity:{source.canonical}:{target.canonical}"
+            count_key = f"has_attribute:{source.canonical}:{target.canonical}"
         elif edge.edge_type == "event_role":
+            fact_type = edge.edge_type
             raw_role = edge.canonical_detail.get("raw_role")
             voice_normalization = edge.canonical_detail.get("voice_normalization")
             values = {
@@ -1293,6 +1288,7 @@ def _edge_facts(
             }
             count_key = f"event_role:{source.canonical}:{edge.canonical_label}:{target.canonical}"
         elif edge.edge_type == "relation":
+            fact_type = edge.edge_type
             values = {
                 "source": source.canonical,
                 "relation": edge.canonical_label,
@@ -1310,7 +1306,7 @@ def _edge_facts(
             _make_fact_row(
                 caption_id=edge.caption_id,
                 fact_index=start_index + len(facts),
-                fact_type=edge.edge_type,
+                fact_type=fact_type,
                 count_key=count_key,
                 rule_ids=_edge_rule_ids(edge, source, target),
                 source_mention_ids=[edge.source_mention_id, edge.target_mention_id],

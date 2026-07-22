@@ -32,6 +32,10 @@ establish the active repo root:
 
 - use the absolute `workdir` above for shell commands
 - do not rely on the conversation default cwd
+- when using `apply_patch` from a migrated/long-lived conversation, patch files
+  by absolute path under the active repo root above. `apply_patch` does not take
+  a shell `workdir`, so relative patch paths can silently edit the old
+  conversation workspace instead of the active repository.
 - if the current cwd is not the active root above, switch immediately to the
   active root for repo inspection and command execution
 - if a command says `src`, `docs`, or expected pipeline files are missing, do
@@ -102,6 +106,11 @@ Preferred remote execution patterns:
   foreground. The local `<script.sh>` must be written with ASCII or UTF-8
   without BOM. Do not pipe ad hoc PowerShell here-strings directly into
   `wsl ... kubectl exec ... bash`.
+- Do not run `scripts\run_script_with_timeout.py`,
+  `scripts\run_mlxp_bash.py`, `scripts\run_mlxp_probe_bash.py`, or
+  `scripts\incident_gate.py run` in `multi_tool_use.parallel`. They share the
+  incident/current-run guard, so parallel guarded executions can block each
+  other and produce misleading failures. Run guarded commands serially.
 - when invoking `scripts\run_mlxp_bash.py` or `scripts\run_mlxp_probe_bash.py`
   from this Codex desktop tool environment, request sandbox escalation. Without
   escalation, WSL instance creation can fail locally with

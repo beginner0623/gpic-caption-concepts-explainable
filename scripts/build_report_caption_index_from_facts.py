@@ -261,6 +261,8 @@ def _add_simple_fact_index(fact: Mapping[str, Any], add: Any) -> None:
         add("objects", _key(values.get("object")), caption_id)
     elif fact_type == "attribute_exists":
         add("attributes", _key(values.get("attribute")), caption_id)
+    elif fact_type == "quantity_exists":
+        add("attributes", _key(values.get("quantity")), caption_id)
     elif fact_type == "action_event":
         add("actions", _key(values.get("action")), caption_id)
     elif fact_type == "relation":
@@ -279,6 +281,12 @@ def _add_simple_fact_index(fact: Mapping[str, Any], add: Any) -> None:
         add(
             "attribute_object_pairs",
             _key(values.get("object"), values.get("attribute")),
+            caption_id,
+        )
+    elif fact_type == "has_quantity":
+        add(
+            "attribute_object_pairs",
+            _key(values.get("object"), values.get("quantity")),
             caption_id,
         )
     elif fact_type == "relation_component":

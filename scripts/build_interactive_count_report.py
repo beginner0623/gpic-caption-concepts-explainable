@@ -32,6 +32,7 @@ VIEW_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default_dir": "desc",
         "columns": [
             "canonical_attribute",
+            "attribute_kind",
             "attribute_raw_surfaces",
             "count",
             "caption_count",
@@ -92,6 +93,7 @@ VIEW_DEFINITIONS: dict[str, dict[str, Any]] = {
             "object_raw_surfaces",
             "object_parent_concepts",
             "attribute",
+            "attribute_kind",
             "attribute_raw_surfaces",
             "count",
             "caption_count",
@@ -269,13 +271,7 @@ def build_report_rows(
             raw_field="object_raw_surfaces",
             parent_prefix="object",
         ),
-        "attributes": _aggregate_mentions(
-            mentions,
-            mention_type="attribute",
-            value_field="canonical_attribute",
-            raw_field="attribute_raw_surfaces",
-            parent_prefix=None,
-        ),
+        "attributes": _aggregate_attribute_family_mentions(mentions),
         "actions": _aggregate_mentions(
             mentions,
             mention_type="action",
@@ -331,6 +327,7 @@ def build_report_rows_from_stage6(
             stage6_dir / "attribute_counts.tsv",
             lambda row: {
                 "canonical_attribute": row.get("attribute", ""),
+                "attribute_kind": row.get("attribute_kind", "attribute") or "attribute",
                 "attribute_raw_surfaces": row.get("raw_variants", ""),
                 "count": row.get("count", 0),
                 "caption_count": row.get("caption_count", 0),
@@ -338,6 +335,19 @@ def build_report_rows_from_stage6(
                 "_caption_ids": row.get("example_caption_ids", ""),
             },
         )
+        if _should_append_legacy_quantity_rows(stage6_dir):
+            yield from _stage6_tsv_rows(
+                stage6_dir / "quantity_counts.tsv",
+                lambda row: {
+                    "canonical_attribute": row.get("quantity", ""),
+                    "attribute_kind": "quantity",
+                    "attribute_raw_surfaces": row.get("raw_variants", ""),
+                    "count": row.get("count", 0),
+                    "caption_count": row.get("caption_count", 0),
+                    "example_caption_ids": row.get("example_caption_ids", ""),
+                    "_caption_ids": row.get("example_caption_ids", ""),
+                },
+            )
 
     def action_rows() -> Iterable[dict[str, Any]]:
         yield from _stage6_tsv_rows(
@@ -395,6 +405,7 @@ def build_report_rows_from_stage6(
                 "object_raw_surfaces": _lookup_raw_surface(lookups["objects"], row.get("object", "")),
                 "object_parent_concepts": row.get("object_parent_concepts", ""),
                 "attribute": row.get("attribute", ""),
+                "attribute_kind": row.get("attribute_kind", "attribute") or "attribute",
                 "attribute_raw_surfaces": _lookup_raw_surface(lookups["attributes"], row.get("attribute", "")),
                 "count": row.get("count", 0),
                 "caption_count": row.get("caption_count", 0),
@@ -402,6 +413,22 @@ def build_report_rows_from_stage6(
                 "_caption_ids": row.get("example_caption_ids", ""),
             },
         )
+        if _should_append_legacy_quantity_pair_rows(stage6_dir):
+            yield from _stage6_tsv_rows(
+                stage6_dir / "object_quantity_pair_counts.tsv",
+                lambda row: {
+                    "object": row.get("object", ""),
+                    "object_raw_surfaces": _lookup_raw_surface(lookups["objects"], row.get("object", "")),
+                    "object_parent_concepts": row.get("object_parent_concepts", ""),
+                    "attribute": row.get("quantity", ""),
+                    "attribute_kind": "quantity",
+                    "attribute_raw_surfaces": _lookup_raw_surface(lookups["attributes"], row.get("quantity", "")),
+                    "count": row.get("count", 0),
+                    "caption_count": row.get("caption_count", 0),
+                    "example_caption_ids": row.get("example_caption_ids", ""),
+                    "_caption_ids": row.get("example_caption_ids", ""),
+                },
+            )
 
     def role_rows(role: str, object_column: str, raw_column: str, parent_column: str) -> Iterable[dict[str, Any]]:
         yield from _stage6_tsv_rows(
@@ -516,11 +543,38 @@ def _load_stage6_entity_lookups(stage6_dir: Path) -> dict[str, dict[str, dict[st
         key = row.get("attribute", "")
         if key:
             lookups["attributes"][key] = {"raw_surfaces": row.get("raw_variants", "")}
+    if _should_append_legacy_quantity_rows(stage6_dir):
+        for row in _iter_tsv(stage6_dir / "quantity_counts.tsv"):
+            key = row.get("quantity", "")
+            if key and key not in lookups["attributes"]:
+                lookups["attributes"][key] = {"raw_surfaces": row.get("raw_variants", "")}
     for row in _iter_tsv(stage6_dir / "action_counts.tsv"):
         key = row.get("action", "")
         if key:
             lookups["actions"][key] = {"raw_surfaces": row.get("raw_variants", "")}
     return lookups
+
+
+def _should_append_legacy_quantity_rows(stage6_dir: Path) -> bool:
+    quantity_path = stage6_dir / "quantity_counts.tsv"
+    if not quantity_path.exists():
+        return False
+    return "attribute_kind" not in _tsv_fieldnames(stage6_dir / "attribute_counts.tsv")
+
+
+def _should_append_legacy_quantity_pair_rows(stage6_dir: Path) -> bool:
+    quantity_pair_path = stage6_dir / "object_quantity_pair_counts.tsv"
+    if not quantity_pair_path.exists():
+        return False
+    return "attribute_kind" not in _tsv_fieldnames(stage6_dir / "object_attribute_pair_counts.tsv")
+
+
+def _tsv_fieldnames(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        return [str(field) for field in (reader.fieldnames or [])]
 
 
 def _stage6_role_row(
@@ -617,13 +671,40 @@ def _aggregate_mentions(
     return _sort_count_rows(rows)
 
 
+def _aggregate_attribute_family_mentions(
+    mentions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for mention in mentions:
+        if mention.get("mention_type") in {"attribute", "quantity"}:
+            buckets[str(mention.get("canonical") or "")].append(mention)
+
+    rows: list[dict[str, Any]] = []
+    for canonical, bucket in buckets.items():
+        rows.append(
+            {
+                "canonical_attribute": canonical,
+                "attribute_kind": _join_sorted(
+                    "quantity" if mention.get("mention_type") == "quantity" else "attribute"
+                    for mention in bucket
+                ),
+                "attribute_raw_surfaces": _join_sorted({_raw_surface(mention) for mention in bucket}),
+                "count": len(bucket),
+                "caption_count": _caption_count(bucket),
+                "example_caption_ids": _example_caption_ids(bucket),
+                "_caption_ids": _caption_ids(bucket),
+            },
+        )
+    return _sort_count_rows(rows)
+
+
 def _aggregate_attribute_object_pairs(
     edges: list[dict[str, Any]],
     mentions_by_key: Mapping[tuple[str, str], dict[str, Any]],
 ) -> list[dict[str, Any]]:
     buckets: dict[tuple[str, str], list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]] = defaultdict(list)
     for edge in edges:
-        if edge.get("edge_type") != "has_attribute":
+        if edge.get("edge_type") not in {"has_attribute", "has_quantity"}:
             continue
         source = _lookup_mention(mentions_by_key, edge, "source_mention_id")
         target = _lookup_mention(mentions_by_key, edge, "target_mention_id")
@@ -648,6 +729,10 @@ def _aggregate_attribute_object_pairs(
                     if synset_id
                 ),
                 "attribute": attr,
+                "attribute_kind": _join_sorted(
+                    "quantity" if target.get("mention_type") == "quantity" else "attribute"
+                    for _, _, target in bucket
+                ),
                 "attribute_raw_surfaces": _join_sorted(_raw_surface(target) for _, _, target in bucket),
                 "count": len(bucket),
                 "caption_count": _caption_count(edge for edge, _, _ in bucket),

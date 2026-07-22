@@ -152,12 +152,12 @@ class Stage6ExportCountsTest(unittest.TestCase):
         result = export_count_facts(mentions, edges)
         fact_types = [fact.fact_type for fact in result.facts]
         self.assertEqual(fact_types.count("entity_exists"), 4)
-        self.assertEqual(fact_types.count("attribute_exists"), 1)
-        self.assertEqual(fact_types.count("quantity_exists"), 1)
+        self.assertEqual(fact_types.count("attribute_exists"), 2)
+        self.assertEqual(fact_types.count("quantity_exists"), 0)
         self.assertEqual(fact_types.count("object_parent"), 1)
         self.assertEqual(fact_types.count("action_event"), 1)
-        self.assertEqual(fact_types.count("has_attribute"), 1)
-        self.assertEqual(fact_types.count("has_quantity"), 1)
+        self.assertEqual(fact_types.count("has_attribute"), 2)
+        self.assertEqual(fact_types.count("has_quantity"), 0)
         self.assertEqual(fact_types.count("event_role"), 1)
         self.assertEqual(fact_types.count("relation"), 2)
         self.assertEqual(fact_types.count("ambiguous_relation_candidate"), 1)
@@ -170,7 +170,16 @@ class Stage6ExportCountsTest(unittest.TestCase):
         self.assertIn("relation:cat:on:mat", relation_keys)
 
         attribute_rows = result.count_tables["attribute_counts.tsv"]
-        self.assertEqual(attribute_rows[0].count_key, "attribute:red")
+        attribute_keys = {row.count_key for row in attribute_rows}
+        self.assertEqual(attribute_keys, {"attribute:red", "attribute:two"})
+        self.assertEqual(
+            next(row for row in attribute_rows if row.count_key == "attribute:red").values["attribute_kind"],
+            "attribute",
+        )
+        self.assertEqual(
+            next(row for row in attribute_rows if row.count_key == "attribute:two").values["attribute_kind"],
+            "quantity",
+        )
         object_rows = result.count_tables["object_counts.tsv"]
         dog_row = next(row for row in object_rows if row.count_key == "object:dog")
         self.assertEqual(dog_row.raw_variants, ["dogs"])
@@ -209,7 +218,20 @@ class Stage6ExportCountsTest(unittest.TestCase):
         parent_rows = result.count_tables["object_parent_counts.tsv"]
         self.assertEqual(parent_rows[0].values["parent_synset_id"], "oewn-animal-n")
         object_attribute_rows = result.count_tables["object_attribute_pair_counts.tsv"]
+        object_attribute_keys = {row.count_key for row in object_attribute_rows}
+        self.assertEqual(
+            object_attribute_keys,
+            {"object_attribute_pair:dog:red", "object_attribute_pair:dog:two"},
+        )
         self.assertNotIn("attribute_type", object_attribute_rows[0].values)
+        self.assertEqual(
+            next(
+                row
+                for row in object_attribute_rows
+                if row.count_key == "object_attribute_pair:dog:two"
+            ).values["attribute_kind"],
+            "quantity",
+        )
 
     def test_ambiguous_relation_candidate_count_is_per_mwe_occurrence(self) -> None:
         mentions = [

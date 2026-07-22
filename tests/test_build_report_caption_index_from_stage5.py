@@ -179,6 +179,20 @@ class BuildReportCaptionIndexFromStage5Test(unittest.TestCase):
                     "1",
                 ],
             )
+            with sqlite3.connect(stage5_db) as conn:
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT attribute_kind FROM attributes WHERE canonical_attribute = 'two'",
+                    ).fetchone(),
+                    ("quantity",),
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT attribute_kind FROM attribute_object_pairs "
+                        "WHERE object = 'ball' AND attribute = 'two'",
+                    ).fetchone(),
+                    ("quantity",),
+                )
         finally:
             shutil.rmtree(tmp_path, ignore_errors=True)
 
@@ -197,6 +211,7 @@ def _sample_mentions() -> list[CanonicalMention]:
         mention("c1", "m1", "object", "ball", raw_text="ball"),
         mention("c1", "m2", "action", "chase", raw_text="chased"),
         mention("c1", "m3", "attribute", "red", raw_text="red"),
+        mention("c1", "m4", "quantity", "two", raw_text="two"),
         mention("c2", "m0", "object", "cat", raw_text="cat"),
         mention("c2", "m1", "object", "mat", raw_text="mat"),
         mention("c2", "m2", "action", "sit", raw_text="sat"),
@@ -208,6 +223,7 @@ def _sample_edges() -> list[CanonicalEdge]:
         edge("c1", "e0", "event_role", "m2", "m0", "agent"),
         edge("c1", "e1", "event_role", "m2", "m1", "patient"),
         edge("c1", "e2", "has_attribute", "m1", "m3", "has_attribute"),
+        edge("c1", "e4", "has_quantity", "m1", "m4", "has_quantity"),
         edge("c1", "e3", "relation", "m0", "m1", "near"),
         edge("c2", "e0", "event_role", "m2", "m0", "agent"),
         edge("c2", "e1", "relation", "m0", "m1", "on"),
